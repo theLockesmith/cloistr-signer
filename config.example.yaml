@@ -1,0 +1,25 @@
+# Coldforge Signer Configuration
+# Copy to config.yaml and modify as needed
+
+server:
+  address: ":7777"
+
+# Relays to connect to for NIP-46 messages
+relays:
+  - "wss://relay.coldforge.xyz"
+  - "wss://relay.damus.io"
+
+# Storage backend configuration
+storage:
+  # type: memory | postgres | sqlite
+  type: "memory"
+  # DSN for postgres/sqlite (not needed for memory)
+  # dsn: "postgres://user:pass@localhost:5432/signer"
+  # Vault URL for secret encryption (optional)
+  # vault_url: "http://vault:8200"
+
+# Authentication
+auth:
+  # Admin pubkeys that can manage keys via API
+  admin_pubkeys:
+    - "your-admin-pubkey-hex"
