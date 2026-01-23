@@ -193,7 +193,8 @@ func (m *MemoryStorage) SetPermission(ctx context.Context, perm *Permission) err
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, exists := m.keys[perm.KeyID]; !exists {
+	// KeyID is the full pubkey, so check keysByPubkey
+	if _, exists := m.keysByPubkey[perm.KeyID]; !exists {
 		return ErrKeyNotFound
 	}
 

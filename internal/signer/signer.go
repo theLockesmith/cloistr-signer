@@ -69,26 +69,24 @@ func (s *Signer) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to load keys: %w", err)
 	}
 
-	if len(keys) == 0 {
-		slog.Warn("no keys configured, signer will not respond to requests")
-		return nil
-	}
-
-	// Build pubkey list for subscription filter
-	pubkeys := make([]string, len(keys))
-	for i, key := range keys {
-		pubkeys[i] = key.Pubkey
-		// In production, decrypt from Vault
+	// Load any existing keys into runtime map
+	for _, key := range keys {
 		s.keys[key.Pubkey] = key.EncryptedNsec
 	}
 
-	// Subscribe to NIP-46 requests tagged to our pubkeys
+	if len(keys) == 0 {
+		slog.Warn("no keys configured yet, will respond once keys are added via API")
+	} else {
+		slog.Info("loaded keys from storage", "count", len(keys))
+	}
+
+	// Subscribe to ALL kind:24133 events - we filter by our keys in handleEvent
+	// This allows dynamic key addition via the HTTP API
 	filters := nostr.Filters{{
 		Kinds: []int{KindNIP46Request},
-		Tags:  nostr.TagMap{"p": pubkeys},
 	}}
 
-	slog.Info("subscribing to NIP-46 requests", "pubkeys", len(pubkeys))
+	slog.Info("subscribing to NIP-46 requests")
 
 	go s.relayClient.SubscribeWithReconnect(ctx, filters, s.handleEvent)
 
