@@ -11,10 +11,11 @@ import (
 
 // Config holds all configuration for the signer service
 type Config struct {
-	Server  ServerConfig  `yaml:"server"`
-	Relays  []string      `yaml:"relays"`
-	Storage StorageConfig `yaml:"storage"`
-	Auth    AuthConfig    `yaml:"auth"`
+	Server       ServerConfig  `yaml:"server"`
+	Relays       []string      `yaml:"relays"`
+	RelayAuthKey string        `yaml:"relay_auth_key"` // Private key for NIP-42 relay auth (hex)
+	Storage      StorageConfig `yaml:"storage"`
+	Auth         AuthConfig    `yaml:"auth"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -66,6 +67,10 @@ func Load() (*Config, error) {
 
 	if relays := os.Getenv("RELAYS"); relays != "" {
 		cfg.Relays = strings.Split(relays, ",")
+	}
+
+	if authKey := os.Getenv("RELAY_AUTH_KEY"); authKey != "" {
+		cfg.RelayAuthKey = authKey
 	}
 
 	if storageType := os.Getenv("STORAGE_TYPE"); storageType != "" {

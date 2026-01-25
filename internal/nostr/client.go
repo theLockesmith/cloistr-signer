@@ -3,6 +3,7 @@ package nostr
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 type Client struct {
 	relayURLs []string
 	relays    map[string]*nostr.Relay
+	authKey   string // Private key for NIP-42 auth (hex)
 	mu        sync.RWMutex
 }
 
@@ -22,6 +24,13 @@ func NewClient(relayURLs []string) *Client {
 		relayURLs: relayURLs,
 		relays:    make(map[string]*nostr.Relay),
 	}
+}
+
+// SetAuthKey sets the private key to use for NIP-42 authentication
+func (c *Client) SetAuthKey(privateKeyHex string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.authKey = privateKeyHex
 }
 
 // Connect establishes connections to all configured relays
@@ -37,12 +46,37 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 		c.relays[url] = relay
 		slog.Info("connected to relay", "url", url)
+
+		// Try to authenticate if we have an auth key
+		if c.authKey != "" {
+			if err := c.authenticateRelay(ctx, relay); err != nil {
+				slog.Warn("initial auth failed", "url", url, "error", err)
+				// Continue anyway - auth might not be required for reading
+			}
+		}
 	}
 
 	if len(c.relays) == 0 {
 		slog.Warn("no relays connected")
 	}
 
+	return nil
+}
+
+// authenticateRelay performs NIP-42 authentication with a relay
+func (c *Client) authenticateRelay(ctx context.Context, relay *nostr.Relay) error {
+	err := relay.Auth(ctx, func(event *nostr.Event) error {
+		pubkey, err := nostr.GetPublicKey(c.authKey)
+		if err != nil {
+			return err
+		}
+		event.PubKey = pubkey
+		return event.Sign(c.authKey)
+	})
+	if err != nil {
+		return err
+	}
+	slog.Info("authenticated with relay", "url", relay.URL)
 	return nil
 }
 
@@ -67,7 +101,21 @@ func (c *Client) Publish(ctx context.Context, event *nostr.Event) error {
 	successCount := 0
 
 	for url, relay := range c.relays {
-		if err := relay.Publish(ctx, *event); err != nil {
+		err := relay.Publish(ctx, *event)
+		if err != nil {
+			// Check if auth is required
+			if c.authKey != "" && isAuthRequired(err) {
+				slog.Info("auth required, authenticating", "url", url)
+				if authErr := c.authenticateRelay(ctx, relay); authErr != nil {
+					slog.Warn("auth failed", "url", url, "error", authErr)
+				} else {
+					// Retry publish after auth
+					err = relay.Publish(ctx, *event)
+				}
+			}
+		}
+
+		if err != nil {
 			slog.Warn("failed to publish to relay", "url", url, "error", err)
 			lastErr = err
 			continue
@@ -80,6 +128,16 @@ func (c *Client) Publish(ctx context.Context, event *nostr.Event) error {
 		return nil
 	}
 	return lastErr
+}
+
+// isAuthRequired checks if an error indicates authentication is required
+func isAuthRequired(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "auth-required") ||
+		strings.Contains(errStr, "authentication required")
 }
 
 // Subscribe creates a subscription on all connected relays

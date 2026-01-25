@@ -43,6 +43,12 @@ func main() {
 	// Initialize relay client
 	relayClient := nostr.NewClient(cfg.Relays)
 
+	// Set auth key for NIP-42 relay authentication
+	if cfg.RelayAuthKey != "" {
+		relayClient.SetAuthKey(cfg.RelayAuthKey)
+		slog.Info("NIP-42 relay auth enabled")
+	}
+
 	// Initialize NIP-46 signer
 	nip46Signer := signer.New(cfg, store, relayClient)
 

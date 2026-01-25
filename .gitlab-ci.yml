@@ -1,0 +1,24 @@
+stages:
+  - build
+
+variables:
+  DOCKER_IMAGE: registry.coldforge.xyz/coldforge/coldforge-signer
+
+build:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "${DOCKER_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+      --destination "${DOCKER_IMAGE}:latest"
+  only:
+    - master
+    - main
+  tags:
+    - kubernetes
