@@ -77,6 +77,16 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 	// Status
 	mux.HandleFunc("/api/v1/status", h.handleStatus)
+
+	// Bunker URI
+	mux.HandleFunc("/api/v1/keys/", h.handleKeyByID) // Already handles /keys/{id}/connect
+	mux.HandleFunc("/api/v1/bunker/", h.handleBunkerConnect)
+
+	// NIP-05
+	mux.HandleFunc("/.well-known/nostr.json", h.handleNIP05)
+
+	// Audit logs
+	mux.HandleFunc("/api/v1/audit", h.handleAuditLogs)
 }
 
 // Health check response
@@ -1628,6 +1638,134 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	status := h.signer.GetStatus()
 	h.jsonResponse(w, http.StatusOK, status)
+}
+
+// Bunker URI endpoints
+
+type BunkerConnectResponse struct {
+	BunkerURI    string   `json:"bunker_uri"`
+	SignerPubkey string   `json:"signer_pubkey"`
+	Relays       []string `json:"relays"`
+	Secret       string   `json:"secret,omitempty"`
+}
+
+func (h *Handler) handleBunkerConnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Parse key ID from path: /api/v1/bunker/{keyID}
+	keyID := strings.TrimPrefix(r.URL.Path, "/api/v1/bunker/")
+	if keyID == "" {
+		h.errorResponse(w, http.StatusBadRequest, "missing key ID")
+		return
+	}
+
+	// Get the key
+	key, err := h.storage.GetKey(r.Context(), keyID)
+	if err != nil {
+		if err == storage.ErrKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Generate secret
+	secretBytes := make([]byte, 16)
+	rand.Read(secretBytes)
+	secret := fmt.Sprintf("%x", secretBytes)
+
+	// Build bunker URI
+	// bunker://<pubkey>?relay=<relay>&secret=<secret>
+	relays := h.config.Relays
+	params := make([]string, 0, len(relays)+1)
+	for _, relay := range relays {
+		params = append(params, "relay="+relay)
+	}
+	params = append(params, "secret="+secret)
+
+	bunkerURI := fmt.Sprintf("bunker://%s?%s", key.Pubkey, strings.Join(params, "&"))
+
+	slog.Info("generated bunker URI", "key", keyID, "pubkey", key.Pubkey[:16]+"...")
+
+	h.jsonResponse(w, http.StatusOK, BunkerConnectResponse{
+		BunkerURI:    bunkerURI,
+		SignerPubkey: key.Pubkey,
+		Relays:       relays,
+		Secret:       secret,
+	})
+}
+
+// NIP-05 endpoint
+
+type NIP05Response struct {
+	Names  map[string]string   `json:"names"`
+	Relays map[string][]string `json:"relays,omitempty"`
+}
+
+func (h *Handler) handleNIP05(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	name := r.URL.Query().Get("name")
+
+	response := NIP05Response{
+		Names:  make(map[string]string),
+		Relays: make(map[string][]string),
+	}
+
+	// Get all keys and create name mappings
+	keys, err := h.storage.ListKeys(r.Context())
+	if err != nil {
+		h.jsonResponse(w, http.StatusOK, response)
+		return
+	}
+
+	for _, key := range keys {
+		keyName := key.Name
+		if keyName == "" {
+			keyName = key.ID
+		}
+		// Sanitize name for NIP-05 (lowercase, no spaces)
+		keyName = strings.ToLower(strings.ReplaceAll(keyName, " ", "-"))
+
+		if name == "" || name == keyName {
+			response.Names[keyName] = key.Pubkey
+			response.Relays[key.Pubkey] = h.config.Relays
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(response)
+}
+
+// Audit log endpoint
+
+type AuditLogEntry struct {
+	ID        string                 `json:"id"`
+	Timestamp string                 `json:"timestamp"`
+	Type      string                 `json:"type"`
+	Actor     string                 `json:"actor,omitempty"`
+	Target    string                 `json:"target,omitempty"`
+	Action    string                 `json:"action,omitempty"`
+	Success   bool                   `json:"success"`
+	Details   map[string]interface{} `json:"details,omitempty"`
+}
+
+func (h *Handler) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// For now, return empty list - audit logs will be added when audit logger is integrated
+	h.jsonResponse(w, http.StatusOK, []AuditLogEntry{})
 }
 
 // Helper methods

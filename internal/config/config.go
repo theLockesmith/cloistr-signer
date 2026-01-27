@@ -16,6 +16,9 @@ type Config struct {
 	RelayAuthKey string        `yaml:"relay_auth_key"` // Private key for NIP-42 relay auth (hex)
 	Storage      StorageConfig `yaml:"storage"`
 	Auth         AuthConfig    `yaml:"auth"`
+	Vault        VaultConfig   `yaml:"vault"`
+	Audit        AuditConfig   `yaml:"audit"`
+	Service      ServiceConfig `yaml:"service"`
 }
 
 // ServerConfig holds HTTP server configuration
@@ -43,6 +46,31 @@ type AuthConfig struct {
 	LockoutMinutes       int      `yaml:"lockout_minutes"`        // Lockout duration in minutes (default: 15)
 }
 
+// VaultConfig holds HashiCorp Vault configuration
+type VaultConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	Address   string `yaml:"address"`    // Vault address (e.g., http://vault:8200)
+	Token     string `yaml:"token"`      // Vault token
+	MountPath string `yaml:"mount_path"` // KV secrets mount path (default: secret)
+}
+
+// AuditConfig holds audit logging configuration
+type AuditConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Backend  string `yaml:"backend"`   // "memory", "file", "json"
+	FilePath string `yaml:"file_path"` // Path for file/json backend
+	MaxEvents int   `yaml:"max_events"` // Max events to retain (memory backend)
+}
+
+// ServiceConfig holds service metadata for NIP-89 and NIP-05
+type ServiceConfig struct {
+	Name        string `yaml:"name"`         // Service name
+	Description string `yaml:"description"`  // Service description
+	Website     string `yaml:"website"`      // Public URL
+	NIP05Domain string `yaml:"nip05_domain"` // Domain for NIP-05 (e.g., coldforge.xyz)
+	PublishNIP89 bool  `yaml:"publish_nip89"` // Publish NIP-89 announcements
+}
+
 // Load loads configuration from environment variables and optional YAML file
 func Load() (*Config, error) {
 	cfg := &Config{
@@ -65,6 +93,20 @@ func Load() (*Config, error) {
 			MFAIssuer:            "Coldforge",
 			MaxFailedLogins:      5,
 			LockoutMinutes:       15,
+		},
+		Vault: VaultConfig{
+			Enabled:   false,
+			MountPath: "secret",
+		},
+		Audit: AuditConfig{
+			Enabled:   true,
+			Backend:   "memory",
+			MaxEvents: 10000,
+		},
+		Service: ServiceConfig{
+			Name:         "Coldforge Signer",
+			Description:  "NIP-46 Remote Signing Service",
+			PublishNIP89: false,
 		},
 	}
 
@@ -135,6 +177,48 @@ func Load() (*Config, error) {
 
 	if lockout := os.Getenv("LOCKOUT_MINUTES"); lockout != "" {
 		cfg.Auth.LockoutMinutes = getEnvInt("LOCKOUT_MINUTES", 15)
+	}
+
+	// Vault configuration
+	if vaultEnabled := os.Getenv("VAULT_ENABLED"); vaultEnabled == "true" || vaultEnabled == "1" {
+		cfg.Vault.Enabled = true
+	}
+	if vaultAddr := os.Getenv("VAULT_ADDR"); vaultAddr != "" {
+		cfg.Vault.Address = vaultAddr
+	}
+	if vaultToken := os.Getenv("VAULT_TOKEN"); vaultToken != "" {
+		cfg.Vault.Token = vaultToken
+	}
+	if vaultMount := os.Getenv("VAULT_MOUNT_PATH"); vaultMount != "" {
+		cfg.Vault.MountPath = vaultMount
+	}
+
+	// Audit configuration
+	if auditEnabled := os.Getenv("AUDIT_ENABLED"); auditEnabled != "" {
+		cfg.Audit.Enabled = auditEnabled == "true" || auditEnabled == "1"
+	}
+	if auditBackend := os.Getenv("AUDIT_BACKEND"); auditBackend != "" {
+		cfg.Audit.Backend = auditBackend
+	}
+	if auditPath := os.Getenv("AUDIT_FILE_PATH"); auditPath != "" {
+		cfg.Audit.FilePath = auditPath
+	}
+
+	// Service configuration
+	if serviceName := os.Getenv("SERVICE_NAME"); serviceName != "" {
+		cfg.Service.Name = serviceName
+	}
+	if serviceDesc := os.Getenv("SERVICE_DESCRIPTION"); serviceDesc != "" {
+		cfg.Service.Description = serviceDesc
+	}
+	if serviceURL := os.Getenv("SERVICE_URL"); serviceURL != "" {
+		cfg.Service.Website = serviceURL
+	}
+	if nip05Domain := os.Getenv("NIP05_DOMAIN"); nip05Domain != "" {
+		cfg.Service.NIP05Domain = nip05Domain
+	}
+	if publishNIP89 := os.Getenv("PUBLISH_NIP89"); publishNIP89 == "true" || publishNIP89 == "1" {
+		cfg.Service.PublishNIP89 = true
 	}
 
 	return cfg, nil
