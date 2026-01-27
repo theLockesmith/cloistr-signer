@@ -28,10 +28,11 @@ docker build -t coldforge-signer .
 cmd/signer/main.go          # Entry point, server setup
 internal/
   config/config.go          # Configuration (env + yaml)
-  storage/storage.go        # Key and permission storage
+  storage/storage.go        # Key, permission, and user storage
   nostr/client.go           # Relay client with NIP-42 auth
   signer/signer.go          # NIP-46 request handling
   api/handler.go            # HTTP management API
+  auth/auth.go              # JWT, bcrypt, TOTP, backup codes
 ```
 
 ## NIP-46 Methods Supported
@@ -85,6 +86,17 @@ internal/
 - `POST /api/v1/requests/{id}/approve` - Approve request
 - `POST /api/v1/requests/{id}/deny` - Deny request
 
+### User Management
+- `POST /api/v1/users/register` - Register new user (username/email/password)
+- `POST /api/v1/users/login` - Login (returns JWT, supports MFA)
+- `POST /api/v1/users/logout` - Logout (revokes sessions)
+- `GET /api/v1/users/me` - Get current user info (requires JWT)
+- `POST /api/v1/users/mfa/setup` - Setup MFA (returns secret + backup codes)
+- `POST /api/v1/users/mfa/verify` - Verify MFA code and enable
+- `POST /api/v1/users/mfa/disable` - Disable MFA (requires current code)
+- `GET /api/v1/users/sessions` - List active sessions
+- `DELETE /api/v1/users/sessions` - Revoke all sessions
+
 ## Configuration
 
 | Env Variable | Description | Default |
@@ -99,6 +111,11 @@ internal/
 | `REQUIRE_APPROVAL` | Require approval for unknown clients | `true` |
 | `AUTHORIZATION_TIMEOUT` | Timeout for authorization in seconds | `60` |
 | `NOTIFY_ADMINS` | Send DMs to admins for pending requests | `true` |
+| `JWT_SECRET` | Secret for JWT signing (required for user auth) | (none) |
+| `JWT_EXPIRY` | JWT expiry in hours | `24` |
+| `MFA_ISSUER` | Issuer name for TOTP | `Coldforge` |
+| `MAX_FAILED_LOGINS` | Max failed logins before lockout | `5` |
+| `LOCKOUT_MINUTES` | Lockout duration in minutes | `15` |
 
 ## Development Status
 
@@ -131,16 +148,17 @@ internal/
 - [x] Configurable authorization timeout
 - [x] Async request processing with goroutines
 
+### Completed (Phase 3)
+- [x] User registration (username/email/password)
+- [x] Password auth with bcrypt
+- [x] MFA (TOTP + backup codes)
+- [x] Session management (JWT)
+- [x] Account lockout after failed attempts
+- [x] CI deploy stage for automatic deployment
+
 ### Roadmap to nsecbunker Feature Parity
 
-**Phase 3: User Management (NEXT)**
-- [ ] User registration (username/email/password)
-- [ ] Password auth with bcrypt
-- [ ] MFA (TOTP + backup codes)
-- [ ] Session management (JWT)
-- [ ] Account lockout
-
-**Phase 4: Admin Interface**
+**Phase 4: Admin Interface (NEXT)**
 - [ ] Admin Nostr DM commands (get_keys, create_key, etc.)
 - [ ] Admin RPC handler
 - [ ] Boot notification to admins
@@ -203,4 +221,4 @@ node test-nip46.mjs
 
 ---
 
-**Last Updated:** 2026-01-27 (Phase 2.5 complete)
+**Last Updated:** 2026-01-27 (Phase 3 complete)
