@@ -183,6 +183,7 @@ type Storage interface {
 	GetUser(ctx context.Context, id string) (*User, error)
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
+	ListUsers(ctx context.Context) ([]*User, error)
 	UpdateUser(ctx context.Context, user *User) error
 	DeleteUser(ctx context.Context, id string) error
 	IncrementFailedLogins(ctx context.Context, userID string) error
@@ -735,6 +736,17 @@ func (m *MemoryStorage) GetUserByEmail(ctx context.Context, email string) (*User
 		return nil, ErrUserNotFound
 	}
 	return user, nil
+}
+
+func (m *MemoryStorage) ListUsers(ctx context.Context) ([]*User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	users := make([]*User, 0, len(m.users))
+	for _, user := range m.users {
+		users = append(users, user)
+	}
+	return users, nil
 }
 
 func (m *MemoryStorage) UpdateUser(ctx context.Context, user *User) error {

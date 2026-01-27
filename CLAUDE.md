@@ -33,6 +33,7 @@ internal/
   signer/signer.go          # NIP-46 request handling
   api/handler.go            # HTTP management API
   auth/auth.go              # JWT, bcrypt, TOTP, backup codes
+  admin/admin.go            # Admin DM command handler
 ```
 
 ## NIP-46 Methods Supported
@@ -97,6 +98,26 @@ internal/
 - `GET /api/v1/users/sessions` - List active sessions
 - `DELETE /api/v1/users/sessions` - Revoke all sessions
 
+## Admin DM Commands
+
+Admins can manage the signer via encrypted Nostr DMs (kind:4). Send commands to the signer's pubkey:
+
+| Command | Description |
+|---------|-------------|
+| `help` | Show available commands |
+| `status` | Get signer status (keys, relays, users) |
+| `get_keys` | List all signing keys |
+| `get_key <id>` | Get key details |
+| `create_key [name]` | Create a new signing key |
+| `delete_key <id>` | Delete a key |
+| `list_pending` | List pending authorization requests |
+| `approve <id>` | Approve a pending request |
+| `deny <id>` | Deny a pending request |
+| `list_users` | List registered users |
+| `list_policies` | List permission policies |
+
+Admins receive boot notifications when the signer starts.
+
 ## Configuration
 
 | Env Variable | Description | Default |
@@ -156,14 +177,14 @@ internal/
 - [x] Account lockout after failed attempts
 - [x] CI deploy stage for automatic deployment
 
+### Completed (Phase 4)
+- [x] Admin Nostr DM commands (help, status, get_keys, create_key, delete_key, list_pending, approve, deny, list_users, list_policies)
+- [x] Admin RPC handler for encrypted DMs from admin pubkeys
+- [x] Boot notification to admins on signer startup
+
 ### Roadmap to nsecbunker Feature Parity
 
-**Phase 4: Admin Interface (NEXT)**
-- [ ] Admin Nostr DM commands (get_keys, create_key, etc.)
-- [ ] Admin RPC handler
-- [ ] Boot notification to admins
-
-**Phase 5: Web UI**
+**Phase 5: Web UI (NEXT)**
 - [ ] Authorization approval page
 - [ ] Account registration page
 - [ ] Login page with NIP-07 support
@@ -221,4 +242,4 @@ node test-nip46.mjs
 
 ---
 
-**Last Updated:** 2026-01-27 (Phase 3 complete)
+**Last Updated:** 2026-01-27 (Phase 4 complete)

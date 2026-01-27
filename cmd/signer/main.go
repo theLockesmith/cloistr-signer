@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	gonostr "github.com/nbd-wtf/go-nostr"
+	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/admin"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/api"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/nostr"
@@ -75,6 +77,37 @@ func main() {
 		slog.Error("failed to start signer", "error", err)
 		os.Exit(1)
 	}
+
+	// Initialize admin handler for DM-based management
+	adminHandler := admin.New(cfg, store, relayClient, nip46Signer, nip46Signer)
+
+	// Set the admin communication key (prefer relay auth key, fallback to first stored key)
+	if cfg.RelayAuthKey != "" {
+		pubkey, err := gonostr.GetPublicKey(cfg.RelayAuthKey)
+		if err == nil {
+			adminHandler.SetSignerKey(pubkey, cfg.RelayAuthKey)
+			slog.Info("admin handler using relay auth key", "pubkey", pubkey[:16]+"...")
+		}
+	} else {
+		// Try to use the first available key
+		keys, err := store.ListKeys(ctx)
+		if err == nil && len(keys) > 0 {
+			adminHandler.SetSignerKey(keys[0].Pubkey, keys[0].EncryptedNsec)
+			slog.Info("admin handler using first stored key", "pubkey", keys[0].Pubkey[:16]+"...")
+		}
+	}
+
+	// Start admin DM listener
+	if err := adminHandler.Start(ctx); err != nil {
+		slog.Warn("failed to start admin handler", "error", err)
+	}
+
+	// Send boot notification to admins (async)
+	go func() {
+		// Give relays a moment to connect
+		time.Sleep(2 * time.Second)
+		adminHandler.SendBootNotification(ctx)
+	}()
 
 	// Start HTTP server in goroutine
 	go func() {
