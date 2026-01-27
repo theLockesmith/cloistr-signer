@@ -35,11 +35,12 @@ type Key struct {
 
 // Permission defines what a user can do with a key
 type Permission struct {
-	KeyID       string   `json:"key_id"`
-	UserPubkey  string   `json:"user_pubkey"`
-	Methods     []string `json:"methods"` // "sign_event", "encrypt", "decrypt", "ping", etc.
-	AllowedKinds []int   `json:"allowed_kinds,omitempty"` // Empty = all kinds
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	KeyID        string     `json:"key_id"`
+	UserPubkey   string     `json:"user_pubkey"`
+	Methods      []string   `json:"methods"` // "sign_event", "encrypt", "decrypt", "ping", etc.
+	AllowedKinds []int      `json:"allowed_kinds,omitempty"` // Empty = all kinds
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	PolicyID     string     `json:"policy_id,omitempty"` // Source policy for usage tracking
 }
 
 // Session represents an active NIP-46 session

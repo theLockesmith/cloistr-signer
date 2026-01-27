@@ -180,27 +180,91 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 	// Check permissions
 	ctx := context.Background()
 	perm, err := s.storage.GetPermission(ctx, targetPubkey, clientPubkey)
-	if err != nil {
-		slog.Warn("permission denied", "client", clientPubkey[:16]+"...", "error", err)
+
+	// Handle request in a goroutine to avoid blocking the event loop
+	// This is especially important for authorization callbacks which may take time
+	go s.processRequest(ctx, targetPubkey, privateKey, clientPubkey, &request, perm, err)
+}
+
+// processRequest handles a NIP-46 request, potentially waiting for authorization
+func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey string, request *NIP46Request, perm *storage.Permission, permErr error) {
+	// If we have a valid permission
+	if permErr == nil {
+		// Check if method is allowed
+		if !s.isMethodAllowed(perm, request.Method) {
+			slog.Warn("method not allowed", "method", request.Method, "client", clientPubkey[:16]+"...")
+			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "method not allowed")
+			return
+		}
+
+		// Handle the request
+		result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, perm)
+		if err != nil {
+			slog.Error("request handling failed", "method", request.Method, "error", err)
+			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error())
+			return
+		}
+
+		s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result)
+		return
+	}
+
+	// No permission - check if we should wait for authorization
+	if !s.config.Auth.RequireApproval {
+		slog.Warn("permission denied (approval disabled)", "client", clientPubkey[:16]+"...", "error", permErr)
 		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "not authorized")
 		return
 	}
 
-	// Check if method is allowed
-	if !s.isMethodAllowed(perm, request.Method) {
-		slog.Warn("method not allowed", "method", request.Method, "client", clientPubkey[:16]+"...")
-		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "method not allowed")
+	// Create pending request context
+	reqCtx := &pendingRequestContext{
+		targetPubkey: targetPubkey,
+		privateKey:   privateKey,
+		clientPubkey: clientPubkey,
+		request:      request,
+		perm:         nil, // No permission yet
+	}
+
+	// Notify admins if enabled
+	if s.config.Auth.NotifyAdmins && len(s.config.Auth.AdminPubkeys) > 0 {
+		s.notifyAdminsOfPendingRequest(ctx, targetPubkey, privateKey, clientPubkey, request)
+	}
+
+	// Wait for authorization
+	timeout := time.Duration(s.config.Auth.AuthorizationTimeout) * time.Second
+	approved, approvedPerm, err := s.waitForAuthorization(ctx, reqCtx, timeout)
+	if err != nil {
+		slog.Warn("authorization failed", "client", clientPubkey[:16]+"...", "error", err)
+		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "authorization timeout")
 		return
 	}
 
+	if !approved {
+		slog.Info("request denied by admin", "client", clientPubkey[:16]+"...", "method", request.Method)
+		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "request denied")
+		return
+	}
+
+	// Request was approved - use the approved permission or create a temporary one
+	permToUse := approvedPerm
+	if permToUse == nil {
+		// Create a temporary permission for this request only
+		permToUse = &storage.Permission{
+			KeyID:      targetPubkey,
+			UserPubkey: clientPubkey,
+			Methods:    []string{request.Method},
+		}
+	}
+
 	// Handle the request
-	result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, &request, perm)
+	result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, permToUse)
 	if err != nil {
-		slog.Error("request handling failed", "method", request.Method, "error", err)
+		slog.Error("request handling failed after approval", "method", request.Method, "error", err)
 		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error())
 		return
 	}
 
+	slog.Info("request approved and processed", "method", request.Method, "client", clientPubkey[:16]+"...")
 	s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result)
 }
 
@@ -213,7 +277,58 @@ func (s *Signer) isMethodAllowed(perm *storage.Permission, method string) bool {
 	return false
 }
 
+// checkPolicyUsage checks if a method can be used based on policy usage limits
+// Returns (allowed, ruleID, error) - ruleID is used to increment usage after successful request
+func (s *Signer) checkPolicyUsage(ctx context.Context, policyID, method string) (bool, string, error) {
+	policy, err := s.storage.GetPolicy(ctx, policyID)
+	if err != nil {
+		// Policy not found or expired - allow (graceful degradation)
+		slog.Warn("policy not found for usage check, allowing request", "policy_id", policyID)
+		return true, "", nil
+	}
+
+	// Find matching rule
+	for _, rule := range policy.Rules {
+		if rule.Method == method || rule.Method == "*" {
+			// Check usage limit
+			if rule.MaxUsage > 0 && rule.CurrentUsage >= rule.MaxUsage {
+				slog.Warn("policy usage limit exceeded",
+					"policy_id", policyID,
+					"method", method,
+					"current", rule.CurrentUsage,
+					"max", rule.MaxUsage,
+				)
+				return false, "", nil
+			}
+			return true, rule.ID, nil
+		}
+	}
+
+	// No matching rule - this shouldn't happen if permission was created correctly
+	// Allow to avoid breaking existing functionality
+	return true, "", nil
+}
+
 func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey string, req *NIP46Request, perm *storage.Permission) (string, error) {
+	// Check policy usage limits if permission is policy-based
+	if perm.PolicyID != "" {
+		allowed, ruleID, err := s.checkPolicyUsage(ctx, perm.PolicyID, req.Method)
+		if err != nil {
+			return "", fmt.Errorf("failed to check policy usage: %w", err)
+		}
+		if !allowed {
+			return "", fmt.Errorf("usage limit exceeded for method %s", req.Method)
+		}
+		// Increment usage after we confirm the method is valid
+		if ruleID != "" {
+			defer func() {
+				if err := s.storage.IncrementRuleUsage(ctx, ruleID); err != nil {
+					slog.Warn("failed to increment rule usage", "rule_id", ruleID, "error", err)
+				}
+			}()
+		}
+	}
+
 	switch req.Method {
 	case "connect":
 		return s.handleConnect(ctx, targetPubkey, clientPubkey, req.Params, perm)
@@ -457,6 +572,96 @@ func (s *Signer) GetStatus() map[string]interface{} {
 	return map[string]interface{}{
 		"keys_loaded":      len(s.keys),
 		"connected_relays": s.relayClient.GetConnectedRelays(),
+	}
+}
+
+// notifyAdminsOfPendingRequest sends a DM to all admins about a pending authorization request
+func (s *Signer) notifyAdminsOfPendingRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey string, request *NIP46Request) {
+	// Build notification message
+	var eventKindInfo string
+	if request.Method == "sign_event" && len(request.Params) > 0 {
+		var event nostr.Event
+		if err := json.Unmarshal([]byte(request.Params[0]), &event); err == nil {
+			eventKindInfo = fmt.Sprintf(" (kind: %d)", event.Kind)
+		}
+	}
+
+	message := fmt.Sprintf(`🔐 Authorization Request
+
+Client: %s
+Key: %s
+Method: %s%s
+Time: %s
+
+To approve this request, use the API:
+POST /api/v1/requests/{id}/approve
+
+To deny:
+POST /api/v1/requests/{id}/deny`,
+		clientPubkey,
+		targetPubkey,
+		request.Method,
+		eventKindInfo,
+		time.Now().UTC().Format(time.RFC3339),
+	)
+
+	// Send DM to each admin
+	for _, adminPubkey := range s.config.Auth.AdminPubkeys {
+		if adminPubkey == "" {
+			continue
+		}
+
+		// Compute shared secret for NIP-04 encryption
+		sharedSecret, err := nip04.ComputeSharedSecret(adminPubkey, privateKey)
+		if err != nil {
+			slog.Error("failed to compute shared secret for admin notification",
+				"admin", adminPubkey[:16]+"...",
+				"error", err,
+			)
+			continue
+		}
+
+		// Encrypt the message
+		encrypted, err := nip04.Encrypt(message, sharedSecret)
+		if err != nil {
+			slog.Error("failed to encrypt admin notification",
+				"admin", adminPubkey[:16]+"...",
+				"error", err,
+			)
+			continue
+		}
+
+		// Create DM event (kind:4)
+		event := nostr.Event{
+			Kind:      4, // Encrypted Direct Message
+			Content:   encrypted,
+			CreatedAt: nostr.Timestamp(time.Now().Unix()),
+			Tags:      nostr.Tags{{"p", adminPubkey}},
+			PubKey:    targetPubkey,
+		}
+
+		if err := event.Sign(privateKey); err != nil {
+			slog.Error("failed to sign admin notification",
+				"admin", adminPubkey[:16]+"...",
+				"error", err,
+			)
+			continue
+		}
+
+		// Publish the DM
+		if err := s.relayClient.Publish(ctx, &event); err != nil {
+			slog.Error("failed to publish admin notification",
+				"admin", adminPubkey[:16]+"...",
+				"error", err,
+			)
+			continue
+		}
+
+		slog.Info("sent authorization notification to admin",
+			"admin", adminPubkey[:16]+"...",
+			"method", request.Method,
+			"client", clientPubkey[:16]+"...",
+		)
 	}
 }
 

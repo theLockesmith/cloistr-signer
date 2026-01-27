@@ -32,7 +32,10 @@ type StorageConfig struct {
 
 // AuthConfig holds authentication configuration
 type AuthConfig struct {
-	AdminPubkeys []string `yaml:"admin_pubkeys"`
+	AdminPubkeys         []string `yaml:"admin_pubkeys"`
+	RequireApproval      bool     `yaml:"require_approval"`       // Require approval for unknown clients (default: true)
+	AuthorizationTimeout int      `yaml:"authorization_timeout"`  // Timeout in seconds for authorization requests (default: 60)
+	NotifyAdmins         bool     `yaml:"notify_admins"`          // Send DM to admins for pending requests (default: true)
 }
 
 // Load loads configuration from environment variables and optional YAML file
@@ -48,7 +51,10 @@ func Load() (*Config, error) {
 			Type: "memory",
 		},
 		Auth: AuthConfig{
-			AdminPubkeys: []string{},
+			AdminPubkeys:         []string{},
+			RequireApproval:      true,
+			AuthorizationTimeout: 60,
+			NotifyAdmins:         true,
 		},
 	}
 
@@ -87,6 +93,18 @@ func Load() (*Config, error) {
 
 	if adminPubkeys := os.Getenv("ADMIN_PUBKEYS"); adminPubkeys != "" {
 		cfg.Auth.AdminPubkeys = strings.Split(adminPubkeys, ",")
+	}
+
+	if requireApproval := os.Getenv("REQUIRE_APPROVAL"); requireApproval != "" {
+		cfg.Auth.RequireApproval = requireApproval == "true" || requireApproval == "1"
+	}
+
+	if timeout := os.Getenv("AUTHORIZATION_TIMEOUT"); timeout != "" {
+		cfg.Auth.AuthorizationTimeout = getEnvInt("AUTHORIZATION_TIMEOUT", 60)
+	}
+
+	if notifyAdmins := os.Getenv("NOTIFY_ADMINS"); notifyAdmins != "" {
+		cfg.Auth.NotifyAdmins = notifyAdmins == "true" || notifyAdmins == "1"
 	}
 
 	return cfg, nil

@@ -313,6 +313,7 @@ type PermissionResponse struct {
 	UserPubkey   string   `json:"user_pubkey"`
 	Methods      []string `json:"methods"`
 	AllowedKinds []int    `json:"allowed_kinds,omitempty"`
+	PolicyID     string   `json:"policy_id,omitempty"`
 }
 
 func (h *Handler) handleListPermissions(w http.ResponseWriter, r *http.Request, keyID string) {
@@ -340,6 +341,7 @@ func (h *Handler) handleListPermissions(w http.ResponseWriter, r *http.Request, 
 			UserPubkey:   perm.UserPubkey,
 			Methods:      perm.Methods,
 			AllowedKinds: perm.AllowedKinds,
+			PolicyID:     perm.PolicyID,
 		}
 	}
 
@@ -393,6 +395,7 @@ func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, ke
 		UserPubkey:   perm.UserPubkey,
 		Methods:      perm.Methods,
 		AllowedKinds: perm.AllowedKinds,
+		PolicyID:     perm.PolicyID,
 	})
 }
 
@@ -833,6 +836,7 @@ func (h *Handler) handleRedeemToken(w http.ResponseWriter, r *http.Request, toke
 		Methods:      methods,
 		AllowedKinds: allowedKinds,
 		ExpiresAt:    policy.ExpiresAt,
+		PolicyID:     policy.ID, // Track source policy for usage limits
 	}
 
 	if err := h.storage.SetPermission(r.Context(), perm); err != nil {
