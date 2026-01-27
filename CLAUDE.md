@@ -66,6 +66,25 @@ internal/
 - `POST /api/v1/keys/{id}/permissions` - Set permission
 - `DELETE /api/v1/keys/{id}/permissions/{pubkey}` - Delete permission
 
+### Policies
+- `GET /api/v1/policies` - List policies
+- `POST /api/v1/policies` - Create policy
+- `GET /api/v1/policies/{id}` - Get policy
+- `DELETE /api/v1/policies/{id}` - Delete policy
+
+### Tokens
+- `GET /api/v1/tokens?key_id={id}` - List tokens for a key
+- `POST /api/v1/tokens` - Create token
+- `GET /api/v1/tokens/{id}` - Get token
+- `POST /api/v1/tokens/{id}/redeem` - Redeem token (creates permissions)
+- `DELETE /api/v1/tokens/{id}` - Delete token
+
+### Pending Requests (Authorization)
+- `GET /api/v1/requests?key_pubkey={pubkey}` - List pending requests
+- `GET /api/v1/requests/{id}` - Get pending request
+- `POST /api/v1/requests/{id}/approve` - Approve request
+- `POST /api/v1/requests/{id}/deny` - Deny request
+
 ## Configuration
 
 | Env Variable | Description | Default |
@@ -95,14 +114,19 @@ internal/
 - [x] Atlas role for Kubernetes
 - [x] Deployed to Atlantis cluster
 
+### Completed (Phase 2)
+- [x] Policy engine (reusable permission templates)
+- [x] Access tokens (one-time redeemable)
+- [x] Token redemption with permission creation
+- [x] Authorization callbacks (async approval framework)
+- [x] Pending request queue with timeout
+
 ### Roadmap to nsecbunker Feature Parity
 
-**Phase 2: Authorization System (NEXT)**
-- [ ] Policy engine (reusable permission templates)
-- [ ] Access tokens (one-time redeemable)
-- [ ] Authorization callbacks (async approval)
-- [ ] Interactive approval flow
+**Phase 2.5: Authorization Polish (NEXT)**
+- [ ] Interactive approval flow integration with NIP-46 handler
 - [ ] Admin DM notification for approvals
+- [ ] Policy usage tracking and limits
 
 **Phase 3: User Management**
 - [ ] User registration (username/email/password)
@@ -174,4 +198,4 @@ node test-nip46.mjs
 
 ---
 
-**Last Updated:** 2026-01-25
+**Last Updated:** 2026-01-27
