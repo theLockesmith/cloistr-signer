@@ -79,7 +79,6 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/status", h.handleStatus)
 
 	// Bunker URI
-	mux.HandleFunc("/api/v1/keys/", h.handleKeyByID) // Already handles /keys/{id}/connect
 	mux.HandleFunc("/api/v1/bunker/", h.handleBunkerConnect)
 
 	// NIP-05
