@@ -1,0 +1,27 @@
+{{define "content"}}
+<div class="hero">
+    <h1>Coldforge Signer</h1>
+    <p class="hero-subtitle">NIP-46 Remote Signing Service</p>
+    <div class="hero-actions">
+        <a href="/login" class="btn btn-primary">Login</a>
+        <a href="/register" class="btn btn-secondary">Register</a>
+    </div>
+</div>
+
+<div class="features">
+    <div class="feature">
+        <h3>Secure Key Management</h3>
+        <p>Store and manage your Nostr signing keys securely with fine-grained permissions.</p>
+    </div>
+    <div class="feature">
+        <h3>Remote Signing</h3>
+        <p>Sign events from any NIP-46 compatible client without exposing your private keys.</p>
+    </div>
+    <div class="feature">
+        <h3>Access Control</h3>
+        <p>Define policies, approve requests, and control which apps can use your keys.</p>
+    </div>
+</div>
+{{end}}
+
+{{template "base" .}}

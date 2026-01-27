@@ -34,6 +34,10 @@ internal/
   api/handler.go            # HTTP management API
   auth/auth.go              # JWT, bcrypt, TOTP, backup codes
   admin/admin.go            # Admin DM command handler
+  web/                      # Web UI
+    web.go                  # Web handlers and routes
+    templates/              # HTML templates
+    static/                 # CSS and JS
 ```
 
 ## NIP-46 Methods Supported
@@ -118,6 +122,23 @@ Admins can manage the signer via encrypted Nostr DMs (kind:4). Send commands to 
 
 Admins receive boot notifications when the signer starts.
 
+## Web UI
+
+The signer includes a web interface for management:
+
+| Route | Description |
+|-------|-------------|
+| `/` | Home/landing page |
+| `/login` | Login with password or NIP-07 extension |
+| `/register` | User registration |
+| `/dashboard` | Admin dashboard with stats |
+| `/keys` | Key management (create, delete, copy) |
+| `/requests` | Pending authorization requests |
+| `/users` | User management |
+| `/approve/{id}` | Authorization approval page (shareable link) |
+
+The approval page can be shared via link for async authorization.
+
 ## Configuration
 
 | Env Variable | Description | Default |
@@ -182,15 +203,18 @@ Admins receive boot notifications when the signer starts.
 - [x] Admin RPC handler for encrypted DMs from admin pubkeys
 - [x] Boot notification to admins on signer startup
 
+### Completed (Phase 5)
+- [x] Authorization approval page (/approve/{id})
+- [x] Account registration page (/register)
+- [x] Login page with NIP-07 support (/login)
+- [x] Admin dashboard with stats (/dashboard)
+- [x] Keys management page (/keys)
+- [x] Pending requests page (/requests)
+- [x] Users management page (/users)
+
 ### Roadmap to nsecbunker Feature Parity
 
-**Phase 5: Web UI (NEXT)**
-- [ ] Authorization approval page
-- [ ] Account registration page
-- [ ] Login page with NIP-07 support
-- [ ] Admin dashboard
-
-**Phase 6: Advanced Features**
+**Phase 6: Advanced Features (NEXT)**
 - [ ] bunker:// URI protocol
 - [ ] NIP-05 integration
 - [ ] NIP-89 service announcements
@@ -242,4 +266,4 @@ node test-nip46.mjs
 
 ---
 
-**Last Updated:** 2026-01-27 (Phase 4 complete)
+**Last Updated:** 2026-01-27 (Phase 5 complete)

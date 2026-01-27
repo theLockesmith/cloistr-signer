@@ -1,0 +1,68 @@
+{{define "content"}}
+<div class="dashboard">
+    <h1>Dashboard</h1>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-value">{{.KeyCount}}</div>
+            <div class="stat-label">Signing Keys</div>
+            <a href="/keys" class="stat-link">Manage</a>
+        </div>
+
+        <div class="stat-card {{if gt .PendingCount 0}}highlight{{end}}">
+            <div class="stat-value">{{.PendingCount}}</div>
+            <div class="stat-label">Pending Requests</div>
+            <a href="/requests" class="stat-link">View</a>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-value">{{.UserCount}}</div>
+            <div class="stat-label">Users</div>
+            <a href="/users" class="stat-link">Manage</a>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-value">{{.PolicyCount}}</div>
+            <div class="stat-label">Policies</div>
+        </div>
+    </div>
+
+    <div class="dashboard-section">
+        <h2>Connected Relays</h2>
+        <div class="relay-list">
+            {{range .ConnectedRelays}}
+            <div class="relay-item">
+                <span class="relay-status online"></span>
+                <span class="relay-url">{{.}}</span>
+            </div>
+            {{else}}
+            <p class="text-muted">No relays connected</p>
+            {{end}}
+        </div>
+    </div>
+
+    <div class="dashboard-section">
+        <h2>Quick Actions</h2>
+        <div class="action-grid">
+            <a href="/keys" class="action-card">
+                <div class="action-icon">&#x1F511;</div>
+                <div class="action-label">Manage Keys</div>
+            </a>
+            <a href="/requests" class="action-card">
+                <div class="action-icon">&#x1F4CB;</div>
+                <div class="action-label">View Requests</div>
+            </a>
+            <a href="/users" class="action-card">
+                <div class="action-icon">&#x1F465;</div>
+                <div class="action-label">Manage Users</div>
+            </a>
+            <a href="/api/v1/status" class="action-card" target="_blank">
+                <div class="action-icon">&#x1F4CA;</div>
+                <div class="action-label">API Status</div>
+            </a>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{template "base" .}}

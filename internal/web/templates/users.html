@@ -1,0 +1,48 @@
+{{define "content"}}
+<div class="page-header">
+    <h1>Users</h1>
+</div>
+
+<div class="table-container">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Username</th>
+                <th>Email</th>
+                <th>MFA</th>
+                <th>Created</th>
+                <th>Last Login</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Users}}
+            <tr>
+                <td>{{.Username}}</td>
+                <td>{{if .Email}}{{.Email}}{{else}}<span class="text-muted">-</span>{{end}}</td>
+                <td>
+                    {{if .MFAEnabled}}
+                    <span class="badge badge-success">Enabled</span>
+                    {{else}}
+                    <span class="badge badge-muted">Disabled</span>
+                    {{end}}
+                </td>
+                <td>{{formatTime .CreatedAt}}</td>
+                <td>
+                    {{if .LastLoginAt}}
+                    {{formatTime .LastLoginAt}}
+                    {{else}}
+                    <span class="text-muted">Never</span>
+                    {{end}}
+                </td>
+            </tr>
+            {{else}}
+            <tr>
+                <td colspan="5" class="text-center text-muted">No users registered</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+{{end}}
+
+{{template "base" .}}

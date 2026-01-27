@@ -1,0 +1,32 @@
+{{define "base"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.Title}}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    {{if .User}}
+    <nav class="navbar">
+        <div class="nav-brand">Coldforge Signer</div>
+        <div class="nav-links">
+            <a href="/dashboard">Dashboard</a>
+            <a href="/keys">Keys</a>
+            <a href="/requests">Requests</a>
+            <a href="/users">Users</a>
+        </div>
+        <div class="nav-user">
+            <span>{{.User.Username}}</span>
+            <a href="/logout" class="btn btn-sm">Logout</a>
+        </div>
+    </nav>
+    {{end}}
+    <main class="container">
+        {{template "content" .}}
+    </main>
+    <script src="/static/app.js"></script>
+</body>
+</html>
+{{end}}

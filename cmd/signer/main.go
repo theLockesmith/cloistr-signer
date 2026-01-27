@@ -16,6 +16,7 @@ import (
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/nostr"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/signer"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/storage"
+	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/web"
 )
 
 func main() {
@@ -57,9 +58,17 @@ func main() {
 	// Initialize HTTP API
 	apiHandler := api.NewHandler(cfg, nip46Signer, store)
 
+	// Initialize Web UI
+	webHandler, err := web.New(cfg, store, nip46Signer, nip46Signer)
+	if err != nil {
+		slog.Error("failed to initialize web handler", "error", err)
+		os.Exit(1)
+	}
+
 	// Create HTTP server
 	mux := http.NewServeMux()
 	apiHandler.RegisterRoutes(mux)
+	webHandler.RegisterRoutes(mux)
 
 	server := &http.Server{
 		Addr:         cfg.Server.Address,

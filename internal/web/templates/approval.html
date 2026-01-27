@@ -1,0 +1,148 @@
+{{define "content"}}
+<div class="approval-container">
+    {{if .Expired}}
+    <div class="approval-card expired">
+        <div class="approval-icon">&#x23F0;</div>
+        <h1>Request Expired</h1>
+        <p>{{.Error}}</p>
+        <a href="/" class="btn btn-secondary">Go Home</a>
+    </div>
+    {{else if .Error}}
+    <div class="approval-card error">
+        <div class="approval-icon">&#x26A0;</div>
+        <h1>Error</h1>
+        <p>{{.Error}}</p>
+        <a href="/" class="btn btn-secondary">Go Home</a>
+    </div>
+    {{else}}
+    <div class="approval-card">
+        <div class="approval-icon">&#x1F510;</div>
+        <h1>Authorization Request</h1>
+
+        <div id="success-message" class="alert alert-success" style="display: none;"></div>
+        <div id="error-message" class="alert alert-error" style="display: none;"></div>
+
+        <div class="request-details">
+            <div class="detail-row">
+                <span class="detail-label">Method:</span>
+                <span class="detail-value method-tag">{{.Request.Method}}</span>
+            </div>
+
+            {{if .Request.EventKind}}
+            <div class="detail-row">
+                <span class="detail-label">Event Kind:</span>
+                <span class="detail-value">{{.Request.EventKind}}</span>
+            </div>
+            {{end}}
+
+            <div class="detail-row">
+                <span class="detail-label">Client:</span>
+                <span class="detail-value pubkey">{{truncate .Request.ClientPubkey 16}}...</span>
+            </div>
+
+            <div class="detail-row">
+                <span class="detail-label">Key:</span>
+                <span class="detail-value pubkey">{{truncate .Request.KeyPubkey 16}}...</span>
+            </div>
+
+            <div class="detail-row">
+                <span class="detail-label">Expires In:</span>
+                <span class="detail-value countdown" id="countdown">{{.ExpiresIn}}</span>
+            </div>
+        </div>
+
+        <div class="approval-options">
+            <label class="checkbox-label">
+                <input type="checkbox" id="remember" name="remember">
+                <span>Remember this permission for future requests</span>
+            </label>
+        </div>
+
+        <div class="approval-actions" id="action-buttons">
+            <button id="approve-btn" class="btn btn-success btn-lg">Approve</button>
+            <button id="deny-btn" class="btn btn-danger btn-lg">Deny</button>
+        </div>
+    </div>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const requestID = '{{.RequestID}}';
+        const approveBtn = document.getElementById('approve-btn');
+        const denyBtn = document.getElementById('deny-btn');
+        const rememberCheckbox = document.getElementById('remember');
+        const successDiv = document.getElementById('success-message');
+        const errorDiv = document.getElementById('error-message');
+        const actionButtons = document.getElementById('action-buttons');
+
+        approveBtn.addEventListener('click', async function() {
+            approveBtn.disabled = true;
+            denyBtn.disabled = true;
+
+            try {
+                const response = await fetch('/web/api/approve', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        request_id: requestID,
+                        remember: rememberCheckbox.checked
+                    })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    actionButtons.style.display = 'none';
+                    successDiv.textContent = 'Request approved! You can close this page.';
+                    successDiv.style.display = 'block';
+                } else {
+                    showError(data.error || 'Failed to approve');
+                    approveBtn.disabled = false;
+                    denyBtn.disabled = false;
+                }
+            } catch (err) {
+                showError('Failed to approve request');
+                approveBtn.disabled = false;
+                denyBtn.disabled = false;
+            }
+        });
+
+        denyBtn.addEventListener('click', async function() {
+            approveBtn.disabled = true;
+            denyBtn.disabled = true;
+
+            try {
+                const response = await fetch('/web/api/deny', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        request_id: requestID
+                    })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    actionButtons.style.display = 'none';
+                    successDiv.textContent = 'Request denied. You can close this page.';
+                    successDiv.style.display = 'block';
+                } else {
+                    showError(data.error || 'Failed to deny');
+                    approveBtn.disabled = false;
+                    denyBtn.disabled = false;
+                }
+            } catch (err) {
+                showError('Failed to deny request');
+                approveBtn.disabled = false;
+                denyBtn.disabled = false;
+            }
+        });
+
+        function showError(message) {
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+    });
+    </script>
+    {{end}}
+</div>
+{{end}}
+
+{{template "base" .}}

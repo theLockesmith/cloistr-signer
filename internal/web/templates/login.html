@@ -1,0 +1,153 @@
+{{define "content"}}
+<div class="auth-container">
+    <h1>Login</h1>
+
+    <div id="error-message" class="alert alert-error" style="display: none;"></div>
+
+    <div class="auth-options">
+        <button id="nip07-login" class="btn btn-primary btn-block" style="display: none;">
+            Login with Nostr Extension
+        </button>
+        <div id="nip07-status" class="text-muted" style="display: none;">
+            Checking for NIP-07 extension...
+        </div>
+    </div>
+
+    <div class="divider">
+        <span>or login with password</span>
+    </div>
+
+    <form id="login-form" class="auth-form">
+        <div class="form-group">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" required autocomplete="username">
+        </div>
+
+        <div class="form-group">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required autocomplete="current-password">
+        </div>
+
+        <div id="mfa-group" class="form-group" style="display: none;">
+            <label for="mfa_code">MFA Code</label>
+            <input type="text" id="mfa_code" name="mfa_code" placeholder="6-digit code" autocomplete="one-time-code">
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-block">Login</button>
+    </form>
+
+    <p class="auth-footer">
+        Don't have an account? <a href="/register">Register</a>
+    </p>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.getElementById('login-form');
+    const errorDiv = document.getElementById('error-message');
+    const mfaGroup = document.getElementById('mfa-group');
+    const nip07Button = document.getElementById('nip07-login');
+    const nip07Status = document.getElementById('nip07-status');
+
+    // Check for NIP-07 extension
+    setTimeout(function() {
+        if (window.nostr) {
+            nip07Button.style.display = 'block';
+            nip07Status.style.display = 'none';
+        } else {
+            nip07Status.textContent = 'No Nostr extension found';
+            nip07Status.style.display = 'block';
+        }
+    }, 500);
+
+    // NIP-07 login
+    nip07Button.addEventListener('click', async function() {
+        try {
+            nip07Button.disabled = true;
+            nip07Button.textContent = 'Signing...';
+
+            const pubkey = await window.nostr.getPublicKey();
+            const challenge = 'coldforge-login-' + Date.now();
+
+            // Create a kind:1 event as challenge
+            const event = {
+                kind: 1,
+                created_at: Math.floor(Date.now() / 1000),
+                tags: [],
+                content: challenge,
+                pubkey: pubkey
+            };
+
+            const signedEvent = await window.nostr.signEvent(event);
+
+            const response = await fetch('/web/api/login/nip07', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    pubkey: pubkey,
+                    signature: signedEvent.sig,
+                    challenge: challenge
+                })
+            });
+
+            const data = await response.json();
+            if (data.success) {
+                window.location.href = data.redirect;
+            } else {
+                showError(data.error || 'Login failed');
+                nip07Button.disabled = false;
+                nip07Button.textContent = 'Login with Nostr Extension';
+            }
+        } catch (err) {
+            showError(err.message || 'NIP-07 login failed');
+            nip07Button.disabled = false;
+            nip07Button.textContent = 'Login with Nostr Extension';
+        }
+    });
+
+    // Password login
+    form.addEventListener('submit', async function(e) {
+        e.preventDefault();
+
+        const username = document.getElementById('username').value;
+        const password = document.getElementById('password').value;
+        const mfaCode = document.getElementById('mfa_code').value;
+
+        try {
+            const response = await fetch('/web/api/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    username: username,
+                    password: password,
+                    mfa_code: mfaCode
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.mfa_required) {
+                mfaGroup.style.display = 'block';
+                document.getElementById('mfa_code').focus();
+                return;
+            }
+
+            if (data.success) {
+                window.location.href = data.redirect;
+            } else {
+                showError(data.error || 'Login failed');
+            }
+        } catch (err) {
+            showError('Login failed');
+        }
+    });
+
+    function showError(message) {
+        errorDiv.textContent = message;
+        errorDiv.style.display = 'block';
+    }
+});
+</script>
+{{end}}
+
+{{template "base" .}}

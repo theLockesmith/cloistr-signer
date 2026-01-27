@@ -1,0 +1,120 @@
+{{define "content"}}
+<div class="page-header">
+    <h1>Pending Requests</h1>
+</div>
+
+<div id="message" class="alert" style="display: none;"></div>
+
+<div class="table-container">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Method</th>
+                <th>Client</th>
+                <th>Key</th>
+                <th>Created</th>
+                <th>Expires</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="requests-body">
+            {{range .Requests}}
+            <tr data-id="{{.ID}}">
+                <td>
+                    <span class="method-tag">{{.Method}}</span>
+                    {{if .EventKind}}<span class="kind-tag">kind:{{.EventKind}}</span>{{end}}
+                </td>
+                <td class="pubkey">{{truncate .ClientPubkey 16}}...</td>
+                <td class="pubkey">{{truncate .KeyPubkey 16}}...</td>
+                <td>{{formatTime .CreatedAt}}</td>
+                <td>{{formatTime .ExpiresAt}}</td>
+                <td>
+                    <button class="btn btn-sm btn-success approve-btn" data-id="{{.ID}}">Approve</button>
+                    <button class="btn btn-sm btn-danger deny-btn" data-id="{{.ID}}">Deny</button>
+                </td>
+            </tr>
+            {{else}}
+            <tr id="no-requests">
+                <td colspan="6" class="text-center text-muted">No pending requests</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const messageDiv = document.getElementById('message');
+
+    // Approve buttons
+    document.querySelectorAll('.approve-btn').forEach(btn => {
+        btn.addEventListener('click', async function() {
+            const id = this.dataset.id;
+            const row = this.closest('tr');
+
+            try {
+                const response = await fetch('/web/api/approve', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({request_id: id, remember: false})
+                });
+
+                if (response.ok) {
+                    row.remove();
+                    showMessage('Request approved', 'success');
+                    checkEmpty();
+                } else {
+                    const data = await response.json();
+                    showMessage(data.error || 'Failed to approve', 'error');
+                }
+            } catch (err) {
+                showMessage('Failed to approve request', 'error');
+            }
+        });
+    });
+
+    // Deny buttons
+    document.querySelectorAll('.deny-btn').forEach(btn => {
+        btn.addEventListener('click', async function() {
+            const id = this.dataset.id;
+            const row = this.closest('tr');
+
+            try {
+                const response = await fetch('/web/api/deny', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({request_id: id})
+                });
+
+                if (response.ok) {
+                    row.remove();
+                    showMessage('Request denied', 'success');
+                    checkEmpty();
+                } else {
+                    const data = await response.json();
+                    showMessage(data.error || 'Failed to deny', 'error');
+                }
+            } catch (err) {
+                showMessage('Failed to deny request', 'error');
+            }
+        });
+    });
+
+    function showMessage(text, type) {
+        messageDiv.textContent = text;
+        messageDiv.className = 'alert alert-' + type;
+        messageDiv.style.display = 'block';
+        setTimeout(() => messageDiv.style.display = 'none', 3000);
+    }
+
+    function checkEmpty() {
+        const tbody = document.getElementById('requests-body');
+        if (tbody.children.length === 0) {
+            tbody.innerHTML = '<tr id="no-requests"><td colspan="6" class="text-center text-muted">No pending requests</td></tr>';
+        }
+    }
+});
+</script>
+{{end}}
+
+{{template "base" .}}
