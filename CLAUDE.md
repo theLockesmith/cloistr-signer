@@ -34,6 +34,11 @@ internal/
   api/handler.go            # HTTP management API
   auth/auth.go              # JWT, bcrypt, TOTP, backup codes
   admin/admin.go            # Admin DM command handler
+  bunker/bunker.go          # bunker:// URI generation/parsing
+  nip05/nip05.go            # NIP-05 verification and serving
+  nip89/nip89.go            # NIP-89 service announcements
+  vault/vault.go            # HashiCorp Vault integration
+  audit/audit.go            # Audit logging (memory/JSON backends)
   web/                      # Web UI
     web.go                  # Web handlers and routes
     templates/              # HTML templates
@@ -102,6 +107,15 @@ internal/
 - `GET /api/v1/users/sessions` - List active sessions
 - `DELETE /api/v1/users/sessions` - Revoke all sessions
 
+### bunker:// URI (Phase 6)
+- `GET /api/v1/bunker/{id}` - Generate bunker:// connection URI for a key
+
+### NIP-05 (Phase 6)
+- `GET /.well-known/nostr.json` - NIP-05 identifier endpoint
+
+### Audit (Phase 6)
+- `GET /api/v1/audit` - Query audit logs (supports filtering by type, actor, target)
+
 ## Admin DM Commands
 
 Admins can manage the signer via encrypted Nostr DMs (kind:4). Send commands to the signer's pubkey:
@@ -149,7 +163,6 @@ The approval page can be shared via link for async authorization.
 | `STORAGE_TYPE` | `memory` or `postgres` | `memory` |
 | `DATABASE_URL` | PostgreSQL connection string | (none) |
 | `ADMIN_PUBKEYS` | Comma-separated admin pubkeys | (none) |
-| `VAULT_URL` | Vault URL for key encryption | (none) |
 | `REQUIRE_APPROVAL` | Require approval for unknown clients | `true` |
 | `AUTHORIZATION_TIMEOUT` | Timeout for authorization in seconds | `60` |
 | `NOTIFY_ADMINS` | Send DMs to admins for pending requests | `true` |
@@ -158,6 +171,21 @@ The approval page can be shared via link for async authorization.
 | `MFA_ISSUER` | Issuer name for TOTP | `Coldforge` |
 | `MAX_FAILED_LOGINS` | Max failed logins before lockout | `5` |
 | `LOCKOUT_MINUTES` | Lockout duration in minutes | `15` |
+| **Vault** | | |
+| `VAULT_ENABLED` | Enable HashiCorp Vault | `false` |
+| `VAULT_ADDR` | Vault server address | (none) |
+| `VAULT_TOKEN` | Vault authentication token | (none) |
+| `VAULT_MOUNT_PATH` | KV secrets mount path | `secret` |
+| **Audit** | | |
+| `AUDIT_ENABLED` | Enable audit logging | `true` |
+| `AUDIT_BACKEND` | Backend type: `memory`, `file`, `json` | `memory` |
+| `AUDIT_FILE_PATH` | Path for file/json backend | (none) |
+| **Service Metadata** | | |
+| `SERVICE_NAME` | Service name for NIP-89 | `Coldforge Signer` |
+| `SERVICE_DESCRIPTION` | Service description | `NIP-46 Remote Signing Service` |
+| `SERVICE_URL` | Public service URL | (none) |
+| `NIP05_DOMAIN` | Domain for NIP-05 identifiers | (none) |
+| `PUBLISH_NIP89` | Publish NIP-89 announcements | `false` |
 
 ## Development Status
 
@@ -212,14 +240,21 @@ The approval page can be shared via link for async authorization.
 - [x] Pending requests page (/requests)
 - [x] Users management page (/users)
 
-### Roadmap to nsecbunker Feature Parity
+### Completed (Phase 6)
+- [x] bunker:// URI protocol (`internal/bunker/bunker.go`)
+- [x] NIP-05 integration (`internal/nip05/nip05.go`)
+- [x] NIP-89 service announcements (`internal/nip89/nip89.go`)
+- [x] HashiCorp Vault integration (`internal/vault/vault.go`)
+- [x] Audit logging (`internal/audit/audit.go`)
 
-**Phase 6: Advanced Features (NEXT)**
-- [ ] bunker:// URI protocol
-- [ ] NIP-05 integration
-- [ ] NIP-89 service announcements
-- [ ] HashiCorp Vault integration
-- [ ] Audit logging
+### Roadmap to Production
+
+**All phases complete! Next:**
+- [ ] Unit and integration tests
+- [ ] Production Vault configuration
+- [ ] Full end-to-end testing
+- [ ] Documentation
+- [ ] Deprecate nsecbunker
 
 ## Deployment
 
@@ -266,4 +301,4 @@ node test-nip46.mjs
 
 ---
 
-**Last Updated:** 2026-01-27 (Phase 5 complete)
+**Last Updated:** 2026-01-27 (Phase 6 complete - All phases done!)
