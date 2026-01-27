@@ -1,7 +1,9 @@
 package api
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -39,6 +41,18 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Key management
 	mux.HandleFunc("/api/v1/keys", h.handleKeys)
 	mux.HandleFunc("/api/v1/keys/", h.handleKeyByID)
+
+	// Policy management
+	mux.HandleFunc("/api/v1/policies", h.handlePolicies)
+	mux.HandleFunc("/api/v1/policies/", h.handlePolicyByID)
+
+	// Token management
+	mux.HandleFunc("/api/v1/tokens", h.handleTokens)
+	mux.HandleFunc("/api/v1/tokens/", h.handleTokenByID)
+
+	// Pending requests (authorization)
+	mux.HandleFunc("/api/v1/requests", h.handleRequests)
+	mux.HandleFunc("/api/v1/requests/", h.handleRequestByID)
 
 	// Status
 	mux.HandleFunc("/api/v1/status", h.handleStatus)
@@ -302,7 +316,18 @@ type PermissionResponse struct {
 }
 
 func (h *Handler) handleListPermissions(w http.ResponseWriter, r *http.Request, keyID string) {
-	perms, err := h.storage.ListPermissions(r.Context(), keyID)
+	// Get the key to get the full pubkey
+	key, err := h.storage.GetKey(r.Context(), keyID)
+	if err != nil {
+		if err == storage.ErrKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	perms, err := h.storage.ListPermissions(r.Context(), key.Pubkey)
 	if err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to list permissions")
 		return
@@ -390,6 +415,690 @@ func (h *Handler) handleDeletePermission(w http.ResponseWriter, r *http.Request,
 
 	slog.Info("deleted permission", "key", keyID, "user", pubkey[:16]+"...")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// Policy management endpoints
+
+type CreatePolicyRequest struct {
+	Name        string             `json:"name"`
+	Description string             `json:"description,omitempty"`
+	Rules       []PolicyRuleInput  `json:"rules"`
+	ExpiresAt   *time.Time         `json:"expires_at,omitempty"`
+}
+
+type PolicyRuleInput struct {
+	Method       string `json:"method"`
+	AllowedKinds []int  `json:"allowed_kinds,omitempty"`
+	MaxUsage     int    `json:"max_usage,omitempty"`
+}
+
+type PolicyResponse struct {
+	ID          string              `json:"id"`
+	Name        string              `json:"name"`
+	Description string              `json:"description,omitempty"`
+	Rules       []*storage.PolicyRule `json:"rules"`
+	ExpiresAt   *time.Time          `json:"expires_at,omitempty"`
+	CreatedAt   time.Time           `json:"created_at"`
+}
+
+func (h *Handler) handlePolicies(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListPolicies(w, r)
+	case http.MethodPost:
+		h.handleCreatePolicy(w, r)
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) handlePolicyByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/policies/")
+	if path == "" {
+		h.errorResponse(w, http.StatusBadRequest, "missing policy id")
+		return
+	}
+
+	policyID := path
+
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetPolicy(w, r, policyID)
+	case http.MethodDelete:
+		h.handleDeletePolicy(w, r, policyID)
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) handleListPolicies(w http.ResponseWriter, r *http.Request) {
+	policies, err := h.storage.ListPolicies(r.Context())
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to list policies")
+		return
+	}
+
+	response := make([]PolicyResponse, len(policies))
+	for i, p := range policies {
+		response[i] = PolicyResponse{
+			ID:          p.ID,
+			Name:        p.Name,
+			Description: p.Description,
+			Rules:       p.Rules,
+			ExpiresAt:   p.ExpiresAt,
+			CreatedAt:   p.CreatedAt,
+		}
+	}
+	h.jsonResponse(w, http.StatusOK, response)
+}
+
+func (h *Handler) handleCreatePolicy(w http.ResponseWriter, r *http.Request) {
+	var req CreatePolicyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		h.errorResponse(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	if len(req.Rules) == 0 {
+		h.errorResponse(w, http.StatusBadRequest, "at least one rule is required")
+		return
+	}
+
+	policyID := generateID()
+	rules := make([]*storage.PolicyRule, len(req.Rules))
+	for i, r := range req.Rules {
+		rules[i] = &storage.PolicyRule{
+			ID:           generateID(),
+			PolicyID:     policyID,
+			Method:       r.Method,
+			AllowedKinds: r.AllowedKinds,
+			MaxUsage:     r.MaxUsage,
+			CurrentUsage: 0,
+		}
+	}
+
+	policy := &storage.Policy{
+		ID:          policyID,
+		Name:        req.Name,
+		Description: req.Description,
+		Rules:       rules,
+		ExpiresAt:   req.ExpiresAt,
+		CreatedAt:   time.Now(),
+	}
+
+	if err := h.storage.CreatePolicy(r.Context(), policy); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to create policy")
+		return
+	}
+
+	slog.Info("created policy", "id", policy.ID, "name", policy.Name, "rules", len(rules))
+
+	h.jsonResponse(w, http.StatusCreated, PolicyResponse{
+		ID:          policy.ID,
+		Name:        policy.Name,
+		Description: policy.Description,
+		Rules:       policy.Rules,
+		ExpiresAt:   policy.ExpiresAt,
+		CreatedAt:   policy.CreatedAt,
+	})
+}
+
+func (h *Handler) handleGetPolicy(w http.ResponseWriter, r *http.Request, id string) {
+	policy, err := h.storage.GetPolicy(r.Context(), id)
+	if err != nil {
+		if err == storage.ErrPolicyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "policy not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get policy")
+		return
+	}
+
+	h.jsonResponse(w, http.StatusOK, PolicyResponse{
+		ID:          policy.ID,
+		Name:        policy.Name,
+		Description: policy.Description,
+		Rules:       policy.Rules,
+		ExpiresAt:   policy.ExpiresAt,
+		CreatedAt:   policy.CreatedAt,
+	})
+}
+
+func (h *Handler) handleDeletePolicy(w http.ResponseWriter, r *http.Request, id string) {
+	if err := h.storage.DeletePolicy(r.Context(), id); err != nil {
+		if err == storage.ErrPolicyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "policy not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to delete policy")
+		return
+	}
+
+	slog.Info("deleted policy", "id", id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Token management endpoints
+
+type CreateTokenRequest struct {
+	PolicyID   string     `json:"policy_id"`
+	KeyID      string     `json:"key_id"`
+	ClientName string     `json:"client_name,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+}
+
+type TokenResponse struct {
+	ID          string     `json:"id"`
+	PolicyID    string     `json:"policy_id"`
+	KeyID       string     `json:"key_id"`
+	ClientName  string     `json:"client_name,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	RedeemedAt  *time.Time `json:"redeemed_at,omitempty"`
+	RedeemedBy  string     `json:"redeemed_by,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+func (h *Handler) handleTokens(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListTokens(w, r)
+	case http.MethodPost:
+		h.handleCreateToken(w, r)
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) handleTokenByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/tokens/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) == 0 || parts[0] == "" {
+		h.errorResponse(w, http.StatusBadRequest, "missing token id")
+		return
+	}
+
+	tokenID := parts[0]
+
+	// Check for /redeem action
+	if len(parts) >= 2 && parts[1] == "redeem" {
+		if r.Method == http.MethodPost {
+			h.handleRedeemToken(w, r, tokenID)
+			return
+		}
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetToken(w, r, tokenID)
+	case http.MethodDelete:
+		h.handleDeleteToken(w, r, tokenID)
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) handleListTokens(w http.ResponseWriter, r *http.Request) {
+	keyID := r.URL.Query().Get("key_id")
+	if keyID == "" {
+		h.errorResponse(w, http.StatusBadRequest, "key_id query parameter required")
+		return
+	}
+
+	tokens, err := h.storage.ListTokens(r.Context(), keyID)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to list tokens")
+		return
+	}
+
+	response := make([]TokenResponse, len(tokens))
+	for i, t := range tokens {
+		response[i] = TokenResponse{
+			ID:         t.ID,
+			PolicyID:   t.PolicyID,
+			KeyID:      t.KeyID,
+			ClientName: t.ClientName,
+			ExpiresAt:  t.ExpiresAt,
+			RedeemedAt: t.RedeemedAt,
+			RedeemedBy: t.RedeemedBy,
+			CreatedAt:  t.CreatedAt,
+		}
+	}
+	h.jsonResponse(w, http.StatusOK, response)
+}
+
+func (h *Handler) handleCreateToken(w http.ResponseWriter, r *http.Request) {
+	var req CreateTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.PolicyID == "" {
+		h.errorResponse(w, http.StatusBadRequest, "policy_id is required")
+		return
+	}
+
+	if req.KeyID == "" {
+		h.errorResponse(w, http.StatusBadRequest, "key_id is required")
+		return
+	}
+
+	// Verify policy exists
+	if _, err := h.storage.GetPolicy(r.Context(), req.PolicyID); err != nil {
+		if err == storage.ErrPolicyNotFound {
+			h.errorResponse(w, http.StatusBadRequest, "policy not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to verify policy")
+		return
+	}
+
+	// Verify key exists
+	if _, err := h.storage.GetKey(r.Context(), req.KeyID); err != nil {
+		if err == storage.ErrKeyNotFound {
+			h.errorResponse(w, http.StatusBadRequest, "key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to verify key")
+		return
+	}
+
+	token := &storage.Token{
+		ID:         generateID(),
+		PolicyID:   req.PolicyID,
+		KeyID:      req.KeyID,
+		ClientName: req.ClientName,
+		ExpiresAt:  req.ExpiresAt,
+		CreatedAt:  time.Now(),
+	}
+
+	if err := h.storage.CreateToken(r.Context(), token); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to create token")
+		return
+	}
+
+	slog.Info("created token", "id", token.ID, "policy", token.PolicyID, "key", token.KeyID)
+
+	h.jsonResponse(w, http.StatusCreated, TokenResponse{
+		ID:         token.ID,
+		PolicyID:   token.PolicyID,
+		KeyID:      token.KeyID,
+		ClientName: token.ClientName,
+		ExpiresAt:  token.ExpiresAt,
+		CreatedAt:  token.CreatedAt,
+	})
+}
+
+func (h *Handler) handleGetToken(w http.ResponseWriter, r *http.Request, id string) {
+	token, err := h.storage.GetToken(r.Context(), id)
+	if err != nil {
+		if err == storage.ErrTokenNotFound {
+			h.errorResponse(w, http.StatusNotFound, "token not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get token")
+		return
+	}
+
+	h.jsonResponse(w, http.StatusOK, TokenResponse{
+		ID:         token.ID,
+		PolicyID:   token.PolicyID,
+		KeyID:      token.KeyID,
+		ClientName: token.ClientName,
+		ExpiresAt:  token.ExpiresAt,
+		RedeemedAt: token.RedeemedAt,
+		RedeemedBy: token.RedeemedBy,
+		CreatedAt:  token.CreatedAt,
+	})
+}
+
+type RedeemTokenRequest struct {
+	RedeemerPubkey string `json:"redeemer_pubkey"`
+}
+
+func (h *Handler) handleRedeemToken(w http.ResponseWriter, r *http.Request, tokenID string) {
+	var req RedeemTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if len(req.RedeemerPubkey) != 64 {
+		h.errorResponse(w, http.StatusBadRequest, "invalid redeemer_pubkey format")
+		return
+	}
+
+	token, err := h.storage.RedeemToken(r.Context(), tokenID, req.RedeemerPubkey)
+	if err != nil {
+		switch err {
+		case storage.ErrTokenNotFound:
+			h.errorResponse(w, http.StatusNotFound, "token not found")
+		case storage.ErrTokenRedeemed:
+			h.errorResponse(w, http.StatusConflict, "token already redeemed")
+		case storage.ErrTokenExpired:
+			h.errorResponse(w, http.StatusGone, "token expired")
+		default:
+			h.errorResponse(w, http.StatusInternalServerError, "failed to redeem token")
+		}
+		return
+	}
+
+	// Get the policy to apply permissions
+	policy, err := h.storage.GetPolicy(r.Context(), token.PolicyID)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get policy")
+		return
+	}
+
+	// Get the key to get the full pubkey
+	key, err := h.storage.GetKey(r.Context(), token.KeyID)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Create permission from policy rules
+	methods := make([]string, 0, len(policy.Rules))
+	var allowedKinds []int
+	for _, rule := range policy.Rules {
+		methods = append(methods, rule.Method)
+		if len(rule.AllowedKinds) > 0 {
+			allowedKinds = append(allowedKinds, rule.AllowedKinds...)
+		}
+	}
+
+	// Always add "connect" method
+	hasConnect := false
+	for _, m := range methods {
+		if m == "connect" {
+			hasConnect = true
+			break
+		}
+	}
+	if !hasConnect {
+		methods = append(methods, "connect")
+	}
+
+	perm := &storage.Permission{
+		KeyID:        key.Pubkey,
+		UserPubkey:   req.RedeemerPubkey,
+		Methods:      methods,
+		AllowedKinds: allowedKinds,
+		ExpiresAt:    policy.ExpiresAt,
+	}
+
+	if err := h.storage.SetPermission(r.Context(), perm); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+		return
+	}
+
+	slog.Info("token redeemed",
+		"token", tokenID,
+		"redeemer", req.RedeemerPubkey[:16]+"...",
+		"key", token.KeyID,
+		"methods", methods,
+	)
+
+	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"message":     "token redeemed successfully",
+		"key_pubkey":  key.Pubkey,
+		"methods":     methods,
+		"expires_at":  policy.ExpiresAt,
+	})
+}
+
+func (h *Handler) handleDeleteToken(w http.ResponseWriter, r *http.Request, id string) {
+	if err := h.storage.DeleteToken(r.Context(), id); err != nil {
+		if err == storage.ErrTokenNotFound {
+			h.errorResponse(w, http.StatusNotFound, "token not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to delete token")
+		return
+	}
+
+	slog.Info("deleted token", "id", id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Pending request (authorization) endpoints
+
+type PendingRequestResponse struct {
+	ID           string                 `json:"id"`
+	KeyPubkey    string                 `json:"key_pubkey"`
+	ClientPubkey string                 `json:"client_pubkey"`
+	Method       string                 `json:"method"`
+	Params       map[string]interface{} `json:"params,omitempty"`
+	EventKind    *int                   `json:"event_kind,omitempty"`
+	ExpiresAt    time.Time              `json:"expires_at"`
+	CreatedAt    time.Time              `json:"created_at"`
+}
+
+func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListRequests(w, r)
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) handleRequestByID(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/requests/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) == 0 || parts[0] == "" {
+		h.errorResponse(w, http.StatusBadRequest, "missing request id")
+		return
+	}
+
+	requestID := parts[0]
+
+	// Check for /approve or /deny action
+	if len(parts) >= 2 {
+		switch parts[1] {
+		case "approve":
+			if r.Method == http.MethodPost {
+				h.handleApproveRequest(w, r, requestID)
+				return
+			}
+		case "deny":
+			if r.Method == http.MethodPost {
+				h.handleDenyRequest(w, r, requestID)
+				return
+			}
+		}
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetRequest(w, r, requestID)
+	case http.MethodDelete:
+		h.handleDenyRequest(w, r, requestID) // DELETE = deny
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) handleListRequests(w http.ResponseWriter, r *http.Request) {
+	keyPubkey := r.URL.Query().Get("key_pubkey")
+	if keyPubkey == "" {
+		h.errorResponse(w, http.StatusBadRequest, "key_pubkey query parameter required")
+		return
+	}
+
+	requests, err := h.storage.ListPendingRequests(r.Context(), keyPubkey)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to list requests")
+		return
+	}
+
+	response := make([]PendingRequestResponse, len(requests))
+	for i, req := range requests {
+		response[i] = PendingRequestResponse{
+			ID:           req.ID,
+			KeyPubkey:    req.KeyPubkey,
+			ClientPubkey: req.ClientPubkey,
+			Method:       req.Method,
+			Params:       req.Params,
+			EventKind:    req.EventKind,
+			ExpiresAt:    req.ExpiresAt,
+			CreatedAt:    req.CreatedAt,
+		}
+	}
+	h.jsonResponse(w, http.StatusOK, response)
+}
+
+func (h *Handler) handleGetRequest(w http.ResponseWriter, r *http.Request, id string) {
+	req, err := h.storage.GetPendingRequest(r.Context(), id)
+	if err != nil {
+		if err == storage.ErrRequestNotFound || err == storage.ErrRequestExpired {
+			h.errorResponse(w, http.StatusNotFound, "request not found or expired")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get request")
+		return
+	}
+
+	h.jsonResponse(w, http.StatusOK, PendingRequestResponse{
+		ID:           req.ID,
+		KeyPubkey:    req.KeyPubkey,
+		ClientPubkey: req.ClientPubkey,
+		Method:       req.Method,
+		Params:       req.Params,
+		EventKind:    req.EventKind,
+		ExpiresAt:    req.ExpiresAt,
+		CreatedAt:    req.CreatedAt,
+	})
+}
+
+type ApproveRequestInput struct {
+	Methods      []string `json:"methods,omitempty"`       // Methods to allow (default: requested method only)
+	AllowedKinds []int    `json:"allowed_kinds,omitempty"` // Kinds to allow for sign_event
+	Remember     bool     `json:"remember"`                // Create persistent permission
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`  // Permission expiration (if remember=true)
+}
+
+func (h *Handler) handleApproveRequest(w http.ResponseWriter, r *http.Request, requestID string) {
+	var input ApproveRequestInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		// Allow empty body (approve with defaults)
+		input = ApproveRequestInput{}
+	}
+
+	pendingReq, err := h.storage.GetPendingRequest(r.Context(), requestID)
+	if err != nil {
+		if err == storage.ErrRequestNotFound || err == storage.ErrRequestExpired {
+			h.errorResponse(w, http.StatusNotFound, "request not found or expired")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get request")
+		return
+	}
+
+	// If remember is true, create a persistent permission
+	if input.Remember {
+		methods := input.Methods
+		if len(methods) == 0 {
+			methods = []string{pendingReq.Method}
+		}
+
+		// Always include connect
+		hasConnect := false
+		for _, m := range methods {
+			if m == "connect" {
+				hasConnect = true
+				break
+			}
+		}
+		if !hasConnect {
+			methods = append(methods, "connect")
+		}
+
+		perm := &storage.Permission{
+			KeyID:        pendingReq.KeyPubkey,
+			UserPubkey:   pendingReq.ClientPubkey,
+			Methods:      methods,
+			AllowedKinds: input.AllowedKinds,
+			ExpiresAt:    input.ExpiresAt,
+		}
+
+		if err := h.storage.SetPermission(r.Context(), perm); err != nil {
+			h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+			return
+		}
+	}
+
+	// Delete the pending request
+	if err := h.storage.DeletePendingRequest(r.Context(), requestID); err != nil {
+		slog.Warn("failed to delete pending request", "id", requestID, "error", err)
+	}
+
+	// Notify the signer to process the approved request
+	h.signer.ApproveRequest(requestID, pendingReq)
+
+	slog.Info("approved request",
+		"id", requestID,
+		"client", pendingReq.ClientPubkey[:16]+"...",
+		"method", pendingReq.Method,
+		"remember", input.Remember,
+	)
+
+	h.jsonResponse(w, http.StatusOK, map[string]string{
+		"message": "request approved",
+		"id":      requestID,
+	})
+}
+
+func (h *Handler) handleDenyRequest(w http.ResponseWriter, r *http.Request, requestID string) {
+	pendingReq, err := h.storage.GetPendingRequest(r.Context(), requestID)
+	if err != nil {
+		if err == storage.ErrRequestNotFound || err == storage.ErrRequestExpired {
+			h.errorResponse(w, http.StatusNotFound, "request not found or expired")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get request")
+		return
+	}
+
+	// Delete the pending request
+	if err := h.storage.DeletePendingRequest(r.Context(), requestID); err != nil {
+		slog.Warn("failed to delete pending request", "id", requestID, "error", err)
+	}
+
+	// Notify the signer to deny the request
+	h.signer.DenyRequest(requestID, pendingReq)
+
+	slog.Info("denied request",
+		"id", requestID,
+		"client", pendingReq.ClientPubkey[:16]+"...",
+		"method", pendingReq.Method,
+	)
+
+	h.jsonResponse(w, http.StatusOK, map[string]string{
+		"message": "request denied",
+		"id":      requestID,
+	})
+}
+
+// Helper to generate random IDs
+func generateID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp-based ID
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%x", b)
 }
 
 // Status endpoint

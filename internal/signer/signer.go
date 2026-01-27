@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -35,13 +36,31 @@ type NIP46Response struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// pendingRequestContext stores the context needed to process a request after authorization
+type pendingRequestContext struct {
+	targetPubkey string
+	privateKey   string
+	clientPubkey string
+	request      *NIP46Request
+	perm         *storage.Permission
+	resultChan   chan authResult
+}
+
+// authResult contains the result of an authorization decision
+type authResult struct {
+	approved bool
+	perm     *storage.Permission // Permission to use (may be from token redemption)
+}
+
 // Signer handles NIP-46 remote signing requests
 type Signer struct {
-	config      *config.Config
-	storage     storage.Storage
-	relayClient *relay.Client
-	keys        map[string]string // pubkey -> private key (hex)
-	cancel      context.CancelFunc
+	config         *config.Config
+	storage        storage.Storage
+	relayClient    *relay.Client
+	keys           map[string]string                  // pubkey -> private key (hex)
+	pendingCtx     map[string]*pendingRequestContext  // requestID -> context
+	pendingCtxLock sync.RWMutex
+	cancel         context.CancelFunc
 }
 
 // New creates a new NIP-46 signer
@@ -51,6 +70,7 @@ func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client) *
 		storage:     store,
 		relayClient: relayClient,
 		keys:        make(map[string]string),
+		pendingCtx:  make(map[string]*pendingRequestContext),
 	}
 }
 
@@ -437,5 +457,124 @@ func (s *Signer) GetStatus() map[string]interface{} {
 	return map[string]interface{}{
 		"keys_loaded":      len(s.keys),
 		"connected_relays": s.relayClient.GetConnectedRelays(),
+	}
+}
+
+// ApproveRequest processes an approved pending authorization request
+func (s *Signer) ApproveRequest(requestID string, pendingReq *storage.PendingRequest) {
+	s.pendingCtxLock.RLock()
+	reqCtx, exists := s.pendingCtx[requestID]
+	s.pendingCtxLock.RUnlock()
+
+	if !exists {
+		slog.Warn("approve request: context not found, request may have expired", "request_id", requestID)
+		return
+	}
+
+	// Signal approval
+	select {
+	case reqCtx.resultChan <- authResult{approved: true, perm: reqCtx.perm}:
+		slog.Info("request approved", "request_id", requestID, "method", pendingReq.Method)
+	default:
+		slog.Warn("approve request: could not send result, channel may be closed", "request_id", requestID)
+	}
+}
+
+// DenyRequest sends a denial response for a pending authorization request
+func (s *Signer) DenyRequest(requestID string, pendingReq *storage.PendingRequest) {
+	s.pendingCtxLock.RLock()
+	reqCtx, exists := s.pendingCtx[requestID]
+	s.pendingCtxLock.RUnlock()
+
+	if !exists {
+		slog.Warn("deny request: context not found, request may have expired", "request_id", requestID)
+		return
+	}
+
+	// Signal denial
+	select {
+	case reqCtx.resultChan <- authResult{approved: false}:
+		slog.Info("request denied", "request_id", requestID, "method", pendingReq.Method)
+	default:
+		slog.Warn("deny request: could not send result, channel may be closed", "request_id", requestID)
+	}
+}
+
+// storePendingContext stores the context for a pending authorization request
+func (s *Signer) storePendingContext(requestID string, ctx *pendingRequestContext) {
+	s.pendingCtxLock.Lock()
+	defer s.pendingCtxLock.Unlock()
+	s.pendingCtx[requestID] = ctx
+}
+
+// removePendingContext removes the context for a pending authorization request
+func (s *Signer) removePendingContext(requestID string) {
+	s.pendingCtxLock.Lock()
+	defer s.pendingCtxLock.Unlock()
+	delete(s.pendingCtx, requestID)
+}
+
+// waitForAuthorization creates a pending request and waits for approval/denial
+func (s *Signer) waitForAuthorization(ctx context.Context, reqCtx *pendingRequestContext, timeout time.Duration) (bool, *storage.Permission, error) {
+	// Generate a unique request ID
+	requestID := fmt.Sprintf("%s:%s:%d", reqCtx.targetPubkey[:8], reqCtx.clientPubkey[:8], time.Now().UnixNano())
+
+	// Extract event kind if this is a sign_event request
+	var eventKind *int
+	if reqCtx.request.Method == "sign_event" && len(reqCtx.request.Params) > 0 {
+		var event nostr.Event
+		if err := json.Unmarshal([]byte(reqCtx.request.Params[0]), &event); err == nil {
+			kind := event.Kind
+			eventKind = &kind
+		}
+	}
+
+	// Create pending request in storage
+	pendingReq := &storage.PendingRequest{
+		ID:           requestID,
+		KeyPubkey:    reqCtx.targetPubkey,
+		ClientPubkey: reqCtx.clientPubkey,
+		Method:       reqCtx.request.Method,
+		Params:       make(map[string]interface{}),
+		EventKind:    eventKind,
+		ExpiresAt:    time.Now().Add(timeout),
+		CreatedAt:    time.Now(),
+	}
+
+	// Store params (first param if present)
+	if len(reqCtx.request.Params) > 0 {
+		pendingReq.Params["0"] = reqCtx.request.Params[0]
+	}
+
+	if err := s.storage.CreatePendingRequest(ctx, pendingReq); err != nil {
+		return false, nil, fmt.Errorf("failed to create pending request: %w", err)
+	}
+
+	// Create result channel
+	reqCtx.resultChan = make(chan authResult, 1)
+
+	// Store context for later retrieval
+	s.storePendingContext(requestID, reqCtx)
+	defer func() {
+		s.removePendingContext(requestID)
+		// Clean up storage
+		_ = s.storage.DeletePendingRequest(ctx, requestID)
+	}()
+
+	slog.Info("waiting for authorization",
+		"request_id", requestID,
+		"method", reqCtx.request.Method,
+		"client", reqCtx.clientPubkey[:16]+"...",
+		"timeout", timeout,
+	)
+
+	// Wait for result or timeout
+	select {
+	case result := <-reqCtx.resultChan:
+		return result.approved, result.perm, nil
+	case <-time.After(timeout):
+		return false, nil, fmt.Errorf("authorization timeout")
+	case <-ctx.Done():
+		return false, nil, ctx.Err()
 	}
 }

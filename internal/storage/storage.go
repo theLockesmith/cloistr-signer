@@ -11,10 +11,16 @@ import (
 )
 
 var (
-	ErrKeyNotFound     = errors.New("key not found")
-	ErrKeyExists       = errors.New("key already exists")
-	ErrNotAuthorized   = errors.New("not authorized")
-	ErrSessionNotFound = errors.New("session not found")
+	ErrKeyNotFound      = errors.New("key not found")
+	ErrKeyExists        = errors.New("key already exists")
+	ErrNotAuthorized    = errors.New("not authorized")
+	ErrSessionNotFound  = errors.New("session not found")
+	ErrPolicyNotFound   = errors.New("policy not found")
+	ErrTokenNotFound    = errors.New("token not found")
+	ErrTokenExpired     = errors.New("token expired")
+	ErrTokenRedeemed    = errors.New("token already redeemed")
+	ErrRequestNotFound  = errors.New("request not found")
+	ErrRequestExpired   = errors.New("request expired")
 )
 
 // Key represents a stored signing key
@@ -38,12 +44,58 @@ type Permission struct {
 
 // Session represents an active NIP-46 session
 type Session struct {
-	ID          string    `json:"id"`
-	KeyID       string    `json:"key_id"`
-	ClientPubkey string   `json:"client_pubkey"`
-	Permissions []string  `json:"permissions"`
-	CreatedAt   time.Time `json:"created_at"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	ID           string    `json:"id"`
+	KeyID        string    `json:"key_id"`
+	ClientPubkey string    `json:"client_pubkey"`
+	Permissions  []string  `json:"permissions"`
+	CreatedAt    time.Time `json:"created_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+// Policy defines a reusable permission template
+type Policy struct {
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	Description string        `json:"description,omitempty"`
+	Rules       []*PolicyRule `json:"rules"`
+	ExpiresAt   *time.Time    `json:"expires_at,omitempty"`
+	CreatedAt   time.Time     `json:"created_at"`
+	CreatedBy   string        `json:"created_by,omitempty"`
+}
+
+// PolicyRule defines a single permission rule within a policy
+type PolicyRule struct {
+	ID           string `json:"id"`
+	PolicyID     string `json:"policy_id"`
+	Method       string `json:"method"` // "sign_event", "encrypt", "decrypt", "ping", "*"
+	AllowedKinds []int  `json:"allowed_kinds,omitempty"`
+	MaxUsage     int    `json:"max_usage,omitempty"`  // 0 = unlimited
+	CurrentUsage int    `json:"current_usage"`
+}
+
+// Token represents a one-time redeemable access token
+type Token struct {
+	ID          string     `json:"id"`
+	PolicyID    string     `json:"policy_id"`
+	KeyID       string     `json:"key_id"` // Which key this token grants access to
+	ClientName  string     `json:"client_name,omitempty"`
+	CreatedBy   string     `json:"created_by,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	RedeemedAt  *time.Time `json:"redeemed_at,omitempty"`
+	RedeemedBy  string     `json:"redeemed_by,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+// PendingRequest represents a NIP-46 request awaiting authorization
+type PendingRequest struct {
+	ID           string                 `json:"id"`
+	KeyPubkey    string                 `json:"key_pubkey"`
+	ClientPubkey string                 `json:"client_pubkey"`
+	Method       string                 `json:"method"`
+	Params       map[string]interface{} `json:"params,omitempty"`
+	EventKind    *int                   `json:"event_kind,omitempty"` // For sign_event requests
+	ExpiresAt    time.Time              `json:"expires_at"`
+	CreatedAt    time.Time              `json:"created_at"`
 }
 
 // Storage interface for key and session management
@@ -69,6 +121,27 @@ type Storage interface {
 	DeleteSession(ctx context.Context, id string) error
 	CleanExpiredSessions(ctx context.Context) error
 
+	// Policy management
+	CreatePolicy(ctx context.Context, policy *Policy) error
+	GetPolicy(ctx context.Context, id string) (*Policy, error)
+	ListPolicies(ctx context.Context) ([]*Policy, error)
+	DeletePolicy(ctx context.Context, id string) error
+	IncrementRuleUsage(ctx context.Context, ruleID string) error
+
+	// Token management
+	CreateToken(ctx context.Context, token *Token) error
+	GetToken(ctx context.Context, id string) (*Token, error)
+	ListTokens(ctx context.Context, keyID string) ([]*Token, error)
+	RedeemToken(ctx context.Context, tokenID, redeemerPubkey string) (*Token, error)
+	DeleteToken(ctx context.Context, id string) error
+
+	// Pending request management
+	CreatePendingRequest(ctx context.Context, req *PendingRequest) error
+	GetPendingRequest(ctx context.Context, id string) (*PendingRequest, error)
+	ListPendingRequests(ctx context.Context, keyPubkey string) ([]*PendingRequest, error)
+	DeletePendingRequest(ctx context.Context, id string) error
+	CleanExpiredRequests(ctx context.Context) error
+
 	// Lifecycle
 	Close() error
 }
@@ -89,22 +162,32 @@ func New(cfg config.StorageConfig) (Storage, error) {
 
 // MemoryStorage is an in-memory implementation for development/testing
 type MemoryStorage struct {
-	mu          sync.RWMutex
-	keys        map[string]*Key
-	keysByPubkey map[string]*Key
-	keysByName  map[string]*Key
-	permissions map[string]map[string]*Permission // keyID -> userPubkey -> Permission
-	sessions    map[string]*Session
+	mu              sync.RWMutex
+	keys            map[string]*Key
+	keysByPubkey    map[string]*Key
+	keysByName      map[string]*Key
+	permissions     map[string]map[string]*Permission // keyID -> userPubkey -> Permission
+	sessions        map[string]*Session
+	policies        map[string]*Policy
+	policyRules     map[string]*PolicyRule // ruleID -> PolicyRule
+	tokens          map[string]*Token
+	tokensByKey     map[string]map[string]*Token // keyID -> tokenID -> Token
+	pendingRequests map[string]*PendingRequest
 }
 
 // NewMemoryStorage creates a new in-memory storage
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
-		keys:        make(map[string]*Key),
-		keysByPubkey: make(map[string]*Key),
-		keysByName:  make(map[string]*Key),
-		permissions: make(map[string]map[string]*Permission),
-		sessions:    make(map[string]*Session),
+		keys:            make(map[string]*Key),
+		keysByPubkey:    make(map[string]*Key),
+		keysByName:      make(map[string]*Key),
+		permissions:     make(map[string]map[string]*Permission),
+		sessions:        make(map[string]*Session),
+		policies:        make(map[string]*Policy),
+		policyRules:     make(map[string]*PolicyRule),
+		tokens:          make(map[string]*Token),
+		tokensByKey:     make(map[string]map[string]*Token),
+		pendingRequests: make(map[string]*PendingRequest),
 	}
 }
 
@@ -310,6 +393,220 @@ func (m *MemoryStorage) CleanExpiredSessions(ctx context.Context) error {
 	for id, session := range m.sessions {
 		if now.After(session.ExpiresAt) {
 			delete(m.sessions, id)
+		}
+	}
+	return nil
+}
+
+// Policy management
+
+func (m *MemoryStorage) CreatePolicy(ctx context.Context, policy *Policy) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.policies[policy.ID] = policy
+	for _, rule := range policy.Rules {
+		m.policyRules[rule.ID] = rule
+	}
+	return nil
+}
+
+func (m *MemoryStorage) GetPolicy(ctx context.Context, id string) (*Policy, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	policy, exists := m.policies[id]
+	if !exists {
+		return nil, ErrPolicyNotFound
+	}
+
+	if policy.ExpiresAt != nil && time.Now().After(*policy.ExpiresAt) {
+		return nil, ErrPolicyNotFound
+	}
+
+	return policy, nil
+}
+
+func (m *MemoryStorage) ListPolicies(ctx context.Context) ([]*Policy, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	policies := make([]*Policy, 0, len(m.policies))
+	now := time.Now()
+	for _, policy := range m.policies {
+		if policy.ExpiresAt == nil || now.Before(*policy.ExpiresAt) {
+			policies = append(policies, policy)
+		}
+	}
+	return policies, nil
+}
+
+func (m *MemoryStorage) DeletePolicy(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	policy, exists := m.policies[id]
+	if !exists {
+		return ErrPolicyNotFound
+	}
+
+	// Delete associated rules
+	for _, rule := range policy.Rules {
+		delete(m.policyRules, rule.ID)
+	}
+	delete(m.policies, id)
+	return nil
+}
+
+func (m *MemoryStorage) IncrementRuleUsage(ctx context.Context, ruleID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	rule, exists := m.policyRules[ruleID]
+	if !exists {
+		return ErrPolicyNotFound
+	}
+
+	rule.CurrentUsage++
+	return nil
+}
+
+// Token management
+
+func (m *MemoryStorage) CreateToken(ctx context.Context, token *Token) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.tokens[token.ID] = token
+	if m.tokensByKey[token.KeyID] == nil {
+		m.tokensByKey[token.KeyID] = make(map[string]*Token)
+	}
+	m.tokensByKey[token.KeyID][token.ID] = token
+	return nil
+}
+
+func (m *MemoryStorage) GetToken(ctx context.Context, id string) (*Token, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	token, exists := m.tokens[id]
+	if !exists {
+		return nil, ErrTokenNotFound
+	}
+	return token, nil
+}
+
+func (m *MemoryStorage) ListTokens(ctx context.Context, keyID string) ([]*Token, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	keyTokens, exists := m.tokensByKey[keyID]
+	if !exists {
+		return []*Token{}, nil
+	}
+
+	tokens := make([]*Token, 0, len(keyTokens))
+	for _, token := range keyTokens {
+		tokens = append(tokens, token)
+	}
+	return tokens, nil
+}
+
+func (m *MemoryStorage) RedeemToken(ctx context.Context, tokenID, redeemerPubkey string) (*Token, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	token, exists := m.tokens[tokenID]
+	if !exists {
+		return nil, ErrTokenNotFound
+	}
+
+	if token.RedeemedAt != nil {
+		return nil, ErrTokenRedeemed
+	}
+
+	if token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt) {
+		return nil, ErrTokenExpired
+	}
+
+	now := time.Now()
+	token.RedeemedAt = &now
+	token.RedeemedBy = redeemerPubkey
+	return token, nil
+}
+
+func (m *MemoryStorage) DeleteToken(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	token, exists := m.tokens[id]
+	if !exists {
+		return ErrTokenNotFound
+	}
+
+	delete(m.tokens, id)
+	if keyTokens, exists := m.tokensByKey[token.KeyID]; exists {
+		delete(keyTokens, id)
+	}
+	return nil
+}
+
+// Pending request management
+
+func (m *MemoryStorage) CreatePendingRequest(ctx context.Context, req *PendingRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.pendingRequests[req.ID] = req
+	return nil
+}
+
+func (m *MemoryStorage) GetPendingRequest(ctx context.Context, id string) (*PendingRequest, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	req, exists := m.pendingRequests[id]
+	if !exists {
+		return nil, ErrRequestNotFound
+	}
+
+	if time.Now().After(req.ExpiresAt) {
+		return nil, ErrRequestExpired
+	}
+
+	return req, nil
+}
+
+func (m *MemoryStorage) ListPendingRequests(ctx context.Context, keyPubkey string) ([]*PendingRequest, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	requests := make([]*PendingRequest, 0)
+	now := time.Now()
+	for _, req := range m.pendingRequests {
+		if req.KeyPubkey == keyPubkey && now.Before(req.ExpiresAt) {
+			requests = append(requests, req)
+		}
+	}
+	return requests, nil
+}
+
+func (m *MemoryStorage) DeletePendingRequest(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	delete(m.pendingRequests, id)
+	return nil
+}
+
+func (m *MemoryStorage) CleanExpiredRequests(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	for id, req := range m.pendingRequests {
+		if now.After(req.ExpiresAt) {
+			delete(m.pendingRequests, id)
 		}
 	}
 	return nil
