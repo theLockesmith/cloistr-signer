@@ -96,6 +96,9 @@ internal/
 | `DATABASE_URL` | PostgreSQL connection string | (none) |
 | `ADMIN_PUBKEYS` | Comma-separated admin pubkeys | (none) |
 | `VAULT_URL` | Vault URL for key encryption | (none) |
+| `REQUIRE_APPROVAL` | Require approval for unknown clients | `true` |
+| `AUTHORIZATION_TIMEOUT` | Timeout for authorization in seconds | `60` |
+| `NOTIFY_ADMINS` | Send DMs to admins for pending requests | `true` |
 
 ## Development Status
 
@@ -121,14 +124,16 @@ internal/
 - [x] Authorization callbacks (async approval framework)
 - [x] Pending request queue with timeout
 
+### Completed (Phase 2.5)
+- [x] Interactive approval flow integration with NIP-46 handler
+- [x] Admin DM notification for pending approvals
+- [x] Policy usage tracking and limits
+- [x] Configurable authorization timeout
+- [x] Async request processing with goroutines
+
 ### Roadmap to nsecbunker Feature Parity
 
-**Phase 2.5: Authorization Polish (NEXT)**
-- [ ] Interactive approval flow integration with NIP-46 handler
-- [ ] Admin DM notification for approvals
-- [ ] Policy usage tracking and limits
-
-**Phase 3: User Management**
+**Phase 3: User Management (NEXT)**
 - [ ] User registration (username/email/password)
 - [ ] Password auth with bcrypt
 - [ ] MFA (TOTP + backup codes)
@@ -198,4 +203,4 @@ node test-nip46.mjs
 
 ---
 
-**Last Updated:** 2026-01-27
+**Last Updated:** 2026-01-27 (Phase 2.5 complete)
