@@ -21,6 +21,12 @@ var (
 	ErrTokenRedeemed    = errors.New("token already redeemed")
 	ErrRequestNotFound  = errors.New("request not found")
 	ErrRequestExpired   = errors.New("request expired")
+	ErrUserNotFound     = errors.New("user not found")
+	ErrUserExists       = errors.New("user already exists")
+	ErrInvalidPassword  = errors.New("invalid password")
+	ErrAccountLocked    = errors.New("account locked")
+	ErrMFARequired      = errors.New("MFA verification required")
+	ErrInvalidMFACode   = errors.New("invalid MFA code")
 )
 
 // Key represents a stored signing key
@@ -99,6 +105,35 @@ type PendingRequest struct {
 	CreatedAt    time.Time              `json:"created_at"`
 }
 
+// User represents a registered user account
+type User struct {
+	ID                  string     `json:"id"`
+	Username            string     `json:"username"`
+	Email               string     `json:"email,omitempty"`
+	PasswordHash        string     `json:"-"` // Never exposed in JSON
+	MFASecret           string     `json:"-"` // TOTP secret, never exposed
+	MFAEnabled          bool       `json:"mfa_enabled"`
+	BackupCodes         []string   `json:"-"` // Hashed backup codes
+	BackupCodesUsed     int        `json:"backup_codes_used"`
+	FailedLoginAttempts int        `json:"failed_login_attempts"`
+	LockedUntil         *time.Time `json:"locked_until,omitempty"`
+	LastLoginAt         *time.Time `json:"last_login_at,omitempty"`
+	LastLoginIP         string     `json:"last_login_ip,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+// UserSession represents an authenticated user session (JWT-based)
+type UserSession struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id"`
+	Token     string    `json:"-"` // JWT token hash for revocation check
+	UserAgent string    `json:"user_agent,omitempty"`
+	IPAddress string    `json:"ip_address,omitempty"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // Storage interface for key and session management
 type Storage interface {
 	// Key management
@@ -143,6 +178,26 @@ type Storage interface {
 	DeletePendingRequest(ctx context.Context, id string) error
 	CleanExpiredRequests(ctx context.Context) error
 
+	// User management
+	CreateUser(ctx context.Context, user *User) error
+	GetUser(ctx context.Context, id string) (*User, error)
+	GetUserByUsername(ctx context.Context, username string) (*User, error)
+	GetUserByEmail(ctx context.Context, email string) (*User, error)
+	UpdateUser(ctx context.Context, user *User) error
+	DeleteUser(ctx context.Context, id string) error
+	IncrementFailedLogins(ctx context.Context, userID string) error
+	ResetFailedLogins(ctx context.Context, userID string) error
+	LockUser(ctx context.Context, userID string, until time.Time) error
+	UnlockUser(ctx context.Context, userID string) error
+
+	// User session management
+	CreateUserSession(ctx context.Context, session *UserSession) error
+	GetUserSession(ctx context.Context, id string) (*UserSession, error)
+	ListUserSessions(ctx context.Context, userID string) ([]*UserSession, error)
+	DeleteUserSession(ctx context.Context, id string) error
+	DeleteUserSessions(ctx context.Context, userID string) error
+	CleanExpiredUserSessions(ctx context.Context) error
+
 	// Lifecycle
 	Close() error
 }
@@ -174,21 +229,31 @@ type MemoryStorage struct {
 	tokens          map[string]*Token
 	tokensByKey     map[string]map[string]*Token // keyID -> tokenID -> Token
 	pendingRequests map[string]*PendingRequest
+	users           map[string]*User
+	usersByUsername map[string]*User
+	usersByEmail    map[string]*User
+	userSessions    map[string]*UserSession
+	userSessionsByUser map[string]map[string]*UserSession // userID -> sessionID -> UserSession
 }
 
 // NewMemoryStorage creates a new in-memory storage
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
-		keys:            make(map[string]*Key),
-		keysByPubkey:    make(map[string]*Key),
-		keysByName:      make(map[string]*Key),
-		permissions:     make(map[string]map[string]*Permission),
-		sessions:        make(map[string]*Session),
-		policies:        make(map[string]*Policy),
-		policyRules:     make(map[string]*PolicyRule),
-		tokens:          make(map[string]*Token),
-		tokensByKey:     make(map[string]map[string]*Token),
-		pendingRequests: make(map[string]*PendingRequest),
+		keys:               make(map[string]*Key),
+		keysByPubkey:       make(map[string]*Key),
+		keysByName:         make(map[string]*Key),
+		permissions:        make(map[string]map[string]*Permission),
+		sessions:           make(map[string]*Session),
+		policies:           make(map[string]*Policy),
+		policyRules:        make(map[string]*PolicyRule),
+		tokens:             make(map[string]*Token),
+		tokensByKey:        make(map[string]map[string]*Token),
+		pendingRequests:    make(map[string]*PendingRequest),
+		users:              make(map[string]*User),
+		usersByUsername:    make(map[string]*User),
+		usersByEmail:       make(map[string]*User),
+		userSessions:       make(map[string]*UserSession),
+		userSessionsByUser: make(map[string]map[string]*UserSession),
 	}
 }
 
@@ -608,6 +673,269 @@ func (m *MemoryStorage) CleanExpiredRequests(ctx context.Context) error {
 	for id, req := range m.pendingRequests {
 		if now.After(req.ExpiresAt) {
 			delete(m.pendingRequests, id)
+		}
+	}
+	return nil
+}
+
+// User management
+
+func (m *MemoryStorage) CreateUser(ctx context.Context, user *User) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.users[user.ID]; exists {
+		return ErrUserExists
+	}
+	if _, exists := m.usersByUsername[user.Username]; exists {
+		return ErrUserExists
+	}
+	if user.Email != "" {
+		if _, exists := m.usersByEmail[user.Email]; exists {
+			return ErrUserExists
+		}
+	}
+
+	m.users[user.ID] = user
+	m.usersByUsername[user.Username] = user
+	if user.Email != "" {
+		m.usersByEmail[user.Email] = user
+	}
+	return nil
+}
+
+func (m *MemoryStorage) GetUser(ctx context.Context, id string) (*User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	user, exists := m.users[id]
+	if !exists {
+		return nil, ErrUserNotFound
+	}
+	return user, nil
+}
+
+func (m *MemoryStorage) GetUserByUsername(ctx context.Context, username string) (*User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	user, exists := m.usersByUsername[username]
+	if !exists {
+		return nil, ErrUserNotFound
+	}
+	return user, nil
+}
+
+func (m *MemoryStorage) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	user, exists := m.usersByEmail[email]
+	if !exists {
+		return nil, ErrUserNotFound
+	}
+	return user, nil
+}
+
+func (m *MemoryStorage) UpdateUser(ctx context.Context, user *User) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	existing, exists := m.users[user.ID]
+	if !exists {
+		return ErrUserNotFound
+	}
+
+	// Handle username change
+	if existing.Username != user.Username {
+		delete(m.usersByUsername, existing.Username)
+		m.usersByUsername[user.Username] = user
+	}
+
+	// Handle email change
+	if existing.Email != user.Email {
+		if existing.Email != "" {
+			delete(m.usersByEmail, existing.Email)
+		}
+		if user.Email != "" {
+			m.usersByEmail[user.Email] = user
+		}
+	}
+
+	user.UpdatedAt = time.Now()
+	m.users[user.ID] = user
+	return nil
+}
+
+func (m *MemoryStorage) DeleteUser(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	user, exists := m.users[id]
+	if !exists {
+		return ErrUserNotFound
+	}
+
+	delete(m.users, id)
+	delete(m.usersByUsername, user.Username)
+	if user.Email != "" {
+		delete(m.usersByEmail, user.Email)
+	}
+
+	// Delete user sessions
+	if sessions, exists := m.userSessionsByUser[id]; exists {
+		for sessionID := range sessions {
+			delete(m.userSessions, sessionID)
+		}
+		delete(m.userSessionsByUser, id)
+	}
+
+	return nil
+}
+
+func (m *MemoryStorage) IncrementFailedLogins(ctx context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	user, exists := m.users[userID]
+	if !exists {
+		return ErrUserNotFound
+	}
+
+	user.FailedLoginAttempts++
+	user.UpdatedAt = time.Now()
+	return nil
+}
+
+func (m *MemoryStorage) ResetFailedLogins(ctx context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	user, exists := m.users[userID]
+	if !exists {
+		return ErrUserNotFound
+	}
+
+	user.FailedLoginAttempts = 0
+	user.UpdatedAt = time.Now()
+	return nil
+}
+
+func (m *MemoryStorage) LockUser(ctx context.Context, userID string, until time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	user, exists := m.users[userID]
+	if !exists {
+		return ErrUserNotFound
+	}
+
+	user.LockedUntil = &until
+	user.UpdatedAt = time.Now()
+	return nil
+}
+
+func (m *MemoryStorage) UnlockUser(ctx context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	user, exists := m.users[userID]
+	if !exists {
+		return ErrUserNotFound
+	}
+
+	user.LockedUntil = nil
+	user.FailedLoginAttempts = 0
+	user.UpdatedAt = time.Now()
+	return nil
+}
+
+// User session management
+
+func (m *MemoryStorage) CreateUserSession(ctx context.Context, session *UserSession) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.userSessions[session.ID] = session
+	if m.userSessionsByUser[session.UserID] == nil {
+		m.userSessionsByUser[session.UserID] = make(map[string]*UserSession)
+	}
+	m.userSessionsByUser[session.UserID][session.ID] = session
+	return nil
+}
+
+func (m *MemoryStorage) GetUserSession(ctx context.Context, id string) (*UserSession, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	session, exists := m.userSessions[id]
+	if !exists {
+		return nil, ErrSessionNotFound
+	}
+
+	if time.Now().After(session.ExpiresAt) {
+		return nil, ErrSessionNotFound
+	}
+
+	return session, nil
+}
+
+func (m *MemoryStorage) ListUserSessions(ctx context.Context, userID string) ([]*UserSession, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	sessions := make([]*UserSession, 0)
+	now := time.Now()
+	if userSessions, exists := m.userSessionsByUser[userID]; exists {
+		for _, session := range userSessions {
+			if now.Before(session.ExpiresAt) {
+				sessions = append(sessions, session)
+			}
+		}
+	}
+	return sessions, nil
+}
+
+func (m *MemoryStorage) DeleteUserSession(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	session, exists := m.userSessions[id]
+	if !exists {
+		return nil
+	}
+
+	delete(m.userSessions, id)
+	if userSessions, exists := m.userSessionsByUser[session.UserID]; exists {
+		delete(userSessions, id)
+	}
+	return nil
+}
+
+func (m *MemoryStorage) DeleteUserSessions(ctx context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if sessions, exists := m.userSessionsByUser[userID]; exists {
+		for sessionID := range sessions {
+			delete(m.userSessions, sessionID)
+		}
+		delete(m.userSessionsByUser, userID)
+	}
+	return nil
+}
+
+func (m *MemoryStorage) CleanExpiredUserSessions(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	for id, session := range m.userSessions {
+		if now.After(session.ExpiresAt) {
+			delete(m.userSessions, id)
+			if userSessions, exists := m.userSessionsByUser[session.UserID]; exists {
+				delete(userSessions, id)
+			}
 		}
 	}
 	return nil

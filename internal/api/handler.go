@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/auth"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/signer"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/storage"
@@ -17,9 +18,10 @@ import (
 
 // Handler manages HTTP API endpoints
 type Handler struct {
-	config  *config.Config
-	signer  *signer.Signer
-	storage storage.Storage
+	config     *config.Config
+	signer     *signer.Signer
+	storage    storage.Storage
+	authConfig *auth.Config
 }
 
 // NewHandler creates a new API handler
@@ -28,6 +30,15 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 		config:  cfg,
 		signer:  signer,
 		storage: store,
+		authConfig: &auth.Config{
+			JWTSecret:         cfg.Auth.JWTSecret,
+			JWTIssuer:         "coldforge-signer",
+			TokenExpiry:       time.Duration(cfg.Auth.JWTExpiry) * time.Hour,
+			BcryptCost:        auth.DefaultBcryptCost,
+			LockoutDuration:   time.Duration(cfg.Auth.LockoutMinutes) * time.Minute,
+			MaxFailedAttempts: cfg.Auth.MaxFailedLogins,
+			MFAIssuer:         cfg.Auth.MFAIssuer,
+		},
 	}
 }
 
@@ -53,6 +64,16 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Pending requests (authorization)
 	mux.HandleFunc("/api/v1/requests", h.handleRequests)
 	mux.HandleFunc("/api/v1/requests/", h.handleRequestByID)
+
+	// User management
+	mux.HandleFunc("/api/v1/users/register", h.handleUserRegister)
+	mux.HandleFunc("/api/v1/users/login", h.handleUserLogin)
+	mux.HandleFunc("/api/v1/users/logout", h.handleUserLogout)
+	mux.HandleFunc("/api/v1/users/me", h.handleUserMe)
+	mux.HandleFunc("/api/v1/users/mfa/setup", h.handleMFASetup)
+	mux.HandleFunc("/api/v1/users/mfa/verify", h.handleMFAVerify)
+	mux.HandleFunc("/api/v1/users/mfa/disable", h.handleMFADisable)
+	mux.HandleFunc("/api/v1/users/sessions", h.handleUserSessions)
 
 	// Status
 	mux.HandleFunc("/api/v1/status", h.handleStatus)
@@ -1103,6 +1124,499 @@ func generateID() string {
 		return fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 	return fmt.Sprintf("%x", b)
+}
+
+// User management endpoints
+
+type RegisterRequest struct {
+	Username string `json:"username"`
+	Email    string `json:"email,omitempty"`
+	Password string `json:"password"`
+}
+
+type LoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	MFACode  string `json:"mfa_code,omitempty"`
+}
+
+type LoginResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+	User      UserResponse `json:"user"`
+	MFARequired bool `json:"mfa_required,omitempty"`
+}
+
+type UserResponse struct {
+	ID         string     `json:"id"`
+	Username   string     `json:"username"`
+	Email      string     `json:"email,omitempty"`
+	MFAEnabled bool       `json:"mfa_enabled"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastLogin  *time.Time `json:"last_login,omitempty"`
+}
+
+type MFASetupResponse struct {
+	Secret      string   `json:"secret"`
+	QRCodeURL   string   `json:"qr_code_url"`
+	BackupCodes []string `json:"backup_codes"`
+}
+
+func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req RegisterRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Validate input
+	if req.Username == "" || len(req.Username) < 3 {
+		h.errorResponse(w, http.StatusBadRequest, "username must be at least 3 characters")
+		return
+	}
+	if req.Password == "" || len(req.Password) < 8 {
+		h.errorResponse(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+
+	// Check if username exists
+	if _, err := h.storage.GetUserByUsername(r.Context(), req.Username); err == nil {
+		h.errorResponse(w, http.StatusConflict, "username already exists")
+		return
+	}
+
+	// Check if email exists (if provided)
+	if req.Email != "" {
+		if _, err := h.storage.GetUserByEmail(r.Context(), req.Email); err == nil {
+			h.errorResponse(w, http.StatusConflict, "email already exists")
+			return
+		}
+	}
+
+	// Hash password
+	passwordHash, err := auth.HashPassword(req.Password, h.authConfig.BcryptCost)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to hash password")
+		return
+	}
+
+	// Generate user ID
+	userID, err := auth.GenerateUserID()
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to generate user ID")
+		return
+	}
+
+	// Create user
+	now := time.Now()
+	user := &storage.User{
+		ID:           userID,
+		Username:     req.Username,
+		Email:        req.Email,
+		PasswordHash: passwordHash,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	if err := h.storage.CreateUser(r.Context(), user); err != nil {
+		if err == storage.ErrUserExists {
+			h.errorResponse(w, http.StatusConflict, "user already exists")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to create user")
+		return
+	}
+
+	slog.Info("user registered", "username", req.Username, "user_id", userID)
+
+	h.jsonResponse(w, http.StatusCreated, UserResponse{
+		ID:         user.ID,
+		Username:   user.Username,
+		Email:      user.Email,
+		MFAEnabled: user.MFAEnabled,
+		CreatedAt:  user.CreatedAt,
+	})
+}
+
+func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	if h.authConfig.JWTSecret == "" {
+		h.errorResponse(w, http.StatusServiceUnavailable, "authentication not configured")
+		return
+	}
+
+	var req LoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Get user
+	user, err := h.storage.GetUserByUsername(r.Context(), req.Username)
+	if err != nil {
+		// Don't reveal whether user exists
+		h.errorResponse(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+
+	// Check if account is locked
+	if user.LockedUntil != nil && time.Now().Before(*user.LockedUntil) {
+		h.errorResponse(w, http.StatusForbidden, "account locked")
+		return
+	}
+
+	// Verify password
+	if !auth.VerifyPassword(req.Password, user.PasswordHash) {
+		// Increment failed login attempts
+		h.storage.IncrementFailedLogins(r.Context(), user.ID)
+
+		// Check if we should lock the account
+		if user.FailedLoginAttempts+1 >= h.authConfig.MaxFailedAttempts {
+			lockUntil := time.Now().Add(h.authConfig.LockoutDuration)
+			h.storage.LockUser(r.Context(), user.ID, lockUntil)
+			slog.Warn("account locked due to failed logins", "username", req.Username)
+		}
+
+		h.errorResponse(w, http.StatusUnauthorized, "invalid credentials")
+		return
+	}
+
+	// Check MFA if enabled
+	if user.MFAEnabled {
+		if req.MFACode == "" {
+			// Return indication that MFA is required
+			h.jsonResponse(w, http.StatusOK, LoginResponse{MFARequired: true})
+			return
+		}
+
+		// Validate MFA code
+		if !auth.ValidateMFACode(user.MFASecret, req.MFACode) {
+			// Check backup codes
+			if idx := auth.ValidateBackupCode(req.MFACode, user.BackupCodes); idx >= 0 {
+				// Mark backup code as used (remove from list)
+				user.BackupCodes = append(user.BackupCodes[:idx], user.BackupCodes[idx+1:]...)
+				user.BackupCodesUsed++
+				h.storage.UpdateUser(r.Context(), user)
+			} else {
+				h.errorResponse(w, http.StatusUnauthorized, "invalid MFA code")
+				return
+			}
+		}
+	}
+
+	// Reset failed login attempts
+	h.storage.ResetFailedLogins(r.Context(), user.ID)
+
+	// Generate JWT
+	token, expiresAt, err := auth.GenerateJWT(h.authConfig, user.ID, user.Username)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to generate token")
+		return
+	}
+
+	// Create session
+	sessionID, _ := auth.GenerateSessionID()
+	session := &storage.UserSession{
+		ID:        sessionID,
+		UserID:    user.ID,
+		Token:     token[:16], // Store prefix for revocation check
+		UserAgent: r.UserAgent(),
+		IPAddress: r.RemoteAddr,
+		ExpiresAt: expiresAt,
+		CreatedAt: time.Now(),
+	}
+	h.storage.CreateUserSession(r.Context(), session)
+
+	// Update last login
+	now := time.Now()
+	user.LastLoginAt = &now
+	user.LastLoginIP = r.RemoteAddr
+	h.storage.UpdateUser(r.Context(), user)
+
+	slog.Info("user logged in", "username", req.Username, "user_id", user.ID)
+
+	h.jsonResponse(w, http.StatusOK, LoginResponse{
+		Token:     token,
+		ExpiresAt: expiresAt,
+		User: UserResponse{
+			ID:         user.ID,
+			Username:   user.Username,
+			Email:      user.Email,
+			MFAEnabled: user.MFAEnabled,
+			CreatedAt:  user.CreatedAt,
+			LastLogin:  user.LastLoginAt,
+		},
+	})
+}
+
+func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Get token from Authorization header
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	// Delete all sessions for this user (or just the current one based on token)
+	h.storage.DeleteUserSessions(r.Context(), claims.UserID)
+
+	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "logged out successfully"})
+}
+
+func (h *Handler) handleUserMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	user, err := h.storage.GetUser(r.Context(), claims.UserID)
+	if err != nil {
+		h.errorResponse(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	h.jsonResponse(w, http.StatusOK, UserResponse{
+		ID:         user.ID,
+		Username:   user.Username,
+		Email:      user.Email,
+		MFAEnabled: user.MFAEnabled,
+		CreatedAt:  user.CreatedAt,
+		LastLogin:  user.LastLoginAt,
+	})
+}
+
+func (h *Handler) handleMFASetup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	user, err := h.storage.GetUser(r.Context(), claims.UserID)
+	if err != nil {
+		h.errorResponse(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	if user.MFAEnabled {
+		h.errorResponse(w, http.StatusConflict, "MFA already enabled")
+		return
+	}
+
+	// Generate MFA secret
+	secret, url, err := auth.GenerateMFASecret(h.authConfig.MFAIssuer, user.Username)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to generate MFA secret")
+		return
+	}
+
+	// Generate backup codes
+	codes, hashes, err := auth.GenerateBackupCodes(auth.DefaultBackupCodeCount)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to generate backup codes")
+		return
+	}
+
+	// Store secret and backup codes (not enabled until verified)
+	user.MFASecret = secret
+	user.BackupCodes = hashes
+	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to update user")
+		return
+	}
+
+	h.jsonResponse(w, http.StatusOK, MFASetupResponse{
+		Secret:      secret,
+		QRCodeURL:   url,
+		BackupCodes: codes, // Return plaintext codes only once
+	})
+}
+
+type MFAVerifyRequest struct {
+	Code string `json:"code"`
+}
+
+func (h *Handler) handleMFAVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	var req MFAVerifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	user, err := h.storage.GetUser(r.Context(), claims.UserID)
+	if err != nil {
+		h.errorResponse(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	if user.MFASecret == "" {
+		h.errorResponse(w, http.StatusBadRequest, "MFA not set up")
+		return
+	}
+
+	// Validate the code
+	if !auth.ValidateMFACode(user.MFASecret, req.Code) {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid MFA code")
+		return
+	}
+
+	// Enable MFA
+	user.MFAEnabled = true
+	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to enable MFA")
+		return
+	}
+
+	slog.Info("MFA enabled", "username", user.Username, "user_id", user.ID)
+
+	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "MFA enabled successfully"})
+}
+
+func (h *Handler) handleMFADisable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	var req MFAVerifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	user, err := h.storage.GetUser(r.Context(), claims.UserID)
+	if err != nil {
+		h.errorResponse(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	if !user.MFAEnabled {
+		h.errorResponse(w, http.StatusBadRequest, "MFA not enabled")
+		return
+	}
+
+	// Require current MFA code to disable
+	if !auth.ValidateMFACode(user.MFASecret, req.Code) {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid MFA code")
+		return
+	}
+
+	// Disable MFA
+	user.MFAEnabled = false
+	user.MFASecret = ""
+	user.BackupCodes = nil
+	user.BackupCodesUsed = 0
+	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to disable MFA")
+		return
+	}
+
+	slog.Info("MFA disabled", "username", user.Username, "user_id", user.ID)
+
+	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "MFA disabled successfully"})
+}
+
+type SessionResponse struct {
+	ID        string    `json:"id"`
+	UserAgent string    `json:"user_agent,omitempty"`
+	IPAddress string    `json:"ip_address,omitempty"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (h *Handler) handleUserSessions(w http.ResponseWriter, r *http.Request) {
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		sessions, err := h.storage.ListUserSessions(r.Context(), claims.UserID)
+		if err != nil {
+			h.errorResponse(w, http.StatusInternalServerError, "failed to list sessions")
+			return
+		}
+
+		response := make([]SessionResponse, len(sessions))
+		for i, s := range sessions {
+			response[i] = SessionResponse{
+				ID:        s.ID,
+				UserAgent: s.UserAgent,
+				IPAddress: s.IPAddress,
+				ExpiresAt: s.ExpiresAt,
+				CreatedAt: s.CreatedAt,
+			}
+		}
+		h.jsonResponse(w, http.StatusOK, response)
+
+	case http.MethodDelete:
+		// Delete all sessions except current
+		h.storage.DeleteUserSessions(r.Context(), claims.UserID)
+		h.jsonResponse(w, http.StatusOK, map[string]string{"message": "all sessions revoked"})
+
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// validateAuthHeader validates the Authorization header and returns JWT claims
+func (h *Handler) validateAuthHeader(r *http.Request) (*auth.JWTClaims, error) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return nil, auth.ErrInvalidToken
+	}
+
+	// Expect "Bearer <token>"
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || parts[0] != "Bearer" {
+		return nil, auth.ErrInvalidToken
+	}
+
+	return auth.ValidateJWT(h.authConfig, parts[1])
 }
 
 // Status endpoint

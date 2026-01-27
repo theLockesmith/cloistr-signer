@@ -36,6 +36,11 @@ type AuthConfig struct {
 	RequireApproval      bool     `yaml:"require_approval"`       // Require approval for unknown clients (default: true)
 	AuthorizationTimeout int      `yaml:"authorization_timeout"`  // Timeout in seconds for authorization requests (default: 60)
 	NotifyAdmins         bool     `yaml:"notify_admins"`          // Send DM to admins for pending requests (default: true)
+	JWTSecret            string   `yaml:"jwt_secret"`             // Secret for JWT signing (required for user auth)
+	JWTExpiry            int      `yaml:"jwt_expiry"`             // JWT expiry in hours (default: 24)
+	MFAIssuer            string   `yaml:"mfa_issuer"`             // Issuer name for TOTP (default: Coldforge)
+	MaxFailedLogins      int      `yaml:"max_failed_logins"`      // Max failed logins before lockout (default: 5)
+	LockoutMinutes       int      `yaml:"lockout_minutes"`        // Lockout duration in minutes (default: 15)
 }
 
 // Load loads configuration from environment variables and optional YAML file
@@ -55,6 +60,11 @@ func Load() (*Config, error) {
 			RequireApproval:      true,
 			AuthorizationTimeout: 60,
 			NotifyAdmins:         true,
+			JWTSecret:            "",
+			JWTExpiry:            24,
+			MFAIssuer:            "Coldforge",
+			MaxFailedLogins:      5,
+			LockoutMinutes:       15,
 		},
 	}
 
@@ -105,6 +115,26 @@ func Load() (*Config, error) {
 
 	if notifyAdmins := os.Getenv("NOTIFY_ADMINS"); notifyAdmins != "" {
 		cfg.Auth.NotifyAdmins = notifyAdmins == "true" || notifyAdmins == "1"
+	}
+
+	if jwtSecret := os.Getenv("JWT_SECRET"); jwtSecret != "" {
+		cfg.Auth.JWTSecret = jwtSecret
+	}
+
+	if jwtExpiry := os.Getenv("JWT_EXPIRY"); jwtExpiry != "" {
+		cfg.Auth.JWTExpiry = getEnvInt("JWT_EXPIRY", 24)
+	}
+
+	if mfaIssuer := os.Getenv("MFA_ISSUER"); mfaIssuer != "" {
+		cfg.Auth.MFAIssuer = mfaIssuer
+	}
+
+	if maxFailed := os.Getenv("MAX_FAILED_LOGINS"); maxFailed != "" {
+		cfg.Auth.MaxFailedLogins = getEnvInt("MAX_FAILED_LOGINS", 5)
+	}
+
+	if lockout := os.Getenv("LOCKOUT_MINUTES"); lockout != "" {
+		cfg.Auth.LockoutMinutes = getEnvInt("LOCKOUT_MINUTES", 15)
 	}
 
 	return cfg, nil
