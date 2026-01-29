@@ -23,6 +23,7 @@
                 <td class="pubkey">{{truncate .Pubkey 24}}...</td>
                 <td>{{formatTime .CreatedAt}}</td>
                 <td>
+                    <button class="btn btn-sm btn-primary connect-btn" data-id="{{.ID}}" data-name="{{.Name}}">Connect</button>
                     <button class="btn btn-sm copy-btn" data-pubkey="{{.Pubkey}}">Copy Pubkey</button>
                     <button class="btn btn-sm btn-danger delete-btn" data-id="{{.ID}}" data-name="{{.Name}}">Delete</button>
                 </td>
@@ -50,6 +51,37 @@
                 <button type="submit" class="btn btn-primary">Create</button>
             </div>
         </form>
+    </div>
+</div>
+
+<!-- Connect Modal -->
+<div id="connect-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+        <h2>Connect to <span id="connect-key-name"></span></h2>
+        <p class="text-muted">Scan the QR code or copy the bunker:// URI to connect your Nostr client.</p>
+
+        <div id="connect-loading" style="text-align: center; padding: 20px;">
+            Loading...
+        </div>
+
+        <div id="connect-content" style="display: none;">
+            <div class="form-group">
+                <label>Bunker URI</label>
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" id="bunker-uri" readonly style="flex: 1; font-family: monospace; font-size: 12px;">
+                    <button type="button" class="btn btn-primary" id="copy-bunker-uri">Copy</button>
+                </div>
+            </div>
+
+            <div class="form-group" style="margin-top: 16px;">
+                <label>Connected Relays</label>
+                <ul id="relay-list" style="margin: 8px 0; padding-left: 20px; font-size: 14px;"></ul>
+            </div>
+        </div>
+
+        <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" id="cancel-connect">Close</button>
+        </div>
     </div>
 </div>
 
@@ -121,6 +153,57 @@ document.addEventListener('DOMContentLoaded', function() {
                 showMessage('Failed to delete key', 'error');
             }
         });
+    });
+
+    // Connect buttons
+    const connectModal = document.getElementById('connect-modal');
+    const connectKeyName = document.getElementById('connect-key-name');
+    const connectLoading = document.getElementById('connect-loading');
+    const connectContent = document.getElementById('connect-content');
+    const bunkerUriInput = document.getElementById('bunker-uri');
+    const relayList = document.getElementById('relay-list');
+    const cancelConnect = document.getElementById('cancel-connect');
+    const copyBunkerUri = document.getElementById('copy-bunker-uri');
+
+    document.querySelectorAll('.connect-btn').forEach(btn => {
+        btn.addEventListener('click', async function() {
+            const id = this.dataset.id;
+            const name = this.dataset.name;
+
+            connectKeyName.textContent = name;
+            connectLoading.style.display = 'block';
+            connectContent.style.display = 'none';
+            connectModal.style.display = 'flex';
+
+            try {
+                const response = await fetch(`/api/v1/bunker/${id}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    bunkerUriInput.value = data.bunker_uri;
+                    relayList.innerHTML = data.relays.map(r => `<li>${r}</li>`).join('');
+                    connectLoading.style.display = 'none';
+                    connectContent.style.display = 'block';
+                } else {
+                    showMessage('Failed to get bunker URI', 'error');
+                    connectModal.style.display = 'none';
+                }
+            } catch (err) {
+                showMessage('Failed to get bunker URI', 'error');
+                connectModal.style.display = 'none';
+            }
+        });
+    });
+
+    cancelConnect.addEventListener('click', () => connectModal.style.display = 'none');
+
+    connectModal.addEventListener('click', function(e) {
+        if (e.target === connectModal) connectModal.style.display = 'none';
+    });
+
+    copyBunkerUri.addEventListener('click', function() {
+        navigator.clipboard.writeText(bunkerUriInput.value);
+        this.textContent = 'Copied!';
+        setTimeout(() => this.textContent = 'Copy', 1500);
     });
 
     function showMessage(text, type) {
