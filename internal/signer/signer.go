@@ -605,6 +605,65 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 	)
 }
 
+// SendNostrConnectResponse sends a connect response to a client for nostrconnect:// flow
+func (s *Signer) SendNostrConnectResponse(ctx context.Context, signerPubkey, clientPubkey, relayURL, secret string) {
+	privateKey, ok := s.keys[signerPubkey]
+	if !ok {
+		slog.Error("key not found for nostrconnect", "pubkey", signerPubkey[:16]+"...")
+		return
+	}
+
+	// Build connect response with public key
+	response := NIP46Response{
+		ID:     secret, // Use secret as the request ID for correlation
+		Result: signerPubkey,
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		slog.Error("failed to marshal nostrconnect response", "error", err)
+		return
+	}
+
+	// Use NIP-44 encryption (modern standard)
+	conversationKey, err := nip44.GenerateConversationKey(privateKey, clientPubkey)
+	if err != nil {
+		slog.Error("failed to generate conversation key", "error", err)
+		return
+	}
+
+	encrypted, err := nip44.Encrypt(string(data), conversationKey)
+	if err != nil {
+		slog.Error("failed to encrypt nostrconnect response", "error", err)
+		return
+	}
+
+	// Create response event
+	event := nostr.Event{
+		Kind:      KindNIP46Response,
+		Content:   encrypted,
+		CreatedAt: nostr.Timestamp(time.Now().Unix()),
+		Tags:      nostr.Tags{{"p", clientPubkey}},
+		PubKey:    signerPubkey,
+	}
+
+	if err := event.Sign(privateKey); err != nil {
+		slog.Error("failed to sign nostrconnect response", "error", err)
+		return
+	}
+
+	// Publish to the specified relay
+	if err := s.relayClient.PublishToRelay(ctx, relayURL, &event); err != nil {
+		slog.Error("failed to publish nostrconnect response", "relay", relayURL, "error", err)
+		return
+	}
+
+	slog.Info("sent nostrconnect response",
+		"to", clientPubkey[:16]+"...",
+		"relay", relayURL,
+	)
+}
+
 // GetStatus returns the current signer status
 func (s *Signer) GetStatus() map[string]interface{} {
 	return map[string]interface{}{

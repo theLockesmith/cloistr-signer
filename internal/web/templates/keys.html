@@ -1,7 +1,10 @@
 {{define "content"}}
 <div class="page-header">
     <h1>Signing Keys</h1>
-    <button id="create-key-btn" class="btn btn-primary">Create Key</button>
+    <div style="display: flex; gap: 8px;">
+        <button id="connect-app-btn" class="btn btn-secondary">Connect to App</button>
+        <button id="create-key-btn" class="btn btn-primary">Create Key</button>
+    </div>
 </div>
 
 <div id="message" class="alert" style="display: none;"></div>
@@ -82,6 +85,37 @@
         <div class="modal-actions">
             <button type="button" class="btn btn-secondary" id="cancel-connect">Close</button>
         </div>
+    </div>
+</div>
+
+<!-- Connect to App Modal (nostrconnect://) -->
+<div id="nostrconnect-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+        <h2>Connect to App</h2>
+        <p class="text-muted">Paste the connection string from your Nostr app (starts with nostrconnect://)</p>
+
+        <form id="nostrconnect-form">
+            <div class="form-group">
+                <label for="nostrconnect-uri">Connection String</label>
+                <textarea id="nostrconnect-uri" name="uri" required rows="3"
+                    placeholder="nostrconnect://..." style="font-family: monospace; font-size: 12px;"></textarea>
+            </div>
+
+            <div class="form-group">
+                <label for="nostrconnect-key">Sign with Key</label>
+                <select id="nostrconnect-key" name="key_id" required>
+                    <option value="">Select a key...</option>
+                    {{range .Keys}}
+                    <option value="{{.ID}}">{{.Name}} ({{truncate .Pubkey 16}}...)</option>
+                    {{end}}
+                </select>
+            </div>
+
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="cancel-nostrconnect">Cancel</button>
+                <button type="submit" class="btn btn-primary">Connect</button>
+            </div>
+        </form>
     </div>
 </div>
 
@@ -204,6 +238,49 @@ document.addEventListener('DOMContentLoaded', function() {
         navigator.clipboard.writeText(bunkerUriInput.value);
         this.textContent = 'Copied!';
         setTimeout(() => this.textContent = 'Copy', 1500);
+    });
+
+    // Connect to App (nostrconnect://) functionality
+    const connectAppBtn = document.getElementById('connect-app-btn');
+    const nostrconnectModal = document.getElementById('nostrconnect-modal');
+    const nostrconnectForm = document.getElementById('nostrconnect-form');
+    const cancelNostrconnect = document.getElementById('cancel-nostrconnect');
+
+    connectAppBtn.addEventListener('click', () => nostrconnectModal.style.display = 'flex');
+    cancelNostrconnect.addEventListener('click', () => nostrconnectModal.style.display = 'none');
+
+    nostrconnectModal.addEventListener('click', function(e) {
+        if (e.target === nostrconnectModal) nostrconnectModal.style.display = 'none';
+    });
+
+    nostrconnectForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const uri = document.getElementById('nostrconnect-uri').value.trim();
+        const keyId = document.getElementById('nostrconnect-key').value;
+
+        if (!uri.startsWith('nostrconnect://')) {
+            showMessage('Invalid URI - must start with nostrconnect://', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/v1/nostrconnect', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({uri: uri, key_id: keyId})
+            });
+
+            const data = await response.json();
+            if (response.ok) {
+                showMessage('Connected to ' + (data.app_name || 'app') + ' successfully!', 'success');
+                nostrconnectModal.style.display = 'none';
+                document.getElementById('nostrconnect-uri').value = '';
+            } else {
+                showMessage(data.error || 'Failed to connect', 'error');
+            }
+        } catch (err) {
+            showMessage('Failed to connect: ' + err.message, 'error');
+        }
     });
 
     function showMessage(text, type) {

@@ -2,6 +2,7 @@ package nostr
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -128,6 +129,44 @@ func (c *Client) Publish(ctx context.Context, event *nostr.Event) error {
 		return nil
 	}
 	return lastErr
+}
+
+// PublishToRelay publishes an event to a specific relay, connecting if necessary
+func (c *Client) PublishToRelay(ctx context.Context, relayURL string, event *nostr.Event) error {
+	c.mu.RLock()
+	relay, exists := c.relays[relayURL]
+	c.mu.RUnlock()
+
+	if !exists {
+		// Try to connect to the relay temporarily
+		var err error
+		relay, err = nostr.RelayConnect(ctx, relayURL)
+		if err != nil {
+			return fmt.Errorf("failed to connect to relay %s: %w", relayURL, err)
+		}
+		defer relay.Close()
+	}
+
+	err := relay.Publish(ctx, *event)
+	if err != nil {
+		// Check if auth is required
+		if c.authKey != "" && isAuthRequired(err) {
+			slog.Info("auth required for target relay, authenticating", "url", relayURL)
+			if authErr := c.authenticateRelay(ctx, relay); authErr != nil {
+				slog.Warn("auth failed for target relay", "url", relayURL, "error", authErr)
+			} else {
+				// Retry publish after auth
+				err = relay.Publish(ctx, *event)
+			}
+		}
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to publish to %s: %w", relayURL, err)
+	}
+
+	slog.Debug("published to specific relay", "url", relayURL, "event_id", event.ID)
+	return nil
 }
 
 // isAuthRequired checks if an error indicates authentication is required

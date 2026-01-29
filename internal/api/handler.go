@@ -81,6 +81,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Bunker URI
 	mux.HandleFunc("/api/v1/bunker/", h.handleBunkerConnect)
 
+	// Nostrconnect (client-initiated connection)
+	mux.HandleFunc("/api/v1/nostrconnect", h.handleNostrConnect)
+
 	// NIP-05
 	mux.HandleFunc("/.well-known/nostr.json", h.handleNIP05)
 
@@ -1696,6 +1699,156 @@ func (h *Handler) handleBunkerConnect(w http.ResponseWriter, r *http.Request) {
 		Relays:       relays,
 		Secret:       secret,
 	})
+}
+
+// Nostrconnect endpoint (client-initiated connection)
+
+type NostrConnectRequest struct {
+	URI   string `json:"uri"`
+	KeyID string `json:"key_id"`
+}
+
+type NostrConnectResponse struct {
+	Success     bool   `json:"success"`
+	AppName     string `json:"app_name,omitempty"`
+	AppURL      string `json:"app_url,omitempty"`
+	ClientPubkey string `json:"client_pubkey"`
+}
+
+func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var req NostrConnectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.URI == "" {
+		h.errorResponse(w, http.StatusBadRequest, "uri is required")
+		return
+	}
+
+	if req.KeyID == "" {
+		h.errorResponse(w, http.StatusBadRequest, "key_id is required")
+		return
+	}
+
+	// Parse nostrconnect:// URI
+	// Format: nostrconnect://<client-pubkey>?relay=<relay>&secret=<secret>&name=<name>&url=<url>&image=<image>
+	if !strings.HasPrefix(req.URI, "nostrconnect://") {
+		h.errorResponse(w, http.StatusBadRequest, "invalid URI - must start with nostrconnect://")
+		return
+	}
+
+	// Parse the URI
+	uriWithoutScheme := strings.TrimPrefix(req.URI, "nostrconnect://")
+	parts := strings.SplitN(uriWithoutScheme, "?", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		h.errorResponse(w, http.StatusBadRequest, "invalid URI - missing client pubkey")
+		return
+	}
+
+	clientPubkey := parts[0]
+	if len(clientPubkey) != 64 {
+		h.errorResponse(w, http.StatusBadRequest, "invalid client pubkey")
+		return
+	}
+
+	// Parse query parameters
+	var relay, secret, appName, appURL string
+	if len(parts) > 1 {
+		params := strings.Split(parts[1], "&")
+		for _, param := range params {
+			kv := strings.SplitN(param, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			key := kv[0]
+			value := kv[1]
+			// URL decode the value
+			if decoded, err := urlDecode(value); err == nil {
+				value = decoded
+			}
+			switch key {
+			case "relay":
+				relay = value
+			case "secret":
+				secret = value
+			case "name":
+				appName = value
+			case "url":
+				appURL = value
+			}
+		}
+	}
+
+	if relay == "" {
+		h.errorResponse(w, http.StatusBadRequest, "invalid URI - missing relay")
+		return
+	}
+
+	// Get the key
+	key, err := h.storage.GetKey(r.Context(), req.KeyID)
+	if err != nil {
+		if err == storage.ErrKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Create permission for the client with basic methods
+	perm := &storage.Permission{
+		KeyID:      key.Pubkey,
+		UserPubkey: clientPubkey,
+		Methods:    []string{"connect", "sign_event", "get_public_key", "nip44_encrypt", "nip44_decrypt"},
+	}
+
+	if err := h.storage.SetPermission(r.Context(), perm); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+		return
+	}
+
+	// Send connect response via signer
+	h.signer.SendNostrConnectResponse(r.Context(), key.Pubkey, clientPubkey, relay, secret)
+
+	slog.Info("nostrconnect established",
+		"app", appName,
+		"client", clientPubkey[:16]+"...",
+		"key", req.KeyID,
+		"relay", relay,
+	)
+
+	h.jsonResponse(w, http.StatusOK, NostrConnectResponse{
+		Success:      true,
+		AppName:      appName,
+		AppURL:       appURL,
+		ClientPubkey: clientPubkey,
+	})
+}
+
+// urlDecode decodes a URL-encoded string
+func urlDecode(s string) (string, error) {
+	s = strings.ReplaceAll(s, "+", " ")
+	result := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '%' && i+2 < len(s) {
+			var b byte
+			_, err := fmt.Sscanf(s[i:i+3], "%%%02x", &b)
+			if err == nil {
+				result = append(result, b)
+				i += 2
+				continue
+			}
+		}
+		result = append(result, s[i])
+	}
+	return string(result), nil
 }
 
 // NIP-05 endpoint
