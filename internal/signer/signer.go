@@ -159,30 +159,37 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 	// Try NIP-44 decryption first (newer standard), fall back to NIP-04
 	var decrypted string
 	var useNIP44 bool
+	var nip44Err, nip04Err error
 
 	// Try NIP-44 first
 	conversationKey, err := nip44.GenerateConversationKey(privateKey, clientPubkey)
-	if err == nil {
-		decrypted, err = nip44.Decrypt(event.Content, conversationKey)
-		if err == nil {
+	if err != nil {
+		nip44Err = fmt.Errorf("conversation key: %w", err)
+	} else {
+		decrypted, nip44Err = nip44.Decrypt(event.Content, conversationKey)
+		if nip44Err == nil {
 			useNIP44 = true
-			slog.Debug("decrypted with NIP-44")
+			slog.Info("decrypted with NIP-44")
 		}
 	}
 
 	// Fall back to NIP-04 if NIP-44 failed
 	if !useNIP44 {
+		slog.Debug("NIP-44 decryption failed, trying NIP-04", "nip44_error", nip44Err)
 		sharedSecret, err := nip04.ComputeSharedSecret(clientPubkey, privateKey)
 		if err != nil {
 			slog.Error("failed to compute shared secret", "error", err)
 			return
 		}
-		decrypted, err = nip04.Decrypt(event.Content, sharedSecret)
-		if err != nil {
-			slog.Error("failed to decrypt request with NIP-04 or NIP-44", "error", err)
+		decrypted, nip04Err = nip04.Decrypt(event.Content, sharedSecret)
+		if nip04Err != nil {
+			slog.Error("failed to decrypt request",
+				"nip44_error", nip44Err,
+				"nip04_error", nip04Err,
+			)
 			return
 		}
-		slog.Debug("decrypted with NIP-04")
+		slog.Info("decrypted with NIP-04")
 	}
 
 	var request NIP46Request
