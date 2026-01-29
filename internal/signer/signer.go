@@ -22,6 +22,16 @@ const (
 	KindNIP46Response = 24133 // Same kind, differentiated by tags
 )
 
+// normalizePubkey converts a compressed pubkey (33 bytes with 02/03 prefix) to x-only format (32 bytes)
+// NIP-44 requires x-only pubkeys, but some clients send compressed SEC1 format
+func normalizePubkey(pubkey string) string {
+	// If it's 66 chars (33 bytes hex) and starts with 02 or 03, strip the prefix
+	if len(pubkey) == 66 && (pubkey[:2] == "02" || pubkey[:2] == "03") {
+		return pubkey[2:]
+	}
+	return pubkey
+}
+
 // NIP46Request represents a NIP-46 JSON-RPC request
 type NIP46Request struct {
 	ID     string   `json:"id"`
@@ -161,8 +171,9 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 	var useNIP44 bool
 	var nip44Err, nip04Err error
 
-	// Try NIP-44 first
-	conversationKey, err := nip44.GenerateConversationKey(privateKey, clientPubkey)
+	// Try NIP-44 first (normalize pubkey in case it has 02/03 prefix)
+	normalizedClientPubkey := normalizePubkey(clientPubkey)
+	conversationKey, err := nip44.GenerateConversationKey(privateKey, normalizedClientPubkey)
 	if err != nil {
 		nip44Err = fmt.Errorf("conversation key: %w", err)
 	} else {
@@ -490,7 +501,7 @@ func (s *Signer) handleNIP44Encrypt(privateKey string, params []string) (string,
 		return "", errors.New("missing parameters (need pubkey and plaintext)")
 	}
 
-	thirdPartyPubkey := params[0]
+	thirdPartyPubkey := normalizePubkey(params[0])
 	plaintext := params[1]
 
 	conversationKey, err := nip44.GenerateConversationKey(privateKey, thirdPartyPubkey)
@@ -511,7 +522,7 @@ func (s *Signer) handleNIP44Decrypt(privateKey string, params []string) (string,
 		return "", errors.New("missing parameters (need pubkey and ciphertext)")
 	}
 
-	thirdPartyPubkey := params[0]
+	thirdPartyPubkey := normalizePubkey(params[0])
 	ciphertext := params[1]
 
 	conversationKey, err := nip44.GenerateConversationKey(privateKey, thirdPartyPubkey)
@@ -552,8 +563,8 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 
 	var encrypted string
 	if useNIP44 {
-		// Use NIP-44 encryption
-		conversationKey, err := nip44.GenerateConversationKey(privateKey, clientPubkey)
+		// Use NIP-44 encryption (normalize pubkey in case it has 02/03 prefix)
+		conversationKey, err := nip44.GenerateConversationKey(privateKey, normalizePubkey(clientPubkey))
 		if err != nil {
 			slog.Error("failed to generate conversation key", "error", err)
 			return
@@ -625,8 +636,8 @@ func (s *Signer) SendNostrConnectResponse(ctx context.Context, signerPubkey, cli
 		return
 	}
 
-	// Use NIP-44 encryption (modern standard)
-	conversationKey, err := nip44.GenerateConversationKey(privateKey, clientPubkey)
+	// Use NIP-44 encryption (modern standard, normalize pubkey in case it has 02/03 prefix)
+	conversationKey, err := nip44.GenerateConversationKey(privateKey, normalizePubkey(clientPubkey))
 	if err != nil {
 		slog.Error("failed to generate conversation key", "error", err)
 		return
