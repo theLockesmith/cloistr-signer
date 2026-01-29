@@ -1,6 +1,5 @@
 stages:
   - build
-  - deploy
 
 variables:
   DOCKER_IMAGE: registry.coldforge.xyz/coldforge/coldforge-signer
@@ -24,16 +23,6 @@ build:
   tags:
     - kubernetes
 
-deploy:
-  stage: deploy
-  image: bitnami/kubectl:latest
-  script:
-    - kubectl -n coldforge-signer rollout restart deployment/coldforge-signer
-    - kubectl -n coldforge-signer rollout status deployment/coldforge-signer --timeout=300s
-  only:
-    - master
-    - main
-  tags:
-    - kubernetes
-  needs:
-    - build
+# Deployment handled automatically by OpenShift ImageStream
+# The ImageStream watches registry.coldforge.xyz and triggers
+# deployment when new :latest images are pushed
