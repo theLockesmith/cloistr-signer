@@ -31,18 +31,18 @@ type RequestHandler interface {
 
 // Handler serves web UI pages
 type Handler struct {
-	config     *config.Config
-	storage    storage.Storage
-	authConfig *auth.Config
-	templates  *template.Template
-	status     StatusProvider
-	reqHandler RequestHandler
+	config        *config.Config
+	storage       storage.Storage
+	authConfig    *auth.Config
+	pageTemplates map[string]*template.Template
+	status        StatusProvider
+	reqHandler    RequestHandler
 }
 
 // New creates a new web handler
 func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHandler RequestHandler) (*Handler, error) {
-	// Parse templates
-	tmpl, err := template.New("").Funcs(template.FuncMap{
+	// Create base template with functions
+	funcs := template.FuncMap{
 		"formatTime": func(t time.Time) string {
 			return t.Format("2006-01-02 15:04:05")
 		},
@@ -56,9 +56,30 @@ func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHa
 			b, _ := json.Marshal(v)
 			return template.JS(b)
 		},
-	}).ParseFS(content, "templates/*.html")
+	}
+
+	// Parse base template
+	baseTmpl, err := template.New("base.html").Funcs(funcs).ParseFS(content, "templates/base.html")
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse templates: %w", err)
+		return nil, fmt.Errorf("failed to parse base template: %w", err)
+	}
+
+	// Create a map of page templates, each inheriting from base
+	templates := make(map[string]*template.Template)
+	pageFiles := []string{"home.html", "login.html", "register.html", "approval.html", "dashboard.html", "keys.html", "requests.html", "users.html"}
+
+	for _, page := range pageFiles {
+		// Clone base template
+		tmpl, err := baseTmpl.Clone()
+		if err != nil {
+			return nil, fmt.Errorf("failed to clone base template: %w", err)
+		}
+		// Parse the page template
+		tmpl, err = tmpl.ParseFS(content, "templates/"+page)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse template %s: %w", page, err)
+		}
+		templates[page] = tmpl
 	}
 
 	return &Handler{
@@ -73,9 +94,9 @@ func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHa
 			MaxFailedAttempts: cfg.Auth.MaxFailedLogins,
 			MFAIssuer:         cfg.Auth.MFAIssuer,
 		},
-		templates:  tmpl,
-		status:     status,
-		reqHandler: reqHandler,
+		pageTemplates: templates,
+		status:        status,
+		reqHandler:    reqHandler,
 	}, nil
 }
 
@@ -568,7 +589,13 @@ func (h *Handler) handleAPIDeny(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) render(w http.ResponseWriter, name string, data map[string]interface{}) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := h.templates.ExecuteTemplate(w, name, data); err != nil {
+	tmpl, ok := h.pageTemplates[name]
+	if !ok {
+		slog.Error("template not found", "template", name)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
 		slog.Error("template error", "template", name, "error", err)
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 	}
