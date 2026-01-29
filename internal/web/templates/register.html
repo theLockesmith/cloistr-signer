@@ -20,6 +20,10 @@
         <div class="form-group">
             <label for="password">Password</label>
             <input type="password" id="password" name="password" required minlength="8" autocomplete="new-password">
+            <div id="password-strength" class="password-strength">
+                <div class="strength-bar"><div class="strength-fill"></div></div>
+                <span class="strength-text"></span>
+            </div>
             <small>At least 8 characters</small>
         </div>
 
@@ -89,8 +93,91 @@ document.addEventListener('DOMContentLoaded', function() {
         errorDiv.style.display = 'block';
         successDiv.style.display = 'none';
     }
+
+    // Password strength checker
+    const passwordInput = document.getElementById('password');
+    const strengthBar = document.querySelector('.strength-fill');
+    const strengthText = document.querySelector('.strength-text');
+
+    passwordInput.addEventListener('input', function() {
+        const password = this.value;
+        const strength = checkPasswordStrength(password);
+
+        strengthBar.style.width = strength.percent + '%';
+        strengthBar.className = 'strength-fill ' + strength.class;
+        strengthText.textContent = strength.text;
+        strengthText.className = 'strength-text ' + strength.class;
+    });
+
+    function checkPasswordStrength(password) {
+        if (!password) return { percent: 0, class: '', text: '' };
+
+        let score = 0;
+        const checks = {
+            length8: password.length >= 8,
+            length12: password.length >= 12,
+            length16: password.length >= 16,
+            lowercase: /[a-z]/.test(password),
+            uppercase: /[A-Z]/.test(password),
+            numbers: /[0-9]/.test(password),
+            symbols: /[^a-zA-Z0-9]/.test(password),
+            noCommon: !isCommonPassword(password)
+        };
+
+        if (checks.length8) score += 1;
+        if (checks.length12) score += 1;
+        if (checks.length16) score += 1;
+        if (checks.lowercase) score += 1;
+        if (checks.uppercase) score += 1;
+        if (checks.numbers) score += 1;
+        if (checks.symbols) score += 1;
+        if (checks.noCommon) score += 1;
+
+        if (score <= 2) return { percent: 20, class: 'weak', text: 'Weak - easily guessed' };
+        if (score <= 4) return { percent: 40, class: 'fair', text: 'Fair - could be stronger' };
+        if (score <= 6) return { percent: 70, class: 'good', text: 'Good' };
+        return { percent: 100, class: 'strong', text: 'Strong' };
+    }
+
+    function isCommonPassword(password) {
+        const common = ['password', '12345678', '123456789', 'qwerty', 'abc123', 'password1', 'letmein', 'welcome', 'admin', 'login'];
+        return common.includes(password.toLowerCase());
+    }
 });
 </script>
+<style>
+.password-strength {
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.strength-bar {
+    flex: 1;
+    height: 4px;
+    background: #e0e0e0;
+    border-radius: 2px;
+    overflow: hidden;
+}
+.strength-fill {
+    height: 100%;
+    width: 0;
+    transition: width 0.3s, background-color 0.3s;
+    border-radius: 2px;
+}
+.strength-fill.weak { background: #e53935; }
+.strength-fill.fair { background: #fb8c00; }
+.strength-fill.good { background: #7cb342; }
+.strength-fill.strong { background: #43a047; }
+.strength-text {
+    font-size: 12px;
+    min-width: 140px;
+}
+.strength-text.weak { color: #e53935; }
+.strength-text.fair { color: #fb8c00; }
+.strength-text.good { color: #7cb342; }
+.strength-text.strong { color: #43a047; }
+</style>
 {{end}}
 
 {{template "base" .}}
