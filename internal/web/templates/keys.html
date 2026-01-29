@@ -90,15 +90,15 @@
 
 <!-- Connect to App Modal (nostrconnect://) -->
 <div id="nostrconnect-modal" class="modal" style="display: none;">
-    <div class="modal-content">
+    <div class="modal-content modal-lg">
         <h2>Connect to App</h2>
-        <p class="text-muted">Paste the connection string from your Nostr app (starts with nostrconnect://)</p>
+        <p class="text-muted" style="margin-bottom: 1rem;">Paste the connection string from your Nostr app (starts with nostrconnect://)</p>
 
         <form id="nostrconnect-form">
             <div class="form-group">
                 <label for="nostrconnect-uri">Connection String</label>
-                <textarea id="nostrconnect-uri" name="uri" required rows="3"
-                    placeholder="nostrconnect://..." style="font-family: monospace; font-size: 12px;"></textarea>
+                <textarea id="nostrconnect-uri" name="uri" required rows="4"
+                    placeholder="nostrconnect://..." style="font-family: monospace;"></textarea>
             </div>
 
             <div class="form-group">
