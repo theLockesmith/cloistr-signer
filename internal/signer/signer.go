@@ -156,17 +156,33 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 		"event_id", event.ID,
 	)
 
-	// Compute shared secret and decrypt the request content
-	sharedSecret, err := nip04.ComputeSharedSecret(clientPubkey, privateKey)
-	if err != nil {
-		slog.Error("failed to compute shared secret", "error", err)
-		return
+	// Try NIP-44 decryption first (newer standard), fall back to NIP-04
+	var decrypted string
+	var useNIP44 bool
+
+	// Try NIP-44 first
+	conversationKey, err := nip44.GenerateConversationKey(privateKey, clientPubkey)
+	if err == nil {
+		decrypted, err = nip44.Decrypt(event.Content, conversationKey)
+		if err == nil {
+			useNIP44 = true
+			slog.Debug("decrypted with NIP-44")
+		}
 	}
 
-	decrypted, err := nip04.Decrypt(event.Content, sharedSecret)
-	if err != nil {
-		slog.Error("failed to decrypt request", "error", err)
-		return
+	// Fall back to NIP-04 if NIP-44 failed
+	if !useNIP44 {
+		sharedSecret, err := nip04.ComputeSharedSecret(clientPubkey, privateKey)
+		if err != nil {
+			slog.Error("failed to compute shared secret", "error", err)
+			return
+		}
+		decrypted, err = nip04.Decrypt(event.Content, sharedSecret)
+		if err != nil {
+			slog.Error("failed to decrypt request with NIP-04 or NIP-44", "error", err)
+			return
+		}
+		slog.Debug("decrypted with NIP-04")
 	}
 
 	var request NIP46Request
@@ -183,17 +199,17 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 
 	// Handle request in a goroutine to avoid blocking the event loop
 	// This is especially important for authorization callbacks which may take time
-	go s.processRequest(ctx, targetPubkey, privateKey, clientPubkey, &request, perm, err)
+	go s.processRequest(ctx, targetPubkey, privateKey, clientPubkey, &request, perm, err, useNIP44)
 }
 
 // processRequest handles a NIP-46 request, potentially waiting for authorization
-func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey string, request *NIP46Request, perm *storage.Permission, permErr error) {
+func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey string, request *NIP46Request, perm *storage.Permission, permErr error, useNIP44 bool) {
 	// If we have a valid permission
 	if permErr == nil {
 		// Check if method is allowed
 		if !s.isMethodAllowed(perm, request.Method) {
 			slog.Warn("method not allowed", "method", request.Method, "client", clientPubkey[:16]+"...")
-			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "method not allowed")
+			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "method not allowed", useNIP44)
 			return
 		}
 
@@ -201,18 +217,18 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 		result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, perm)
 		if err != nil {
 			slog.Error("request handling failed", "method", request.Method, "error", err)
-			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error())
+			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error(), useNIP44)
 			return
 		}
 
-		s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result)
+		s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result, useNIP44)
 		return
 	}
 
 	// No permission - check if we should wait for authorization
 	if !s.config.Auth.RequireApproval {
 		slog.Warn("permission denied (approval disabled)", "client", clientPubkey[:16]+"...", "error", permErr)
-		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "not authorized")
+		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "not authorized", useNIP44)
 		return
 	}
 
@@ -235,13 +251,13 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 	approved, approvedPerm, err := s.waitForAuthorization(ctx, reqCtx, timeout)
 	if err != nil {
 		slog.Warn("authorization failed", "client", clientPubkey[:16]+"...", "error", err)
-		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "authorization timeout")
+		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "authorization timeout", useNIP44)
 		return
 	}
 
 	if !approved {
 		slog.Info("request denied by admin", "client", clientPubkey[:16]+"...", "method", request.Method)
-		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "request denied")
+		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "request denied", useNIP44)
 		return
 	}
 
@@ -260,12 +276,12 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 	result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, permToUse)
 	if err != nil {
 		slog.Error("request handling failed after approval", "method", request.Method, "error", err)
-		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error())
+		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error(), useNIP44)
 		return
 	}
 
 	slog.Info("request approved and processed", "method", request.Method, "client", clientPubkey[:16]+"...")
-	s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result)
+	s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result, useNIP44)
 }
 
 func (s *Signer) isMethodAllowed(perm *storage.Permission, method string) bool {
@@ -504,40 +520,54 @@ func (s *Signer) handleNIP44Decrypt(privateKey string, params []string) (string,
 	return plaintext, nil
 }
 
-func (s *Signer) sendResult(ctx context.Context, signerPubkey, privateKey, clientPubkey, requestID, result string) {
+func (s *Signer) sendResult(ctx context.Context, signerPubkey, privateKey, clientPubkey, requestID, result string, useNIP44 bool) {
 	response := NIP46Response{
 		ID:     requestID,
 		Result: result,
 	}
-	s.sendResponse(ctx, signerPubkey, privateKey, clientPubkey, response)
+	s.sendResponse(ctx, signerPubkey, privateKey, clientPubkey, response, useNIP44)
 }
 
-func (s *Signer) sendError(ctx context.Context, signerPubkey, privateKey, clientPubkey, requestID, errMsg string) {
+func (s *Signer) sendError(ctx context.Context, signerPubkey, privateKey, clientPubkey, requestID, errMsg string, useNIP44 bool) {
 	response := NIP46Response{
 		ID:    requestID,
 		Error: errMsg,
 	}
-	s.sendResponse(ctx, signerPubkey, privateKey, clientPubkey, response)
+	s.sendResponse(ctx, signerPubkey, privateKey, clientPubkey, response, useNIP44)
 }
 
-func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, clientPubkey string, response NIP46Response) {
+func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, clientPubkey string, response NIP46Response, useNIP44 bool) {
 	data, err := json.Marshal(response)
 	if err != nil {
 		slog.Error("failed to marshal response", "error", err)
 		return
 	}
 
-	// Compute shared secret and encrypt response with NIP-04
-	sharedSecret, err := nip04.ComputeSharedSecret(clientPubkey, privateKey)
-	if err != nil {
-		slog.Error("failed to compute shared secret", "error", err)
-		return
-	}
-
-	encrypted, err := nip04.Encrypt(string(data), sharedSecret)
-	if err != nil {
-		slog.Error("failed to encrypt response", "error", err)
-		return
+	var encrypted string
+	if useNIP44 {
+		// Use NIP-44 encryption
+		conversationKey, err := nip44.GenerateConversationKey(privateKey, clientPubkey)
+		if err != nil {
+			slog.Error("failed to generate conversation key", "error", err)
+			return
+		}
+		encrypted, err = nip44.Encrypt(string(data), conversationKey)
+		if err != nil {
+			slog.Error("failed to encrypt response with NIP-44", "error", err)
+			return
+		}
+	} else {
+		// Use NIP-04 encryption
+		sharedSecret, err := nip04.ComputeSharedSecret(clientPubkey, privateKey)
+		if err != nil {
+			slog.Error("failed to compute shared secret", "error", err)
+			return
+		}
+		encrypted, err = nip04.Encrypt(string(data), sharedSecret)
+		if err != nil {
+			slog.Error("failed to encrypt response with NIP-04", "error", err)
+			return
+		}
 	}
 
 	// Create response event
@@ -564,6 +594,7 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 		"request_id", response.ID,
 		"to", clientPubkey[:16]+"...",
 		"has_error", response.Error != "",
+		"nip44", useNIP44,
 	)
 }
 
