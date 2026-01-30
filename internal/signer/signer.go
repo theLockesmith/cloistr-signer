@@ -250,10 +250,22 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 		return
 	}
 
-	// No permission - check if we should wait for authorization
+	// No permission - check if we should auto-approve or wait for authorization
 	if !s.config.Auth.RequireApproval {
-		slog.Warn("permission denied (approval disabled)", "client", clientPubkey[:16]+"...", "error", permErr)
-		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "not authorized", useNIP44)
+		// Auto-approve: create a temporary permission with full access
+		slog.Info("auto-approving request (approval not required)", "client", clientPubkey[:16]+"...", "method", request.Method)
+		tempPerm := &storage.Permission{
+			KeyID:      targetPubkey,
+			UserPubkey: clientPubkey,
+			Methods:    []string{"*"}, // Allow all methods
+		}
+		result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, tempPerm)
+		if err != nil {
+			slog.Error("request handling failed", "method", request.Method, "error", err)
+			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error(), useNIP44)
+			return
+		}
+		s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result, useNIP44)
 		return
 	}
 
