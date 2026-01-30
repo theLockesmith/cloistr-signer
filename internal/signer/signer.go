@@ -164,6 +164,7 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 		"from", clientPubkey[:16]+"...",
 		"to", targetPubkey[:16]+"...",
 		"event_id", event.ID,
+		"client_pubkey_len", len(clientPubkey),
 	)
 
 	// Try NIP-44 decryption first (newer standard), fall back to NIP-04
@@ -173,6 +174,12 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 
 	// Try NIP-44 first (normalize pubkey in case it has 02/03 prefix)
 	normalizedClientPubkey := normalizePubkey(clientPubkey)
+	slog.Debug("NIP-44 key normalization",
+		"original", clientPubkey,
+		"normalized", normalizedClientPubkey,
+		"original_len", len(clientPubkey),
+		"normalized_len", len(normalizedClientPubkey),
+	)
 	conversationKey, err := nip44.GenerateConversationKey(privateKey, normalizedClientPubkey)
 	if err != nil {
 		nip44Err = fmt.Errorf("conversation key: %w", err)
