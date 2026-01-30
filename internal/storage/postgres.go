@@ -1,0 +1,1093 @@
+package storage
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	_ "github.com/lib/pq"
+)
+
+// PostgresStorage implements Storage interface using PostgreSQL
+type PostgresStorage struct {
+	db *sql.DB
+}
+
+// NewPostgresStorage creates a new PostgreSQL storage backend
+func NewPostgresStorage(dsn string) (*PostgresStorage, error) {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	// Test connection
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	// Configure connection pool
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	ps := &PostgresStorage{db: db}
+
+	// Run migrations
+	if err := ps.migrate(); err != nil {
+		return nil, fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	return ps, nil
+}
+
+// migrate runs database migrations
+func (ps *PostgresStorage) migrate() error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS keys (
+		id TEXT PRIMARY KEY,
+		name TEXT,
+		pubkey TEXT UNIQUE NOT NULL,
+		encrypted_nsec TEXT NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		created_by TEXT
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_keys_pubkey ON keys(pubkey);
+	CREATE INDEX IF NOT EXISTS idx_keys_name ON keys(name);
+
+	CREATE TABLE IF NOT EXISTS permissions (
+		key_id TEXT NOT NULL,
+		user_pubkey TEXT NOT NULL,
+		methods TEXT[] NOT NULL DEFAULT '{}',
+		allowed_kinds INTEGER[] DEFAULT '{}',
+		expires_at TIMESTAMPTZ,
+		policy_id TEXT,
+		PRIMARY KEY (key_id, user_pubkey)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_permissions_key_id ON permissions(key_id);
+
+	CREATE TABLE IF NOT EXISTS sessions (
+		id TEXT PRIMARY KEY,
+		key_id TEXT NOT NULL,
+		client_pubkey TEXT NOT NULL,
+		permissions TEXT[] NOT NULL DEFAULT '{}',
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		expires_at TIMESTAMPTZ NOT NULL,
+		UNIQUE (key_id, client_pubkey)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_sessions_key_client ON sessions(key_id, client_pubkey);
+	CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+	CREATE TABLE IF NOT EXISTS policies (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		description TEXT,
+		expires_at TIMESTAMPTZ,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		created_by TEXT
+	);
+
+	CREATE TABLE IF NOT EXISTS policy_rules (
+		id TEXT PRIMARY KEY,
+		policy_id TEXT NOT NULL REFERENCES policies(id) ON DELETE CASCADE,
+		method TEXT NOT NULL,
+		allowed_kinds INTEGER[] DEFAULT '{}',
+		max_usage INTEGER DEFAULT 0,
+		current_usage INTEGER DEFAULT 0
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_policy_rules_policy ON policy_rules(policy_id);
+
+	CREATE TABLE IF NOT EXISTS tokens (
+		id TEXT PRIMARY KEY,
+		policy_id TEXT NOT NULL,
+		key_id TEXT NOT NULL,
+		client_name TEXT,
+		created_by TEXT,
+		expires_at TIMESTAMPTZ,
+		redeemed_at TIMESTAMPTZ,
+		redeemed_by TEXT,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_tokens_key_id ON tokens(key_id);
+
+	CREATE TABLE IF NOT EXISTS pending_requests (
+		id TEXT PRIMARY KEY,
+		key_pubkey TEXT NOT NULL,
+		client_pubkey TEXT NOT NULL,
+		method TEXT NOT NULL,
+		params JSONB,
+		event_kind INTEGER,
+		expires_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_pending_requests_key ON pending_requests(key_pubkey);
+	CREATE INDEX IF NOT EXISTS idx_pending_requests_expires ON pending_requests(expires_at);
+
+	CREATE TABLE IF NOT EXISTS users (
+		id TEXT PRIMARY KEY,
+		username TEXT UNIQUE NOT NULL,
+		email TEXT UNIQUE,
+		password_hash TEXT NOT NULL,
+		mfa_secret TEXT,
+		mfa_enabled BOOLEAN DEFAULT FALSE,
+		backup_codes TEXT[] DEFAULT '{}',
+		backup_codes_used INTEGER DEFAULT 0,
+		failed_login_attempts INTEGER DEFAULT 0,
+		locked_until TIMESTAMPTZ,
+		last_login_at TIMESTAMPTZ,
+		last_login_ip TEXT,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+	CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+	CREATE TABLE IF NOT EXISTS user_sessions (
+		id TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		token_hash TEXT,
+		user_agent TEXT,
+		ip_address TEXT,
+		expires_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
+	CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at);
+	`
+
+	_, err := ps.db.Exec(schema)
+	return err
+}
+
+// Key management
+
+func (ps *PostgresStorage) CreateKey(ctx context.Context, key *Key) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO keys (id, name, pubkey, encrypted_nsec, created_at, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		key.ID, key.Name, key.Pubkey, key.EncryptedNsec, key.CreatedAt, key.CreatedBy)
+	if err != nil {
+		if isDuplicateError(err) {
+			return ErrKeyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) {
+	key := &Key{}
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
+		FROM keys WHERE id = $1`, id).
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.CreatedAt, &key.CreatedBy)
+	if err == sql.ErrNoRows {
+		return nil, ErrKeyNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*Key, error) {
+	key := &Key{}
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
+		FROM keys WHERE pubkey = $1`, pubkey).
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.CreatedAt, &key.CreatedBy)
+	if err == sql.ErrNoRows {
+		return nil, ErrKeyNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key, error) {
+	key := &Key{}
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
+		FROM keys WHERE name = $1`, name).
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.CreatedAt, &key.CreatedBy)
+	if err == sql.ErrNoRows {
+		return nil, ErrKeyNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+func (ps *PostgresStorage) ListKeys(ctx context.Context) ([]*Key, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
+		FROM keys ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []*Key
+	for rows.Next() {
+		key := &Key{}
+		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.CreatedAt, &key.CreatedBy); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func (ps *PostgresStorage) DeleteKey(ctx context.Context, id string) error {
+	result, err := ps.db.ExecContext(ctx, `DELETE FROM keys WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrKeyNotFound
+	}
+	// Also delete related permissions
+	_, _ = ps.db.ExecContext(ctx, `DELETE FROM permissions WHERE key_id = $1`, id)
+	return nil
+}
+
+// Permission management
+
+func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (key_id, user_pubkey) DO UPDATE SET
+			methods = EXCLUDED.methods,
+			allowed_kinds = EXCLUDED.allowed_kinds,
+			expires_at = EXCLUDED.expires_at,
+			policy_id = EXCLUDED.policy_id`,
+		perm.KeyID, perm.UserPubkey, perm.Methods, perm.AllowedKinds, perm.ExpiresAt, perm.PolicyID)
+	return err
+}
+
+func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey string) (*Permission, error) {
+	perm := &Permission{}
+	var expiresAt sql.NullTime
+	var policyID sql.NullString
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id
+		FROM permissions WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey).
+		Scan(&perm.KeyID, &perm.UserPubkey, &perm.Methods, &perm.AllowedKinds, &expiresAt, &policyID)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotAuthorized
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if expiresAt.Valid {
+		perm.ExpiresAt = &expiresAt.Time
+		if time.Now().After(*perm.ExpiresAt) {
+			return nil, ErrNotAuthorized
+		}
+	}
+	if policyID.Valid {
+		perm.PolicyID = policyID.String
+	}
+	return perm, nil
+}
+
+func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([]*Permission, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id
+		FROM permissions WHERE key_id = $1`, keyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var perms []*Permission
+	for rows.Next() {
+		perm := &Permission{}
+		var expiresAt sql.NullTime
+		var policyID sql.NullString
+		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, &perm.Methods, &perm.AllowedKinds, &expiresAt, &policyID); err != nil {
+			return nil, err
+		}
+		if expiresAt.Valid {
+			perm.ExpiresAt = &expiresAt.Time
+		}
+		if policyID.Valid {
+			perm.PolicyID = policyID.String
+		}
+		perms = append(perms, perm)
+	}
+	return perms, rows.Err()
+}
+
+func (ps *PostgresStorage) DeletePermission(ctx context.Context, keyID, userPubkey string) error {
+	_, err := ps.db.ExecContext(ctx, `
+		DELETE FROM permissions WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey)
+	return err
+}
+
+// Session management
+
+func (ps *PostgresStorage) CreateSession(ctx context.Context, session *Session) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO sessions (id, key_id, client_pubkey, permissions, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (key_id, client_pubkey) DO UPDATE SET
+			id = EXCLUDED.id,
+			permissions = EXCLUDED.permissions,
+			created_at = EXCLUDED.created_at,
+			expires_at = EXCLUDED.expires_at`,
+		session.ID, session.KeyID, session.ClientPubkey, session.Permissions, session.CreatedAt, session.ExpiresAt)
+	return err
+}
+
+func (ps *PostgresStorage) GetSession(ctx context.Context, id string) (*Session, error) {
+	session := &Session{}
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at
+		FROM sessions WHERE id = $1 AND expires_at > NOW()`, id).
+		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, &session.Permissions, &session.CreatedAt, &session.ExpiresAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrSessionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+func (ps *PostgresStorage) GetSessionByClient(ctx context.Context, keyID, clientPubkey string) (*Session, error) {
+	session := &Session{}
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at
+		FROM sessions WHERE key_id = $1 AND client_pubkey = $2 AND expires_at > NOW()`, keyID, clientPubkey).
+		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, &session.Permissions, &session.CreatedAt, &session.ExpiresAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrSessionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+func (ps *PostgresStorage) DeleteSession(ctx context.Context, id string) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = $1`, id)
+	return err
+}
+
+func (ps *PostgresStorage) CleanExpiredSessions(ctx context.Context) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < NOW()`)
+	return err
+}
+
+// Policy management
+
+func (ps *PostgresStorage) CreatePolicy(ctx context.Context, policy *Policy) error {
+	tx, err := ps.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO policies (id, name, description, expires_at, created_at, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		policy.ID, policy.Name, policy.Description, policy.ExpiresAt, policy.CreatedAt, policy.CreatedBy)
+	if err != nil {
+		return err
+	}
+
+	for _, rule := range policy.Rules {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO policy_rules (id, policy_id, method, allowed_kinds, max_usage, current_usage)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			rule.ID, policy.ID, rule.Method, rule.AllowedKinds, rule.MaxUsage, rule.CurrentUsage)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (ps *PostgresStorage) GetPolicy(ctx context.Context, id string) (*Policy, error) {
+	policy := &Policy{}
+	var expiresAt sql.NullTime
+	var description, createdBy sql.NullString
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, name, description, expires_at, created_at, created_by
+		FROM policies WHERE id = $1`, id).
+		Scan(&policy.ID, &policy.Name, &description, &expiresAt, &policy.CreatedAt, &createdBy)
+	if err == sql.ErrNoRows {
+		return nil, ErrPolicyNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if expiresAt.Valid {
+		policy.ExpiresAt = &expiresAt.Time
+		if time.Now().After(*policy.ExpiresAt) {
+			return nil, ErrPolicyNotFound
+		}
+	}
+	if description.Valid {
+		policy.Description = description.String
+	}
+	if createdBy.Valid {
+		policy.CreatedBy = createdBy.String
+	}
+
+	// Load rules
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, policy_id, method, allowed_kinds, max_usage, current_usage
+		FROM policy_rules WHERE policy_id = $1`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		rule := &PolicyRule{}
+		if err := rows.Scan(&rule.ID, &rule.PolicyID, &rule.Method, &rule.AllowedKinds, &rule.MaxUsage, &rule.CurrentUsage); err != nil {
+			return nil, err
+		}
+		policy.Rules = append(policy.Rules, rule)
+	}
+
+	return policy, rows.Err()
+}
+
+func (ps *PostgresStorage) ListPolicies(ctx context.Context) ([]*Policy, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, name, description, expires_at, created_at, created_by
+		FROM policies WHERE expires_at IS NULL OR expires_at > NOW()
+		ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var policies []*Policy
+	for rows.Next() {
+		policy := &Policy{}
+		var expiresAt sql.NullTime
+		var description, createdBy sql.NullString
+		if err := rows.Scan(&policy.ID, &policy.Name, &description, &expiresAt, &policy.CreatedAt, &createdBy); err != nil {
+			return nil, err
+		}
+		if expiresAt.Valid {
+			policy.ExpiresAt = &expiresAt.Time
+		}
+		if description.Valid {
+			policy.Description = description.String
+		}
+		if createdBy.Valid {
+			policy.CreatedBy = createdBy.String
+		}
+		policies = append(policies, policy)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Load rules for each policy
+	for _, policy := range policies {
+		ruleRows, err := ps.db.QueryContext(ctx, `
+			SELECT id, policy_id, method, allowed_kinds, max_usage, current_usage
+			FROM policy_rules WHERE policy_id = $1`, policy.ID)
+		if err != nil {
+			return nil, err
+		}
+		for ruleRows.Next() {
+			rule := &PolicyRule{}
+			if err := ruleRows.Scan(&rule.ID, &rule.PolicyID, &rule.Method, &rule.AllowedKinds, &rule.MaxUsage, &rule.CurrentUsage); err != nil {
+				ruleRows.Close()
+				return nil, err
+			}
+			policy.Rules = append(policy.Rules, rule)
+		}
+		ruleRows.Close()
+	}
+
+	return policies, nil
+}
+
+func (ps *PostgresStorage) DeletePolicy(ctx context.Context, id string) error {
+	result, err := ps.db.ExecContext(ctx, `DELETE FROM policies WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrPolicyNotFound
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) IncrementRuleUsage(ctx context.Context, ruleID string) error {
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE policy_rules SET current_usage = current_usage + 1 WHERE id = $1`, ruleID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrPolicyNotFound
+	}
+	return nil
+}
+
+// Token management
+
+func (ps *PostgresStorage) CreateToken(ctx context.Context, token *Token) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO tokens (id, policy_id, key_id, client_name, created_by, expires_at, redeemed_at, redeemed_by, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		token.ID, token.PolicyID, token.KeyID, token.ClientName, token.CreatedBy,
+		token.ExpiresAt, token.RedeemedAt, token.RedeemedBy, token.CreatedAt)
+	return err
+}
+
+func (ps *PostgresStorage) GetToken(ctx context.Context, id string) (*Token, error) {
+	token := &Token{}
+	var clientName, createdBy, redeemedBy sql.NullString
+	var expiresAt, redeemedAt sql.NullTime
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, policy_id, key_id, client_name, created_by, expires_at, redeemed_at, redeemed_by, created_at
+		FROM tokens WHERE id = $1`, id).
+		Scan(&token.ID, &token.PolicyID, &token.KeyID, &clientName, &createdBy,
+			&expiresAt, &redeemedAt, &redeemedBy, &token.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrTokenNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if clientName.Valid {
+		token.ClientName = clientName.String
+	}
+	if createdBy.Valid {
+		token.CreatedBy = createdBy.String
+	}
+	if expiresAt.Valid {
+		token.ExpiresAt = &expiresAt.Time
+	}
+	if redeemedAt.Valid {
+		token.RedeemedAt = &redeemedAt.Time
+	}
+	if redeemedBy.Valid {
+		token.RedeemedBy = redeemedBy.String
+	}
+	return token, nil
+}
+
+func (ps *PostgresStorage) ListTokens(ctx context.Context, keyID string) ([]*Token, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, policy_id, key_id, client_name, created_by, expires_at, redeemed_at, redeemed_by, created_at
+		FROM tokens WHERE key_id = $1 ORDER BY created_at DESC`, keyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []*Token
+	for rows.Next() {
+		token := &Token{}
+		var clientName, createdBy, redeemedBy sql.NullString
+		var expiresAt, redeemedAt sql.NullTime
+		if err := rows.Scan(&token.ID, &token.PolicyID, &token.KeyID, &clientName, &createdBy,
+			&expiresAt, &redeemedAt, &redeemedBy, &token.CreatedAt); err != nil {
+			return nil, err
+		}
+		if clientName.Valid {
+			token.ClientName = clientName.String
+		}
+		if createdBy.Valid {
+			token.CreatedBy = createdBy.String
+		}
+		if expiresAt.Valid {
+			token.ExpiresAt = &expiresAt.Time
+		}
+		if redeemedAt.Valid {
+			token.RedeemedAt = &redeemedAt.Time
+		}
+		if redeemedBy.Valid {
+			token.RedeemedBy = redeemedBy.String
+		}
+		tokens = append(tokens, token)
+	}
+	return tokens, rows.Err()
+}
+
+func (ps *PostgresStorage) RedeemToken(ctx context.Context, tokenID, redeemerPubkey string) (*Token, error) {
+	token, err := ps.GetToken(ctx, tokenID)
+	if err != nil {
+		return nil, err
+	}
+
+	if token.RedeemedAt != nil {
+		return nil, ErrTokenRedeemed
+	}
+
+	if token.ExpiresAt != nil && time.Now().After(*token.ExpiresAt) {
+		return nil, ErrTokenExpired
+	}
+
+	now := time.Now()
+	_, err = ps.db.ExecContext(ctx, `
+		UPDATE tokens SET redeemed_at = $1, redeemed_by = $2 WHERE id = $3`,
+		now, redeemerPubkey, tokenID)
+	if err != nil {
+		return nil, err
+	}
+
+	token.RedeemedAt = &now
+	token.RedeemedBy = redeemerPubkey
+	return token, nil
+}
+
+func (ps *PostgresStorage) DeleteToken(ctx context.Context, id string) error {
+	result, err := ps.db.ExecContext(ctx, `DELETE FROM tokens WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrTokenNotFound
+	}
+	return nil
+}
+
+// Pending request management
+
+func (ps *PostgresStorage) CreatePendingRequest(ctx context.Context, req *PendingRequest) error {
+	paramsJSON, err := json.Marshal(req.Params)
+	if err != nil {
+		return err
+	}
+	_, err = ps.db.ExecContext(ctx, `
+		INSERT INTO pending_requests (id, key_pubkey, client_pubkey, method, params, event_kind, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		req.ID, req.KeyPubkey, req.ClientPubkey, req.Method, paramsJSON, req.EventKind, req.ExpiresAt, req.CreatedAt)
+	return err
+}
+
+func (ps *PostgresStorage) GetPendingRequest(ctx context.Context, id string) (*PendingRequest, error) {
+	req := &PendingRequest{}
+	var paramsJSON []byte
+	var eventKind sql.NullInt64
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, key_pubkey, client_pubkey, method, params, event_kind, expires_at, created_at
+		FROM pending_requests WHERE id = $1 AND expires_at > NOW()`, id).
+		Scan(&req.ID, &req.KeyPubkey, &req.ClientPubkey, &req.Method, &paramsJSON, &eventKind, &req.ExpiresAt, &req.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrRequestNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if paramsJSON != nil {
+		if err := json.Unmarshal(paramsJSON, &req.Params); err != nil {
+			return nil, err
+		}
+	}
+	if eventKind.Valid {
+		kind := int(eventKind.Int64)
+		req.EventKind = &kind
+	}
+	return req, nil
+}
+
+func (ps *PostgresStorage) ListPendingRequests(ctx context.Context, keyPubkey string) ([]*PendingRequest, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, key_pubkey, client_pubkey, method, params, event_kind, expires_at, created_at
+		FROM pending_requests WHERE key_pubkey = $1 AND expires_at > NOW()
+		ORDER BY created_at DESC`, keyPubkey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var requests []*PendingRequest
+	for rows.Next() {
+		req := &PendingRequest{}
+		var paramsJSON []byte
+		var eventKind sql.NullInt64
+		if err := rows.Scan(&req.ID, &req.KeyPubkey, &req.ClientPubkey, &req.Method, &paramsJSON, &eventKind, &req.ExpiresAt, &req.CreatedAt); err != nil {
+			return nil, err
+		}
+		if paramsJSON != nil {
+			if err := json.Unmarshal(paramsJSON, &req.Params); err != nil {
+				return nil, err
+			}
+		}
+		if eventKind.Valid {
+			kind := int(eventKind.Int64)
+			req.EventKind = &kind
+		}
+		requests = append(requests, req)
+	}
+	return requests, rows.Err()
+}
+
+func (ps *PostgresStorage) DeletePendingRequest(ctx context.Context, id string) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM pending_requests WHERE id = $1`, id)
+	return err
+}
+
+func (ps *PostgresStorage) CleanExpiredRequests(ctx context.Context) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM pending_requests WHERE expires_at < NOW()`)
+	return err
+}
+
+// User management
+
+func (ps *PostgresStorage) CreateUser(ctx context.Context, user *User) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO users (id, username, email, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		user.ID, user.Username, nullString(user.Email), user.PasswordHash, nullString(user.MFASecret),
+		user.MFAEnabled, user.BackupCodes, user.BackupCodesUsed, user.FailedLoginAttempts,
+		user.LockedUntil, user.LastLoginAt, nullString(user.LastLoginIP), user.CreatedAt, user.UpdatedAt)
+	if err != nil {
+		if isDuplicateError(err) {
+			return ErrUserExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) GetUser(ctx context.Context, id string) (*User, error) {
+	return ps.scanUser(ps.db.QueryRowContext(ctx, `
+		SELECT id, username, email, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
+		FROM users WHERE id = $1`, id))
+}
+
+func (ps *PostgresStorage) GetUserByUsername(ctx context.Context, username string) (*User, error) {
+	return ps.scanUser(ps.db.QueryRowContext(ctx, `
+		SELECT id, username, email, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
+		FROM users WHERE username = $1`, username))
+}
+
+func (ps *PostgresStorage) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+	return ps.scanUser(ps.db.QueryRowContext(ctx, `
+		SELECT id, username, email, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
+		FROM users WHERE email = $1`, email))
+}
+
+func (ps *PostgresStorage) scanUser(row *sql.Row) (*User, error) {
+	user := &User{}
+	var email, mfaSecret, lastLoginIP sql.NullString
+	var lockedUntil, lastLoginAt sql.NullTime
+	err := row.Scan(&user.ID, &user.Username, &email, &user.PasswordHash, &mfaSecret,
+		&user.MFAEnabled, &user.BackupCodes, &user.BackupCodesUsed, &user.FailedLoginAttempts,
+		&lockedUntil, &lastLoginAt, &lastLoginIP, &user.CreatedAt, &user.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if email.Valid {
+		user.Email = email.String
+	}
+	if mfaSecret.Valid {
+		user.MFASecret = mfaSecret.String
+	}
+	if lastLoginIP.Valid {
+		user.LastLoginIP = lastLoginIP.String
+	}
+	if lockedUntil.Valid {
+		user.LockedUntil = &lockedUntil.Time
+	}
+	if lastLoginAt.Valid {
+		user.LastLoginAt = &lastLoginAt.Time
+	}
+	return user, nil
+}
+
+func (ps *PostgresStorage) ListUsers(ctx context.Context) ([]*User, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, username, email, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
+		FROM users ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []*User
+	for rows.Next() {
+		user := &User{}
+		var email, mfaSecret, lastLoginIP sql.NullString
+		var lockedUntil, lastLoginAt sql.NullTime
+		if err := rows.Scan(&user.ID, &user.Username, &email, &user.PasswordHash, &mfaSecret,
+			&user.MFAEnabled, &user.BackupCodes, &user.BackupCodesUsed, &user.FailedLoginAttempts,
+			&lockedUntil, &lastLoginAt, &lastLoginIP, &user.CreatedAt, &user.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if email.Valid {
+			user.Email = email.String
+		}
+		if mfaSecret.Valid {
+			user.MFASecret = mfaSecret.String
+		}
+		if lastLoginIP.Valid {
+			user.LastLoginIP = lastLoginIP.String
+		}
+		if lockedUntil.Valid {
+			user.LockedUntil = &lockedUntil.Time
+		}
+		if lastLoginAt.Valid {
+			user.LastLoginAt = &lastLoginAt.Time
+		}
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
+func (ps *PostgresStorage) UpdateUser(ctx context.Context, user *User) error {
+	user.UpdatedAt = time.Now()
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE users SET username = $1, email = $2, password_hash = $3, mfa_secret = $4, mfa_enabled = $5,
+			backup_codes = $6, backup_codes_used = $7, failed_login_attempts = $8, locked_until = $9,
+			last_login_at = $10, last_login_ip = $11, updated_at = $12
+		WHERE id = $13`,
+		user.Username, nullString(user.Email), user.PasswordHash, nullString(user.MFASecret),
+		user.MFAEnabled, user.BackupCodes, user.BackupCodesUsed, user.FailedLoginAttempts,
+		user.LockedUntil, user.LastLoginAt, nullString(user.LastLoginIP), user.UpdatedAt, user.ID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) DeleteUser(ctx context.Context, id string) error {
+	result, err := ps.db.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) IncrementFailedLogins(ctx context.Context, userID string) error {
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE users SET failed_login_attempts = failed_login_attempts + 1, updated_at = NOW()
+		WHERE id = $1`, userID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) ResetFailedLogins(ctx context.Context, userID string) error {
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE users SET failed_login_attempts = 0, updated_at = NOW()
+		WHERE id = $1`, userID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) LockUser(ctx context.Context, userID string, until time.Time) error {
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE users SET locked_until = $1, updated_at = NOW()
+		WHERE id = $2`, until, userID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) UnlockUser(ctx context.Context, userID string) error {
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE users SET locked_until = NULL, failed_login_attempts = 0, updated_at = NOW()
+		WHERE id = $1`, userID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// User session management
+
+func (ps *PostgresStorage) CreateUserSession(ctx context.Context, session *UserSession) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO user_sessions (id, user_id, token_hash, user_agent, ip_address, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		session.ID, session.UserID, nullString(session.Token), nullString(session.UserAgent),
+		nullString(session.IPAddress), session.ExpiresAt, session.CreatedAt)
+	return err
+}
+
+func (ps *PostgresStorage) GetUserSession(ctx context.Context, id string) (*UserSession, error) {
+	session := &UserSession{}
+	var tokenHash, userAgent, ipAddress sql.NullString
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, user_id, token_hash, user_agent, ip_address, expires_at, created_at
+		FROM user_sessions WHERE id = $1 AND expires_at > NOW()`, id).
+		Scan(&session.ID, &session.UserID, &tokenHash, &userAgent, &ipAddress, &session.ExpiresAt, &session.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrSessionNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if tokenHash.Valid {
+		session.Token = tokenHash.String
+	}
+	if userAgent.Valid {
+		session.UserAgent = userAgent.String
+	}
+	if ipAddress.Valid {
+		session.IPAddress = ipAddress.String
+	}
+	return session, nil
+}
+
+func (ps *PostgresStorage) ListUserSessions(ctx context.Context, userID string) ([]*UserSession, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, user_id, token_hash, user_agent, ip_address, expires_at, created_at
+		FROM user_sessions WHERE user_id = $1 AND expires_at > NOW()
+		ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []*UserSession
+	for rows.Next() {
+		session := &UserSession{}
+		var tokenHash, userAgent, ipAddress sql.NullString
+		if err := rows.Scan(&session.ID, &session.UserID, &tokenHash, &userAgent, &ipAddress, &session.ExpiresAt, &session.CreatedAt); err != nil {
+			return nil, err
+		}
+		if tokenHash.Valid {
+			session.Token = tokenHash.String
+		}
+		if userAgent.Valid {
+			session.UserAgent = userAgent.String
+		}
+		if ipAddress.Valid {
+			session.IPAddress = ipAddress.String
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
+func (ps *PostgresStorage) DeleteUserSession(ctx context.Context, id string) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE id = $1`, id)
+	return err
+}
+
+func (ps *PostgresStorage) DeleteUserSessions(ctx context.Context, userID string) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id = $1`, userID)
+	return err
+}
+
+func (ps *PostgresStorage) CleanExpiredUserSessions(ctx context.Context) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE expires_at < NOW()`)
+	return err
+}
+
+func (ps *PostgresStorage) Close() error {
+	return ps.db.Close()
+}
+
+// Helper functions
+
+func isDuplicateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// PostgreSQL unique violation error code is 23505
+	return err.Error() == "pq: duplicate key value violates unique constraint" ||
+		(len(err.Error()) > 5 && err.Error()[:5] == "pq: ")
+}
+
+func nullString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
+}

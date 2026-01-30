@@ -1,0 +1,107 @@
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: coldforge-signer-postgres
+  namespace: coldforge-signer
+type: Opaque
+stringData:
+  POSTGRES_USER: coldforge
+  POSTGRES_PASSWORD: coldforge-signer-db-2024
+  POSTGRES_DB: coldforge_signer
+  DATABASE_URL: "postgres://coldforge:coldforge-signer-db-2024@coldforge-signer-postgres:5432/coldforge_signer?sslmode=disable"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coldforge-signer-postgres
+  namespace: coldforge-signer
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5432
+      targetPort: 5432
+  selector:
+    app: coldforge-signer-postgres
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: coldforge-signer-postgres
+  namespace: coldforge-signer
+spec:
+  serviceName: coldforge-signer-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: coldforge-signer-postgres
+  template:
+    metadata:
+      labels:
+        app: coldforge-signer-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: coldforge-signer-postgres
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: coldforge-signer-postgres
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: coldforge-signer-postgres
+                  key: POSTGRES_DB
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - coldforge
+                - -d
+                - coldforge_signer
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - coldforge
+                - -d
+                - coldforge_signer
+            initialDelaySeconds: 30
+            periodSeconds: 10
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: standard-csi
+        resources:
+          requests:
+            storage: 5Gi

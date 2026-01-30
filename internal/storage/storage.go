@@ -209,7 +209,10 @@ func New(cfg config.StorageConfig) (Storage, error) {
 	case "memory", "":
 		return NewMemoryStorage(), nil
 	case "postgres":
-		return nil, fmt.Errorf("postgres storage not yet implemented")
+		if cfg.DSN == "" {
+			return nil, fmt.Errorf("postgres storage requires DSN (DATABASE_URL)")
+		}
+		return NewPostgresStorage(cfg.DSN)
 	case "sqlite":
 		return nil, fmt.Errorf("sqlite storage not yet implemented")
 	default:

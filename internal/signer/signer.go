@@ -643,10 +643,12 @@ func (s *Signer) SendNostrConnectResponse(ctx context.Context, signerPubkey, cli
 		return
 	}
 
-	// Build connect response with public key
+	// Build connect response
+	// Per NIP-46/nostr-tools: result MUST be the secret for validation
+	// The client checks: response.result === uri.searchParams.get('secret')
 	response := NIP46Response{
-		ID:     secret, // Use secret as the request ID for correlation
-		Result: signerPubkey,
+		ID:     secret,
+		Result: secret,
 	}
 
 	data, err := json.Marshal(response)
@@ -655,10 +657,11 @@ func (s *Signer) SendNostrConnectResponse(ctx context.Context, signerPubkey, cli
 		return
 	}
 
-	// Use NIP-44 encryption (modern standard, normalize pubkey in case it has 02/03 prefix)
-	conversationKey, err := nip44.GenerateConversationKey(normalizePubkey(clientPubkey), privateKey)
+	// Use NIP-44 encryption (modern standard per NIP-46 spec)
+	// Primal and other modern clients expect NIP-44
+	conversationKey, err := nip44.GenerateConversationKey(clientPubkey, privateKey)
 	if err != nil {
-		slog.Error("failed to generate conversation key", "error", err)
+		slog.Error("failed to generate conversation key for nostrconnect", "error", err)
 		return
 	}
 
@@ -691,6 +694,9 @@ func (s *Signer) SendNostrConnectResponse(ctx context.Context, signerPubkey, cli
 	slog.Info("sent nostrconnect response",
 		"to", clientPubkey[:16]+"...",
 		"relay", relayURL,
+		"event_id", event.ID,
+		"response_json", string(data),
+		"signer_pubkey", signerPubkey,
 	)
 }
 
