@@ -112,6 +112,11 @@ internal/
 ### bunker:// URI (Phase 6)
 - `GET /api/v1/bunker/{id}` - Generate bunker:// connection URI for a key
 
+### nostrconnect:// (Client-Initiated Connections)
+- `POST /api/v1/nostrconnect` - Connect to app via nostrconnect:// URI
+  - Body: `{"uri": "nostrconnect://...", "key_id": "<key-id>"}`
+  - Parses the nostrconnect URI, creates permission, sends connect response
+
 ### NIP-05 (Phase 6)
 - `GET /.well-known/nostr.json` - NIP-05 identifier endpoint
 
@@ -165,7 +170,7 @@ The approval page can be shared via link for async authorization.
 | `STORAGE_TYPE` | `memory` or `postgres` | `memory` |
 | `DATABASE_URL` | PostgreSQL connection string | (none) |
 | `ADMIN_PUBKEYS` | Comma-separated admin pubkeys | (none) |
-| `REQUIRE_APPROVAL` | Require approval for unknown clients | `true` |
+| `REQUIRE_APPROVAL` | Require manual approval for unknown clients (see below) | `true` |
 | `AUTHORIZATION_TIMEOUT` | Timeout for authorization in seconds | `60` |
 | `NOTIFY_ADMINS` | Send DMs to admins for pending requests | `true` |
 | `JWT_SECRET` | Secret for JWT signing (required for user auth) | (none) |
@@ -188,6 +193,16 @@ The approval page can be shared via link for async authorization.
 | `SERVICE_URL` | Public service URL | (none) |
 | `NIP05_DOMAIN` | Domain for NIP-05 identifiers | (none) |
 | `PUBLISH_NIP89` | Publish NIP-89 announcements | `false` |
+
+### REQUIRE_APPROVAL Behavior
+
+Controls how the signer handles requests from unknown clients (no existing permission):
+
+- **`true` (default)**: Requests wait for manual admin approval via the web UI (`/requests`) or admin DM commands. Good for high-security or shared deployments where you want to vet each app.
+
+- **`false`**: Auto-approve all requests with full access. Simpler UX for personal bunkers - clients can connect immediately using the bunker:// URI. Currently deployed with this setting.
+
+**Future enhancement**: Validate bunker URI secrets on connect - auto-approve only if the client provides the correct secret, otherwise require approval.
 
 ## Development Status
 
@@ -249,12 +264,22 @@ The approval page can be shared via link for async authorization.
 - [x] HashiCorp Vault integration (`internal/vault/vault.go`)
 - [x] Audit logging (`internal/audit/audit.go`)
 
+### Completed (Phase 7 - Connection Flows)
+- [x] bunker:// URI connection flow working with Primal
+- [x] nostrconnect:// client-initiated connections
+- [x] NIP-44 encryption support (with NIP-04 fallback)
+- [x] Auto-approve mode for simpler UX
+- [x] Web UI for Connect to App (nostrconnect modal)
+- [x] Password strength indicator on registration
+- [x] Password visibility toggle on login
+
 ### Roadmap to Production
 
-**All phases complete! Next:**
+**Connection flows working! Next:**
+- [ ] Bunker secret validation (auto-approve only with valid secret)
+- [ ] Connected apps management UI
 - [ ] Unit and integration tests
 - [ ] Production Vault configuration
-- [ ] Full end-to-end testing
 - [ ] Documentation
 - [ ] Deprecate nsecbunker
 
@@ -303,4 +328,4 @@ node test-nip46.mjs
 
 ---
 
-**Last Updated:** 2026-01-27 (Phase 6 complete - All phases done!)
+**Last Updated:** 2026-01-30 (Phase 7 complete - bunker:// and nostrconnect:// flows working!)
