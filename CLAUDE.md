@@ -170,7 +170,7 @@ The approval page can be shared via link for async authorization.
 | `STORAGE_TYPE` | `memory` or `postgres` | `memory` |
 | `DATABASE_URL` | PostgreSQL connection string | (none) |
 | `ADMIN_PUBKEYS` | Comma-separated admin pubkeys | (none) |
-| `REQUIRE_APPROVAL` | Require manual approval for unknown clients (see below) | `true` |
+| `REQUIRE_APPROVAL` | Require manual approval for unknown clients (see below) | `false` |
 | `AUTHORIZATION_TIMEOUT` | Timeout for authorization in seconds | `60` |
 | `NOTIFY_ADMINS` | Send DMs to admins for pending requests | `true` |
 | `JWT_SECRET` | Secret for JWT signing (required for user auth) | (none) |
@@ -198,9 +198,9 @@ The approval page can be shared via link for async authorization.
 
 Controls how the signer handles requests from unknown clients (no existing permission):
 
-- **`true` (default)**: Requests wait for manual admin approval via the web UI (`/requests`) or admin DM commands. Good for high-security or shared deployments where you want to vet each app.
+- **`false` (default)**: Auto-approve all requests with full access. Simpler UX for personal bunkers - clients can connect immediately using the bunker:// URI. Recommended for new users.
 
-- **`false`**: Auto-approve all requests with full access. Simpler UX for personal bunkers - clients can connect immediately using the bunker:// URI. Currently deployed with this setting.
+- **`true`**: Requests wait for manual admin approval via the web UI (`/requests`) or admin DM commands. Opt-in for high-security or shared deployments where you want to vet each app.
 
 **Future enhancement**: Validate bunker URI secrets on connect - auto-approve only if the client provides the correct secret, otherwise require approval.
 

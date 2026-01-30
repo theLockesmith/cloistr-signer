@@ -36,7 +36,7 @@ type StorageConfig struct {
 // AuthConfig holds authentication configuration
 type AuthConfig struct {
 	AdminPubkeys         []string `yaml:"admin_pubkeys"`
-	RequireApproval      bool     `yaml:"require_approval"`       // Require approval for unknown clients (default: true)
+	RequireApproval      bool     `yaml:"require_approval"`       // Require manual approval for unknown clients (default: false, opt-in for security)
 	AuthorizationTimeout int      `yaml:"authorization_timeout"`  // Timeout in seconds for authorization requests (default: 60)
 	NotifyAdmins         bool     `yaml:"notify_admins"`          // Send DM to admins for pending requests (default: true)
 	JWTSecret            string   `yaml:"jwt_secret"`             // Secret for JWT signing (required for user auth)
@@ -85,7 +85,7 @@ func Load() (*Config, error) {
 		},
 		Auth: AuthConfig{
 			AdminPubkeys:         []string{},
-			RequireApproval:      true,
+			RequireApproval:      false, // Default to auto-approve for simpler UX
 			AuthorizationTimeout: 60,
 			NotifyAdmins:         true,
 			JWTSecret:            "",
