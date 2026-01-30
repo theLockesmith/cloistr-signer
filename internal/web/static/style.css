@@ -179,8 +179,20 @@ a:hover {
 }
 
 .form-group select option {
-    background: var(--bg-tertiary);
+    background: var(--bg-secondary);
     color: var(--text-primary);
+    padding: 0.5rem;
+}
+
+.form-group select option:hover,
+.form-group select option:checked {
+    background: var(--bg-tertiary);
+}
+
+/* Disabled option styling */
+.form-group select option:disabled,
+.form-group select option[value=""] {
+    color: var(--text-muted);
 }
 
 .form-group input:focus,
@@ -188,6 +200,49 @@ a:hover {
 .form-group select:focus {
     outline: none;
     border-color: var(--accent-primary);
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
+}
+
+/* Placeholder styling for dark mode */
+.form-group input::placeholder,
+.form-group textarea::placeholder {
+    color: var(--text-muted);
+    opacity: 1;
+}
+
+/* Better textarea styling */
+.form-group textarea {
+    font-family: inherit;
+    line-height: 1.5;
+}
+
+.form-group textarea.monospace,
+.form-group input.monospace {
+    font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+    font-size: 0.875rem;
+}
+
+/* Input group for inline input + button */
+.input-group {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.input-group input {
+    flex: 1;
+}
+
+/* Relay URI list in modals */
+.relay-uri-list {
+    margin: 0.5rem 0;
+    padding-left: 1.25rem;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+}
+
+.relay-uri-list li {
+    margin: 0.25rem 0;
 }
 
 .form-group small {

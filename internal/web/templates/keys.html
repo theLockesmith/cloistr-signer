@@ -70,15 +70,15 @@
         <div id="connect-content" style="display: none;">
             <div class="form-group">
                 <label>Bunker URI</label>
-                <div style="display: flex; gap: 8px;">
-                    <input type="text" id="bunker-uri" readonly style="flex: 1; font-family: monospace; font-size: 12px;">
+                <div class="input-group">
+                    <input type="text" id="bunker-uri" readonly class="monospace">
                     <button type="button" class="btn btn-primary" id="copy-bunker-uri">Copy</button>
                 </div>
             </div>
 
-            <div class="form-group" style="margin-top: 16px;">
+            <div class="form-group">
                 <label>Connected Relays</label>
-                <ul id="relay-list" style="margin: 8px 0; padding-left: 20px; font-size: 14px;"></ul>
+                <ul id="relay-list" class="relay-uri-list"></ul>
             </div>
         </div>
 
@@ -98,13 +98,13 @@
             <div class="form-group">
                 <label for="nostrconnect-uri">Connection String</label>
                 <textarea id="nostrconnect-uri" name="uri" required rows="4"
-                    placeholder="nostrconnect://..." style="font-family: monospace;"></textarea>
+                    placeholder="nostrconnect://pubkey?relay=wss://..." class="monospace"></textarea>
             </div>
 
             <div class="form-group">
                 <label for="nostrconnect-key">Sign with Key</label>
                 <select id="nostrconnect-key" name="key_id" required>
-                    <option value="">Select a key...</option>
+                    <option value="" disabled selected>Select a key...</option>
                     {{range .Keys}}
                     <option value="{{.ID}}">{{.Name}} ({{truncate .Pubkey 16}}...)</option>
                     {{end}}
