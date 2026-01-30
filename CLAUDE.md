@@ -2,6 +2,8 @@
 
 **Go-based NIP-46 Remote Signing Service**
 
+**Domain:** signer.cloistr.xyz (Cloistr is the consumer-facing brand for Coldforge Nostr services)
+
 ## Overview
 
 coldforge-signer is our Kubernetes-native NIP-46 remote signer, replacing nsecbunker as the identity foundation for all Coldforge services. Written in Go for minimal footprint and fast startup.
