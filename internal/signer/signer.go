@@ -180,7 +180,7 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 		"original_len", len(clientPubkey),
 		"normalized_len", len(normalizedClientPubkey),
 	)
-	conversationKey, err := nip44.GenerateConversationKey(privateKey, normalizedClientPubkey)
+	conversationKey, err := nip44.GenerateConversationKey(normalizedClientPubkey, privateKey)
 	if err != nil {
 		nip44Err = fmt.Errorf("conversation key: %w", err)
 	} else {
@@ -511,7 +511,7 @@ func (s *Signer) handleNIP44Encrypt(privateKey string, params []string) (string,
 	thirdPartyPubkey := normalizePubkey(params[0])
 	plaintext := params[1]
 
-	conversationKey, err := nip44.GenerateConversationKey(privateKey, thirdPartyPubkey)
+	conversationKey, err := nip44.GenerateConversationKey(thirdPartyPubkey, privateKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate conversation key: %w", err)
 	}
@@ -532,7 +532,7 @@ func (s *Signer) handleNIP44Decrypt(privateKey string, params []string) (string,
 	thirdPartyPubkey := normalizePubkey(params[0])
 	ciphertext := params[1]
 
-	conversationKey, err := nip44.GenerateConversationKey(privateKey, thirdPartyPubkey)
+	conversationKey, err := nip44.GenerateConversationKey(thirdPartyPubkey, privateKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate conversation key: %w", err)
 	}
@@ -571,7 +571,7 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 	var encrypted string
 	if useNIP44 {
 		// Use NIP-44 encryption (normalize pubkey in case it has 02/03 prefix)
-		conversationKey, err := nip44.GenerateConversationKey(privateKey, normalizePubkey(clientPubkey))
+		conversationKey, err := nip44.GenerateConversationKey(normalizePubkey(clientPubkey), privateKey)
 		if err != nil {
 			slog.Error("failed to generate conversation key", "error", err)
 			return
@@ -644,7 +644,7 @@ func (s *Signer) SendNostrConnectResponse(ctx context.Context, signerPubkey, cli
 	}
 
 	// Use NIP-44 encryption (modern standard, normalize pubkey in case it has 02/03 prefix)
-	conversationKey, err := nip44.GenerateConversationKey(privateKey, normalizePubkey(clientPubkey))
+	conversationKey, err := nip44.GenerateConversationKey(normalizePubkey(clientPubkey), privateKey)
 	if err != nil {
 		slog.Error("failed to generate conversation key", "error", err)
 		return
