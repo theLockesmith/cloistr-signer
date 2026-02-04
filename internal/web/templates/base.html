@@ -15,10 +15,11 @@
             <a href="/dashboard">Dashboard</a>
             <a href="/keys">Keys</a>
             <a href="/requests">Requests</a>
-            <a href="/users">Users</a>
+            {{if .User.IsAdmin}}<a href="/users">Users</a>{{end}}
         </div>
         <div class="nav-user">
             <span>{{.User.Username}}</span>
+            {{if .User.IsAdmin}}<span class="badge badge-admin">admin</span>{{end}}
             <a href="/logout" class="btn btn-sm">Logout</a>
         </div>
     </nav>

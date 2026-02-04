@@ -18,6 +18,12 @@
         </div>
 
         <div class="form-group">
+            <label for="pubkey">Nostr Public Key (optional)</label>
+            <input type="text" id="pubkey" name="pubkey" placeholder="npub1... or hex" class="monospace">
+            <small>Link your Nostr identity to enable NIP-07 extension login</small>
+        </div>
+
+        <div class="form-group">
             <label for="password">Password</label>
             <div class="password-input-wrapper">
                 <input type="password" id="password" name="password" required minlength="8" autocomplete="new-password">
@@ -67,6 +73,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         const username = document.getElementById('username').value;
         const email = document.getElementById('email').value;
+        const pubkey = document.getElementById('pubkey').value.trim();
         const password = document.getElementById('password').value;
         const confirmPassword = document.getElementById('confirm_password').value;
 
@@ -83,6 +90,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 body: JSON.stringify({
                     username: username,
                     email: email,
+                    pubkey: pubkey,
                     password: password
                 })
             });

@@ -559,6 +559,11 @@ a:hover {
     color: var(--text-muted);
 }
 
+.badge-admin {
+    background: var(--accent-warning);
+    color: #000;
+}
+
 /* Approval page */
 .approval-container {
     max-width: 500px;

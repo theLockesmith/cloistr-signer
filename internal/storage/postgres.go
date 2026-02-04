@@ -134,6 +134,8 @@ func (ps *PostgresStorage) migrate() error {
 		id TEXT PRIMARY KEY,
 		username TEXT UNIQUE NOT NULL,
 		email TEXT UNIQUE,
+		pubkey TEXT,
+		role TEXT NOT NULL DEFAULT 'user',
 		password_hash TEXT NOT NULL,
 		mfa_secret TEXT,
 		mfa_enabled BOOLEAN DEFAULT FALSE,
@@ -147,8 +149,13 @@ func (ps *PostgresStorage) migrate() error {
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
+	-- Migrations for existing databases
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS pubkey TEXT;
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+
 	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 	CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+	CREATE INDEX IF NOT EXISTS idx_users_pubkey ON users(pubkey);
 
 	CREATE TABLE IF NOT EXISTS user_sessions (
 		id TEXT PRIMARY KEY,
@@ -772,11 +779,15 @@ func (ps *PostgresStorage) CleanExpiredRequests(ctx context.Context) error {
 // User management
 
 func (ps *PostgresStorage) CreateUser(ctx context.Context, user *User) error {
+	if user.Role == "" {
+		user.Role = "user"
+	}
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO users (id, username, email, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+		INSERT INTO users (id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-		user.ID, user.Username, nullString(user.Email), user.PasswordHash, nullString(user.MFASecret),
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+		user.ID, user.Username, nullString(user.Email), nullString(user.Pubkey), user.Role,
+		user.PasswordHash, nullString(user.MFASecret),
 		user.MFAEnabled, pq.Array(user.BackupCodes), user.BackupCodesUsed, user.FailedLoginAttempts,
 		user.LockedUntil, user.LastLoginAt, nullString(user.LastLoginIP), user.CreatedAt, user.UpdatedAt)
 	if err != nil {
@@ -790,30 +801,37 @@ func (ps *PostgresStorage) CreateUser(ctx context.Context, user *User) error {
 
 func (ps *PostgresStorage) GetUser(ctx context.Context, id string) (*User, error) {
 	return ps.scanUser(ps.db.QueryRowContext(ctx, `
-		SELECT id, username, email, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+		SELECT id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
 		FROM users WHERE id = $1`, id))
 }
 
 func (ps *PostgresStorage) GetUserByUsername(ctx context.Context, username string) (*User, error) {
 	return ps.scanUser(ps.db.QueryRowContext(ctx, `
-		SELECT id, username, email, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+		SELECT id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
 		FROM users WHERE username = $1`, username))
 }
 
+func (ps *PostgresStorage) GetUserByPubkey(ctx context.Context, pubkey string) (*User, error) {
+	return ps.scanUser(ps.db.QueryRowContext(ctx, `
+		SELECT id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
+		FROM users WHERE pubkey = $1`, pubkey))
+}
+
 func (ps *PostgresStorage) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	return ps.scanUser(ps.db.QueryRowContext(ctx, `
-		SELECT id, username, email, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+		SELECT id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
 		FROM users WHERE email = $1`, email))
 }
 
 func (ps *PostgresStorage) scanUser(row *sql.Row) (*User, error) {
 	user := &User{}
-	var email, mfaSecret, lastLoginIP sql.NullString
+	var email, pubkey, mfaSecret, lastLoginIP sql.NullString
 	var lockedUntil, lastLoginAt sql.NullTime
-	err := row.Scan(&user.ID, &user.Username, &email, &user.PasswordHash, &mfaSecret,
+	err := row.Scan(&user.ID, &user.Username, &email, &pubkey, &user.Role, &user.PasswordHash, &mfaSecret,
 		&user.MFAEnabled, pq.Array(&user.BackupCodes), &user.BackupCodesUsed, &user.FailedLoginAttempts,
 		&lockedUntil, &lastLoginAt, &lastLoginIP, &user.CreatedAt, &user.UpdatedAt)
 	if err == sql.ErrNoRows {
@@ -825,6 +843,9 @@ func (ps *PostgresStorage) scanUser(row *sql.Row) (*User, error) {
 
 	if email.Valid {
 		user.Email = email.String
+	}
+	if pubkey.Valid {
+		user.Pubkey = pubkey.String
 	}
 	if mfaSecret.Valid {
 		user.MFASecret = mfaSecret.String
@@ -843,7 +864,7 @@ func (ps *PostgresStorage) scanUser(row *sql.Row) (*User, error) {
 
 func (ps *PostgresStorage) ListUsers(ctx context.Context) ([]*User, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, username, email, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+		SELECT id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
 		FROM users ORDER BY created_at DESC`)
 	if err != nil {
@@ -854,15 +875,18 @@ func (ps *PostgresStorage) ListUsers(ctx context.Context) ([]*User, error) {
 	var users []*User
 	for rows.Next() {
 		user := &User{}
-		var email, mfaSecret, lastLoginIP sql.NullString
+		var email, pubkey, mfaSecret, lastLoginIP sql.NullString
 		var lockedUntil, lastLoginAt sql.NullTime
-		if err := rows.Scan(&user.ID, &user.Username, &email, &user.PasswordHash, &mfaSecret,
+		if err := rows.Scan(&user.ID, &user.Username, &email, &pubkey, &user.Role, &user.PasswordHash, &mfaSecret,
 			&user.MFAEnabled, pq.Array(&user.BackupCodes), &user.BackupCodesUsed, &user.FailedLoginAttempts,
 			&lockedUntil, &lastLoginAt, &lastLoginIP, &user.CreatedAt, &user.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if email.Valid {
 			user.Email = email.String
+		}
+		if pubkey.Valid {
+			user.Pubkey = pubkey.String
 		}
 		if mfaSecret.Valid {
 			user.MFASecret = mfaSecret.String
@@ -884,11 +908,12 @@ func (ps *PostgresStorage) ListUsers(ctx context.Context) ([]*User, error) {
 func (ps *PostgresStorage) UpdateUser(ctx context.Context, user *User) error {
 	user.UpdatedAt = time.Now()
 	result, err := ps.db.ExecContext(ctx, `
-		UPDATE users SET username = $1, email = $2, password_hash = $3, mfa_secret = $4, mfa_enabled = $5,
-			backup_codes = $6, backup_codes_used = $7, failed_login_attempts = $8, locked_until = $9,
-			last_login_at = $10, last_login_ip = $11, updated_at = $12
-		WHERE id = $13`,
-		user.Username, nullString(user.Email), user.PasswordHash, nullString(user.MFASecret),
+		UPDATE users SET username = $1, email = $2, pubkey = $3, role = $4, password_hash = $5, mfa_secret = $6, mfa_enabled = $7,
+			backup_codes = $8, backup_codes_used = $9, failed_login_attempts = $10, locked_until = $11,
+			last_login_at = $12, last_login_ip = $13, updated_at = $14
+		WHERE id = $15`,
+		user.Username, nullString(user.Email), nullString(user.Pubkey), user.Role,
+		user.PasswordHash, nullString(user.MFASecret),
 		user.MFAEnabled, pq.Array(user.BackupCodes), user.BackupCodesUsed, user.FailedLoginAttempts,
 		user.LockedUntil, user.LastLoginAt, nullString(user.LastLoginIP), user.UpdatedAt, user.ID)
 	if err != nil {

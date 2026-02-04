@@ -110,10 +110,12 @@ type User struct {
 	ID                  string     `json:"id"`
 	Username            string     `json:"username"`
 	Email               string     `json:"email,omitempty"`
-	PasswordHash        string     `json:"-"` // Never exposed in JSON
-	MFASecret           string     `json:"-"` // TOTP secret, never exposed
+	Pubkey              string     `json:"pubkey,omitempty"`  // Nostr public key (hex)
+	Role                string     `json:"role"`              // "admin" or "user"
+	PasswordHash        string     `json:"-"`                 // Never exposed in JSON
+	MFASecret           string     `json:"-"`                 // TOTP secret, never exposed
 	MFAEnabled          bool       `json:"mfa_enabled"`
-	BackupCodes         []string   `json:"-"` // Hashed backup codes
+	BackupCodes         []string   `json:"-"`                 // Hashed backup codes
 	BackupCodesUsed     int        `json:"backup_codes_used"`
 	FailedLoginAttempts int        `json:"failed_login_attempts"`
 	LockedUntil         *time.Time `json:"locked_until,omitempty"`
@@ -121,6 +123,11 @@ type User struct {
 	LastLoginIP         string     `json:"last_login_ip,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+// IsAdmin returns true if the user has admin role
+func (u *User) IsAdmin() bool {
+	return u.Role == "admin"
 }
 
 // UserSession represents an authenticated user session (JWT-based)
@@ -183,6 +190,7 @@ type Storage interface {
 	GetUser(ctx context.Context, id string) (*User, error)
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
+	GetUserByPubkey(ctx context.Context, pubkey string) (*User, error)
 	ListUsers(ctx context.Context) ([]*User, error)
 	UpdateUser(ctx context.Context, user *User) error
 	DeleteUser(ctx context.Context, id string) error
@@ -739,6 +747,18 @@ func (m *MemoryStorage) GetUserByEmail(ctx context.Context, email string) (*User
 		return nil, ErrUserNotFound
 	}
 	return user, nil
+}
+
+func (m *MemoryStorage) GetUserByPubkey(ctx context.Context, pubkey string) (*User, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, user := range m.users {
+		if user.Pubkey == pubkey {
+			return user, nil
+		}
+	}
+	return nil, ErrUserNotFound
 }
 
 func (m *MemoryStorage) ListUsers(ctx context.Context) ([]*User, error) {

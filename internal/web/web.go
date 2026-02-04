@@ -2,6 +2,7 @@ package web
 
 import (
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -9,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/nbd-wtf/go-nostr/nip19"
 
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/auth"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
@@ -118,6 +121,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/keys", h.requireAuth(h.handleKeys))
 	mux.HandleFunc("/requests", h.requireAuth(h.handleRequests))
 	mux.HandleFunc("/users", h.requireAuth(h.handleUsers))
+
+	// Logout (GET - simple redirect)
+	mux.HandleFunc("/logout", h.handleLogout)
 
 	// API endpoints for web UI
 	mux.HandleFunc("/web/api/login", h.handleAPILogin)
@@ -287,9 +293,14 @@ func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUsers serves the users management page
+// handleUsers serves the users management page (admin only)
 func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request) {
 	user := h.getCurrentUser(r)
+	if user == nil || !user.IsAdmin() {
+		http.Redirect(w, r, "/dashboard", http.StatusFound)
+		return
+	}
+
 	users, _ := h.storage.ListUsers(r.Context())
 
 	h.render(w, "users.html", map[string]interface{}{
@@ -398,26 +409,49 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify pubkey is an admin
-	isAdmin := false
-	for _, admin := range h.config.Auth.AdminPubkeys {
-		if admin == req.Pubkey {
-			isAdmin = true
-			break
-		}
-	}
-
-	if !isAdmin {
-		h.jsonError(w, http.StatusForbidden, "Not an admin pubkey")
-		return
-	}
-
 	// TODO: Verify signature against challenge
 	// For now, we trust that the signature was verified client-side
 	// In production, we should verify the signature server-side
 
-	// Generate a session token for the admin
-	token, expiresAt, err := auth.GenerateJWT(h.authConfig, req.Pubkey, "admin:"+req.Pubkey[:8])
+	// Check if pubkey belongs to a registered user
+	user, err := h.storage.GetUserByPubkey(r.Context(), req.Pubkey)
+	if err != nil {
+		// Fall back to admin pubkeys config for backwards compatibility
+		isAdmin := false
+		for _, admin := range h.config.Auth.AdminPubkeys {
+			if admin == req.Pubkey {
+				isAdmin = true
+				break
+			}
+		}
+		if !isAdmin {
+			h.jsonError(w, http.StatusForbidden, "No account linked to this pubkey")
+			return
+		}
+		// Config-based admin login
+		token, expiresAt, err := auth.GenerateJWT(h.authConfig, req.Pubkey, "admin:"+req.Pubkey[:8])
+		if err != nil {
+			h.jsonError(w, http.StatusInternalServerError, "Failed to generate token")
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     "auth_token",
+			Value:    token,
+			Path:     "/",
+			Expires:  expiresAt,
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+		})
+		slog.Info("admin logged in via NIP-07 (config)", "pubkey", req.Pubkey[:16]+"...")
+		h.jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"success":  true,
+			"redirect": "/dashboard",
+		})
+		return
+	}
+
+	// User found by pubkey - generate session token
+	token, expiresAt, err := auth.GenerateJWT(h.authConfig, user.ID, user.Username)
 	if err != nil {
 		h.jsonError(w, http.StatusInternalServerError, "Failed to generate token")
 		return
@@ -432,7 +466,7 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	})
 
-	slog.Info("admin logged in via NIP-07", "pubkey", req.Pubkey[:16]+"...")
+	slog.Info("user logged in via NIP-07", "username", user.Username, "pubkey", req.Pubkey[:16]+"...")
 
 	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":  true,
@@ -451,6 +485,7 @@ func (h *Handler) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		Pubkey   string `json:"pubkey"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -468,6 +503,30 @@ func (h *Handler) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse pubkey (npub bech32 or hex)
+	pubkeyHex := ""
+	if req.Pubkey != "" {
+		if strings.HasPrefix(req.Pubkey, "npub1") {
+			_, val, err := nip19.Decode(req.Pubkey)
+			if err != nil {
+				h.jsonError(w, http.StatusBadRequest, "Invalid npub format")
+				return
+			}
+			pubkeyHex = val.(string)
+		} else {
+			// Validate hex format
+			if len(req.Pubkey) != 64 {
+				h.jsonError(w, http.StatusBadRequest, "Public key must be 64 hex characters or npub format")
+				return
+			}
+			if _, err := hex.DecodeString(req.Pubkey); err != nil {
+				h.jsonError(w, http.StatusBadRequest, "Invalid hex public key")
+				return
+			}
+			pubkeyHex = req.Pubkey
+		}
+	}
+
 	// Check if exists
 	if _, err := h.storage.GetUserByUsername(r.Context(), req.Username); err == nil {
 		h.jsonError(w, http.StatusConflict, "Username already exists")
@@ -481,6 +540,13 @@ func (h *Handler) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Determine role: first user gets admin
+	role := "user"
+	existingUsers, _ := h.storage.ListUsers(r.Context())
+	if len(existingUsers) == 0 {
+		role = "admin"
+	}
+
 	// Create user
 	userID, _ := auth.GenerateUserID()
 	now := time.Now()
@@ -488,6 +554,8 @@ func (h *Handler) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 		ID:           userID,
 		Username:     req.Username,
 		Email:        req.Email,
+		Pubkey:       pubkeyHex,
+		Role:         role,
 		PasswordHash: hash,
 		CreatedAt:    now,
 		UpdatedAt:    now,
@@ -498,12 +566,25 @@ func (h *Handler) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("user registered via web", "username", req.Username)
+	slog.Info("user registered via web", "username", req.Username, "role", role)
 
 	h.jsonResponse(w, http.StatusCreated, map[string]interface{}{
 		"success":  true,
 		"redirect": "/login",
 	})
+}
+
+// handleLogout clears the auth cookie and redirects to login
+func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "auth_token",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
 // handleAPIApprove handles request approval
@@ -622,11 +703,12 @@ func (h *Handler) getCurrentUser(r *http.Request) *storage.User {
 		return nil
 	}
 
-	// Check if this is an admin login (NIP-07)
+	// Check if this is a config-based admin login (NIP-07 via AdminPubkeys)
 	if strings.HasPrefix(claims.Username, "admin:") {
 		return &storage.User{
 			ID:       claims.UserID,
 			Username: claims.Username,
+			Role:     "admin",
 		}
 	}
 

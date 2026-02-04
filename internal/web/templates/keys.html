@@ -3,6 +3,7 @@
     <h1>Signing Keys</h1>
     <div style="display: flex; gap: 8px;">
         <button id="connect-app-btn" class="btn btn-secondary">Connect to App</button>
+        <button id="import-key-btn" class="btn btn-secondary">Import Key</button>
         <button id="create-key-btn" class="btn btn-primary">Create Key</button>
     </div>
 </div>
@@ -52,6 +53,29 @@
             <div class="modal-actions">
                 <button type="button" class="btn btn-secondary" id="cancel-create">Cancel</button>
                 <button type="submit" class="btn btn-primary">Create</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Import Key Modal -->
+<div id="import-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+        <h2>Import Existing Key</h2>
+        <form id="import-form">
+            <div class="form-group">
+                <label for="import-name">Key Name</label>
+                <input type="text" id="import-name" name="name" required placeholder="e.g., Main Key">
+            </div>
+            <div class="form-group">
+                <label for="import-privkey">Private Key</label>
+                <input type="password" id="import-privkey" name="private_key" required
+                    placeholder="nsec1... or hex" class="monospace">
+                <small>Accepts nsec (bech32) or hex format</small>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="cancel-import">Cancel</button>
+                <button type="submit" class="btn btn-primary">Import</button>
             </div>
         </form>
     </div>
@@ -132,6 +156,44 @@ document.addEventListener('DOMContentLoaded', function() {
 
     modal.addEventListener('click', function(e) {
         if (e.target === modal) modal.style.display = 'none';
+    });
+
+    // Import key modal
+    const importBtn = document.getElementById('import-key-btn');
+    const importModal = document.getElementById('import-modal');
+    const cancelImport = document.getElementById('cancel-import');
+    const importForm = document.getElementById('import-form');
+
+    importBtn.addEventListener('click', () => importModal.style.display = 'flex');
+    cancelImport.addEventListener('click', () => importModal.style.display = 'none');
+
+    importModal.addEventListener('click', function(e) {
+        if (e.target === importModal) importModal.style.display = 'none';
+    });
+
+    importForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const name = document.getElementById('import-name').value;
+        const privateKey = document.getElementById('import-privkey').value.trim();
+
+        try {
+            const response = await fetch('/api/v1/keys', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, private_key: privateKey})
+            });
+
+            if (response.ok) {
+                showMessage('Key imported successfully', 'success');
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                const data = await response.json();
+                showMessage(data.error || 'Failed to import key', 'error');
+            }
+        } catch (err) {
+            showMessage('Failed to import key', 'error');
+        }
+        importModal.style.display = 'none';
     });
 
     createForm.addEventListener('submit', async function(e) {

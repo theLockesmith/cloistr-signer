@@ -8,6 +8,8 @@
         <thead>
             <tr>
                 <th>Username</th>
+                <th>Role</th>
+                <th>Pubkey</th>
                 <th>Email</th>
                 <th>MFA</th>
                 <th>Created</th>
@@ -18,6 +20,20 @@
             {{range .Users}}
             <tr>
                 <td>{{.Username}}</td>
+                <td>
+                    {{if .IsAdmin}}
+                    <span class="badge badge-admin">admin</span>
+                    {{else}}
+                    <span class="badge badge-muted">user</span>
+                    {{end}}
+                </td>
+                <td>
+                    {{if .Pubkey}}
+                    <span class="pubkey">{{truncate .Pubkey 16}}...</span>
+                    {{else}}
+                    <span class="text-muted">-</span>
+                    {{end}}
+                </td>
                 <td>{{if .Email}}{{.Email}}{{else}}<span class="text-muted">-</span>{{end}}</td>
                 <td>
                     {{if .MFAEnabled}}
@@ -37,7 +53,7 @@
             </tr>
             {{else}}
             <tr>
-                <td colspan="5" class="text-center text-muted">No users registered</td>
+                <td colspan="7" class="text-center text-muted">No users registered</td>
             </tr>
             {{end}}
         </tbody>
