@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 // PostgresStorage implements Storage interface using PostgreSQL
@@ -777,7 +777,7 @@ func (ps *PostgresStorage) CreateUser(ctx context.Context, user *User) error {
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		user.ID, user.Username, nullString(user.Email), user.PasswordHash, nullString(user.MFASecret),
-		user.MFAEnabled, user.BackupCodes, user.BackupCodesUsed, user.FailedLoginAttempts,
+		user.MFAEnabled, pq.Array(user.BackupCodes), user.BackupCodesUsed, user.FailedLoginAttempts,
 		user.LockedUntil, user.LastLoginAt, nullString(user.LastLoginIP), user.CreatedAt, user.UpdatedAt)
 	if err != nil {
 		if isDuplicateError(err) {
@@ -814,7 +814,7 @@ func (ps *PostgresStorage) scanUser(row *sql.Row) (*User, error) {
 	var email, mfaSecret, lastLoginIP sql.NullString
 	var lockedUntil, lastLoginAt sql.NullTime
 	err := row.Scan(&user.ID, &user.Username, &email, &user.PasswordHash, &mfaSecret,
-		&user.MFAEnabled, &user.BackupCodes, &user.BackupCodesUsed, &user.FailedLoginAttempts,
+		&user.MFAEnabled, pq.Array(&user.BackupCodes), &user.BackupCodesUsed, &user.FailedLoginAttempts,
 		&lockedUntil, &lastLoginAt, &lastLoginIP, &user.CreatedAt, &user.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrUserNotFound
@@ -857,7 +857,7 @@ func (ps *PostgresStorage) ListUsers(ctx context.Context) ([]*User, error) {
 		var email, mfaSecret, lastLoginIP sql.NullString
 		var lockedUntil, lastLoginAt sql.NullTime
 		if err := rows.Scan(&user.ID, &user.Username, &email, &user.PasswordHash, &mfaSecret,
-			&user.MFAEnabled, &user.BackupCodes, &user.BackupCodesUsed, &user.FailedLoginAttempts,
+			&user.MFAEnabled, pq.Array(&user.BackupCodes), &user.BackupCodesUsed, &user.FailedLoginAttempts,
 			&lockedUntil, &lastLoginAt, &lastLoginIP, &user.CreatedAt, &user.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -889,7 +889,7 @@ func (ps *PostgresStorage) UpdateUser(ctx context.Context, user *User) error {
 			last_login_at = $10, last_login_ip = $11, updated_at = $12
 		WHERE id = $13`,
 		user.Username, nullString(user.Email), user.PasswordHash, nullString(user.MFASecret),
-		user.MFAEnabled, user.BackupCodes, user.BackupCodesUsed, user.FailedLoginAttempts,
+		user.MFAEnabled, pq.Array(user.BackupCodes), user.BackupCodesUsed, user.FailedLoginAttempts,
 		user.LockedUntil, user.LastLoginAt, nullString(user.LastLoginIP), user.UpdatedAt, user.ID)
 	if err != nil {
 		return err
