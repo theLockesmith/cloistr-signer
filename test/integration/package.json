@@ -1,0 +1,24 @@
+{
+  "name": "coldforge-identity",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@gitlab-coldforge:coldforge/coldforge-identity.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@noble/ciphers": "^2.1.1",
+    "@noble/hashes": "^2.0.1",
+    "@noble/secp256k1": "^3.0.0",
+    "@nostr-dev-kit/ndk": "^2.18.1",
+    "nostr-tools": "^2.22.0",
+    "ws": "^8.19.0"
+  }
+}

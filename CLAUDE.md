@@ -273,9 +273,20 @@ Controls how the signer handles requests from unknown clients (no existing permi
 - [x] Password strength indicator on registration
 - [x] Password visibility toggle on login
 
+### Completed (Phase 8 - Production Ready)
+- [x] PostgreSQL storage backend (persistent data across restarts)
+- [x] Database migrations (auto-creates tables on startup)
+- [x] User roles (admin/user) with first-user-is-admin logic
+- [x] Admin-only access to Users page
+- [x] Key import via web UI (nsec or hex)
+- [x] Logout functionality (cookie-based)
+- [x] npub registration (link Nostr identity to account)
+- [x] NIP-07 login for any user with linked pubkey
+- [x] Dark mode theming fixes for modals and forms
+
 ### Roadmap to Production
 
-**Connection flows working! Next:**
+**Core functionality complete! Next:**
 - [ ] Bunker secret validation (auto-approve only with valid secret)
 - [ ] Connected apps management UI
 - [ ] Unit and integration tests
@@ -313,19 +324,21 @@ curl -X POST http://localhost:7780/api/v1/keys/<id>/permissions \
   -H "Content-Type: application/json" \
   -d '{"user_pubkey": "<client-pubkey>", "methods": ["sign_event", "ping"]}'
 
-# Run NIP-46 tests
-cd ~/Development/coldforge-identity
+# Run NIP-46 integration tests (Node.js)
+cd test/integration
+npm install
 node test-nip46.mjs
+node test-go-signer.mjs
 ```
 
 ## Related
 
 - Full roadmap: `~/claude/coldforge/services/identity/CLAUDE.md`
-- Test scripts: `~/Development/coldforge-identity/`
+- Integration tests: `test/integration/`
 - Atlas role: `~/Atlas/roles/kube/coldforge-signer/`
 - NIP-46 spec: https://github.com/nostr-protocol/nips/blob/master/46.md
 - NIP-42 spec: https://github.com/nostr-protocol/nips/blob/master/42.md
 
 ---
 
-**Last Updated:** 2026-01-30 (Phase 7 complete - bunker:// and nostrconnect:// flows working!)
+**Last Updated:** 2026-02-04 (Phase 8 complete - PostgreSQL, admin roles, key import, npub registration)
