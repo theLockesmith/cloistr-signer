@@ -382,7 +382,8 @@ func (h *Handler) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		Expires:  expiresAt,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
 	})
 
 	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -440,7 +441,8 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 			Path:     "/",
 			Expires:  expiresAt,
 			HttpOnly: true,
-			SameSite: http.SameSiteStrictMode,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
 		})
 		slog.Info("admin logged in via NIP-07 (config)", "pubkey", req.Pubkey[:16]+"...")
 		h.jsonResponse(w, http.StatusOK, map[string]interface{}{
@@ -463,7 +465,8 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		Expires:  expiresAt,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
 	})
 
 	slog.Info("user logged in via NIP-07", "username", user.Username, "pubkey", req.Pubkey[:16]+"...")
@@ -582,7 +585,8 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
