@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/metrics"
 )
 
 // Client manages connections to Nostr relays
@@ -46,6 +47,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			continue
 		}
 		c.relays[url] = relay
+		metrics.SetRelayConnections(len(c.relays))
 		slog.Info("connected to relay", "url", url)
 
 		// Try to authenticate if we have an auth key
@@ -238,6 +240,7 @@ func (c *Client) reconnectIfNeeded(ctx context.Context) {
 				continue
 			}
 			c.relays[url] = relay
+			metrics.SetRelayConnections(len(c.relays))
 			slog.Info("reconnected to relay", "url", url)
 		}
 	}

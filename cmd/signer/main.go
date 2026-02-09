@@ -13,6 +13,7 @@ import (
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/admin"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/api"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
+	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/metrics"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/nostr"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/signer"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/storage"
@@ -70,9 +71,15 @@ func main() {
 	apiHandler.RegisterRoutes(mux)
 	webHandler.RegisterRoutes(mux)
 
+	// Add Prometheus metrics endpoint
+	mux.Handle("/metrics", metrics.Handler())
+
+	// Wrap with metrics middleware
+	handler := metrics.Middleware(mux)
+
 	server := &http.Server{
 		Addr:         cfg.Server.Address,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,

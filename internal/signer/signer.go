@@ -13,6 +13,7 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip04"
 	"github.com/nbd-wtf/go-nostr/nip44"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
+	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/metrics"
 	relay "gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/nostr"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/storage"
 )
@@ -109,6 +110,7 @@ func (s *Signer) Start(ctx context.Context) error {
 	} else {
 		slog.Info("loaded keys from storage", "count", len(keys))
 	}
+	metrics.SetKeysManaged(len(keys))
 
 	// Subscribe to ALL kind:24133 events - we filter by our keys in handleEvent
 	// This allows dynamic key addition via the HTTP API
@@ -362,7 +364,12 @@ func (s *Signer) checkPolicyUsage(ctx context.Context, policyID, method string) 
 	return true, "", nil
 }
 
-func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey string, req *NIP46Request, perm *storage.Permission) (string, error) {
+func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey string, req *NIP46Request, perm *storage.Permission) (result string, err error) {
+	// Record metrics on completion
+	defer func() {
+		metrics.RecordSigningRequest(req.Method, err == nil)
+	}()
+
 	// Check policy usage limits if permission is policy-based
 	if perm.PolicyID != "" {
 		allowed, ruleID, err := s.checkPolicyUsage(ctx, perm.PolicyID, req.Method)
