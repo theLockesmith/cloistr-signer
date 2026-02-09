@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/auth"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
 	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/signer"
@@ -251,8 +252,19 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	var pubkey string
 
 	if req.PrivateKey != "" {
-		// Use provided private key
-		privateKey = req.PrivateKey
+		// Use provided private key - handle both nsec and hex formats
+		privateKey = strings.TrimSpace(req.PrivateKey)
+
+		if strings.HasPrefix(privateKey, "nsec1") {
+			// Decode nsec (bech32) to hex
+			prefix, value, err := nip19.Decode(privateKey)
+			if err != nil || prefix != "nsec" {
+				h.errorResponse(w, http.StatusBadRequest, "invalid nsec format")
+				return
+			}
+			privateKey = value.(string)
+		}
+
 		pk, err := nostr.GetPublicKey(privateKey)
 		if err != nil {
 			h.errorResponse(w, http.StatusBadRequest, "invalid private key")
