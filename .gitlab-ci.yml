@@ -3,6 +3,7 @@ stages:
 
 variables:
   DOCKER_IMAGE: registry.coldforge.xyz/coldforge/coldforge-signer
+  GIT_SUBMODULE_STRATEGY: recursive
 
 build:
   stage: build
