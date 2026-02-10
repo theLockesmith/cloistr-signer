@@ -579,11 +579,13 @@ func (h *Handler) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 
 // handleLogout clears the auth cookie and redirects to login
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Clear the auth cookie by setting it to expire in the past
 	http.SetCookie(w, &http.Cookie{
 		Name:     "auth_token",
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
