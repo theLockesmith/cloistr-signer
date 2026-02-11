@@ -147,6 +147,8 @@ func (h *Handler) handleStatic(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/css")
 	} else if strings.HasSuffix(path, ".js") {
 		w.Header().Set("Content-Type", "application/javascript")
+	} else if strings.HasSuffix(path, ".svg") {
+		w.Header().Set("Content-Type", "image/svg+xml")
 	}
 
 	w.Write(data)
