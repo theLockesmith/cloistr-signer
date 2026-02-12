@@ -121,18 +121,8 @@ toastStyles.textContent = `
 `;
 document.head.appendChild(toastStyles);
 
-// Logout handler
-document.addEventListener('DOMContentLoaded', function() {
-    const logoutLinks = document.querySelectorAll('a[href="/logout"]');
-    logoutLinks.forEach(link => {
-        link.addEventListener('click', function(e) {
-            e.preventDefault();
-            // Clear auth cookie
-            document.cookie = 'auth_token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
-            window.location.href = '/';
-        });
-    });
-});
+// Logout is handled server-side at /logout
+// The auth_token cookie is HttpOnly so JavaScript cannot clear it
 
 // Format relative time
 function formatRelativeTime(date) {
