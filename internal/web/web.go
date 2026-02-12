@@ -119,6 +119,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Protected pages (require auth)
 	mux.HandleFunc("/dashboard", h.requireAuth(h.handleDashboard))
 	mux.HandleFunc("/keys", h.requireAuth(h.handleKeys))
+	mux.HandleFunc("/apps", h.requireAuth(h.handleApps))
 	mux.HandleFunc("/requests", h.requireAuth(h.handleRequests))
 	mux.HandleFunc("/users", h.requireAuth(h.handleUsers))
 
@@ -274,6 +275,39 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
 		"Title": "Keys - Coldforge Signer",
 		"User":  user,
 		"Keys":  keys,
+	})
+}
+
+// AppPermissions groups permissions by key for display
+type AppPermissions struct {
+	KeyID       string
+	KeyName     string
+	KeyPubkey   string
+	Permissions []*storage.Permission
+}
+
+// handleApps serves the connected apps management page
+func (h *Handler) handleApps(w http.ResponseWriter, r *http.Request) {
+	user := h.getCurrentUser(r)
+	keys, _ := h.storage.ListKeys(r.Context())
+
+	var apps []AppPermissions
+	for _, key := range keys {
+		perms, _ := h.storage.ListPermissions(r.Context(), key.Pubkey)
+		if len(perms) > 0 {
+			apps = append(apps, AppPermissions{
+				KeyID:       key.ID,
+				KeyName:     key.Name,
+				KeyPubkey:   key.Pubkey,
+				Permissions: perms,
+			})
+		}
+	}
+
+	h.render(w, "apps.html", map[string]interface{}{
+		"Title": "Connected Apps - Coldforge Signer",
+		"User":  user,
+		"Apps":  apps,
 	})
 }
 

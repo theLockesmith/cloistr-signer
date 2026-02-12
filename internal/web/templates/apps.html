@@ -1,0 +1,109 @@
+{{define "content"}}
+<div class="page-header">
+    <h1>Connected Apps</h1>
+</div>
+
+<div id="message" class="alert" style="display: none;"></div>
+
+{{if .Apps}}
+{{range .Apps}}
+<div class="card" style="margin-bottom: 1rem;">
+    <div class="card-header">
+        <strong>{{.KeyName}}</strong>
+        <span class="text-muted">({{truncate .KeyPubkey 16}}...)</span>
+    </div>
+    <div class="table-container">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Client</th>
+                    <th>Permissions</th>
+                    <th>Expires</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Permissions}}
+                <tr>
+                    <td class="pubkey">{{truncate .UserPubkey 20}}...</td>
+                    <td>
+                        {{range .Methods}}
+                        <span class="badge">{{.}}</span>
+                        {{end}}
+                    </td>
+                    <td>
+                        {{if .ExpiresAt}}
+                        {{formatTime .ExpiresAt}}
+                        {{else}}
+                        <span class="text-muted">Never</span>
+                        {{end}}
+                    </td>
+                    <td>
+                        <button class="btn btn-sm copy-btn" data-pubkey="{{.UserPubkey}}">Copy Pubkey</button>
+                        <button class="btn btn-sm btn-danger revoke-btn"
+                                data-key-id="{{$.KeyID}}"
+                                data-pubkey="{{.UserPubkey}}">Revoke</button>
+                    </td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+{{end}}
+{{else}}
+<div class="card">
+    <p class="text-center text-muted" style="padding: 2rem;">
+        No connected apps yet. Share your bunker:// URI with apps to connect them.
+    </p>
+</div>
+{{end}}
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const messageDiv = document.getElementById('message');
+
+    // Copy buttons
+    document.querySelectorAll('.copy-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            navigator.clipboard.writeText(this.dataset.pubkey);
+            this.textContent = 'Copied!';
+            setTimeout(() => this.textContent = 'Copy Pubkey', 1500);
+        });
+    });
+
+    // Revoke buttons
+    document.querySelectorAll('.revoke-btn').forEach(btn => {
+        btn.addEventListener('click', async function() {
+            const keyId = this.dataset.keyId;
+            const pubkey = this.dataset.pubkey;
+
+            if (!confirm('Revoke access for this app? It will need to reconnect.')) return;
+
+            try {
+                const response = await fetch(`/api/v1/keys/${keyId}/permissions/${pubkey}`, {
+                    method: 'DELETE'
+                });
+                if (response.ok) {
+                    this.closest('tr').remove();
+                    showMessage('Access revoked', 'success');
+                } else {
+                    showMessage('Failed to revoke access', 'error');
+                }
+            } catch (err) {
+                showMessage('Failed to revoke access', 'error');
+            }
+        });
+    });
+
+    function showMessage(text, type) {
+        messageDiv.textContent = text;
+        messageDiv.className = 'alert alert-' + type;
+        messageDiv.style.display = 'block';
+        setTimeout(() => messageDiv.style.display = 'none', 3000);
+    }
+});
+</script>
+{{end}}
+
+{{template "base" .}}

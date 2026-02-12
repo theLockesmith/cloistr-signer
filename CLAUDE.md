@@ -284,14 +284,14 @@ Controls how the signer handles requests from unknown clients (no existing permi
 - [x] NIP-07 login for any user with linked pubkey
 - [x] Dark mode theming fixes for modals and forms
 
-### Completed (Phase 9 - Security)
+### Completed (Phase 9 - Security & Management)
 - [x] Bunker secret validation (auto-approve only with valid secret)
 - [x] One-time use secrets with 24-hour expiry
+- [x] Connected apps management UI (/apps)
 
 ### Roadmap to Production
 
 **Core functionality complete! Next:**
-- [ ] Connected apps management UI
 - [ ] Unit and integration tests
 - [ ] Production Vault configuration
 - [ ] Documentation
@@ -344,4 +344,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-02-12 (Phase 9 complete - Bunker secret validation)
+**Last Updated:** 2026-02-12 (Phase 9 complete - Bunker secret validation, Connected apps UI)
