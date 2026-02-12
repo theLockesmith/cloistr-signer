@@ -3,6 +3,3 @@ bin/
 .env
 config.yaml
 
-# Favicon files are copied from assets submodule during build
-internal/web/static/favicon*.svg
-
