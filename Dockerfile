@@ -12,10 +12,6 @@ RUN go mod download
 # Copy source
 COPY . .
 
-# Copy icons to static directory
-RUN cp icons/cloistr-signer.svg internal/web/static/favicon.svg && \
-    cp icons/favicon/cloistr-signer-16.svg internal/web/static/favicon-16.svg
-
 # Build
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /signer ./cmd/signer
 
