@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <!-- Cloistr: Monochrome version (single color for dark/light backgrounds) -->
-  <g fill="currentColor">
-    <path d="M54,14 Q62,32 54,50 Q42,62 24,62 Q4,62 4,32 Q4,2 24,2 Q42,2 54,14 L46,22 Q38,12 24,12 Q12,12 12,32 Q12,52 24,52 Q38,52 46,42 Z"/>
-    <circle cx="46" cy="32" r="9"/>
-  </g>
-</svg>
