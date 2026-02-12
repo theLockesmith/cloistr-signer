@@ -169,6 +169,19 @@ func (ps *PostgresStorage) migrate() error {
 
 	CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 	CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at);
+
+	CREATE TABLE IF NOT EXISTS bunker_secrets (
+		id TEXT PRIMARY KEY,
+		key_pubkey TEXT NOT NULL,
+		secret TEXT NOT NULL UNIQUE,
+		expires_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		used_at TIMESTAMPTZ
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_bunker_secrets_key_pubkey ON bunker_secrets(key_pubkey);
+	CREATE INDEX IF NOT EXISTS idx_bunker_secrets_secret ON bunker_secrets(secret);
+	CREATE INDEX IF NOT EXISTS idx_bunker_secrets_expires ON bunker_secrets(expires_at);
 	`
 
 	_, err := ps.db.Exec(schema)
@@ -1092,6 +1105,63 @@ func (ps *PostgresStorage) DeleteUserSessions(ctx context.Context, userID string
 
 func (ps *PostgresStorage) CleanExpiredUserSessions(ctx context.Context) error {
 	_, err := ps.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE expires_at < NOW()`)
+	return err
+}
+
+// Bunker secret management
+
+func (ps *PostgresStorage) CreateBunkerSecret(ctx context.Context, secret *BunkerSecret) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO bunker_secrets (id, key_pubkey, secret, expires_at, created_at, used_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		secret.ID, secret.KeyPubkey, secret.Secret, secret.ExpiresAt, secret.CreatedAt, secret.UsedAt)
+	return err
+}
+
+func (ps *PostgresStorage) ValidateBunkerSecret(ctx context.Context, keyPubkey, secret string) (*BunkerSecret, error) {
+	bs := &BunkerSecret{}
+	var usedAt sql.NullTime
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, key_pubkey, secret, expires_at, created_at, used_at
+		FROM bunker_secrets WHERE secret = $1 AND key_pubkey = $2`, secret, keyPubkey).
+		Scan(&bs.ID, &bs.KeyPubkey, &bs.Secret, &bs.ExpiresAt, &bs.CreatedAt, &usedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrBunkerSecretInvalid
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if expired
+	if time.Now().After(bs.ExpiresAt) {
+		// Clean up expired secret
+		_, _ = ps.db.ExecContext(ctx, `DELETE FROM bunker_secrets WHERE id = $1`, bs.ID)
+		return nil, ErrBunkerSecretInvalid
+	}
+
+	// Check if already used
+	if usedAt.Valid {
+		return nil, ErrBunkerSecretInvalid
+	}
+
+	// Mark as used
+	now := time.Now()
+	_, err = ps.db.ExecContext(ctx, `UPDATE bunker_secrets SET used_at = $1 WHERE id = $2`, now, bs.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	bs.UsedAt = &now
+	return bs, nil
+}
+
+func (ps *PostgresStorage) DeleteBunkerSecret(ctx context.Context, id string) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM bunker_secrets WHERE id = $1`, id)
+	return err
+}
+
+func (ps *PostgresStorage) CleanExpiredBunkerSecrets(ctx context.Context) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM bunker_secrets WHERE expires_at < NOW()`)
 	return err
 }
 

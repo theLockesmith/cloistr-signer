@@ -252,6 +252,39 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 		return
 	}
 
+	// No permission - check for bunker secret on connect requests
+	// NIP-46 connect params: [pubkey, secret?]
+	if request.Method == "connect" && len(request.Params) >= 2 {
+		secret := request.Params[1]
+		if secret != "" {
+			// Validate the bunker secret
+			_, err := s.storage.ValidateBunkerSecret(ctx, targetPubkey, secret)
+			if err == nil {
+				// Valid secret - auto-approve and create persistent permission
+				slog.Info("auto-approving connect with valid bunker secret", "client", clientPubkey[:16]+"...")
+				fullPerm := &storage.Permission{
+					KeyID:      targetPubkey,
+					UserPubkey: clientPubkey,
+					Methods:    []string{"*"}, // Allow all methods
+				}
+				// Save the permission for future requests
+				if err := s.storage.SetPermission(ctx, fullPerm); err != nil {
+					slog.Error("failed to save permission from bunker secret", "error", err)
+				}
+				result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, fullPerm)
+				if err != nil {
+					slog.Error("request handling failed", "method", request.Method, "error", err)
+					s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error(), useNIP44)
+					return
+				}
+				s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result, useNIP44)
+				return
+			}
+			// Invalid secret - log but continue to normal flow
+			slog.Warn("invalid bunker secret provided", "client", clientPubkey[:16]+"...")
+		}
+	}
+
 	// No permission - check if we should auto-approve or wait for authorization
 	if !s.config.Auth.RequireApproval {
 		// Auto-approve: create a temporary permission with full access

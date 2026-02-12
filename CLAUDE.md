@@ -202,7 +202,7 @@ Controls how the signer handles requests from unknown clients (no existing permi
 
 - **`true`**: Requests wait for manual admin approval via the web UI (`/requests`) or admin DM commands. Opt-in for high-security or shared deployments where you want to vet each app.
 
-**Future enhancement**: Validate bunker URI secrets on connect - auto-approve only if the client provides the correct secret, otherwise require approval.
+**Bunker Secret Validation**: When a client connects with a valid bunker:// URI secret, they are auto-approved with full access regardless of `REQUIRE_APPROVAL` setting. Secrets are one-time use and expire after 24 hours. If the secret is invalid or missing, the normal `REQUIRE_APPROVAL` behavior applies.
 
 ## Development Status
 
@@ -284,10 +284,13 @@ Controls how the signer handles requests from unknown clients (no existing permi
 - [x] NIP-07 login for any user with linked pubkey
 - [x] Dark mode theming fixes for modals and forms
 
+### Completed (Phase 9 - Security)
+- [x] Bunker secret validation (auto-approve only with valid secret)
+- [x] One-time use secrets with 24-hour expiry
+
 ### Roadmap to Production
 
 **Core functionality complete! Next:**
-- [ ] Bunker secret validation (auto-approve only with valid secret)
 - [ ] Connected apps management UI
 - [ ] Unit and integration tests
 - [ ] Production Vault configuration
@@ -341,4 +344,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-02-04 (Phase 8 complete - PostgreSQL, admin roles, key import, npub registration)
+**Last Updated:** 2026-02-12 (Phase 9 complete - Bunker secret validation)

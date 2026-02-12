@@ -25,8 +25,9 @@ var (
 	ErrUserExists       = errors.New("user already exists")
 	ErrInvalidPassword  = errors.New("invalid password")
 	ErrAccountLocked    = errors.New("account locked")
-	ErrMFARequired      = errors.New("MFA verification required")
-	ErrInvalidMFACode   = errors.New("invalid MFA code")
+	ErrMFARequired        = errors.New("MFA verification required")
+	ErrInvalidMFACode     = errors.New("invalid MFA code")
+	ErrBunkerSecretInvalid = errors.New("invalid bunker secret")
 )
 
 // Key represents a stored signing key
@@ -141,6 +142,16 @@ type UserSession struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// BunkerSecret represents a secret for bunker:// URI validation
+type BunkerSecret struct {
+	ID        string    `json:"id"`
+	KeyPubkey string    `json:"key_pubkey"` // The signer key this secret is for
+	Secret    string    `json:"-"`          // The secret value (never exposed in JSON)
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+	UsedAt    *time.Time `json:"used_at,omitempty"` // When the secret was used (one-time use)
+}
+
 // Storage interface for key and session management
 type Storage interface {
 	// Key management
@@ -207,6 +218,12 @@ type Storage interface {
 	DeleteUserSessions(ctx context.Context, userID string) error
 	CleanExpiredUserSessions(ctx context.Context) error
 
+	// Bunker secret management
+	CreateBunkerSecret(ctx context.Context, secret *BunkerSecret) error
+	ValidateBunkerSecret(ctx context.Context, keyPubkey, secret string) (*BunkerSecret, error)
+	DeleteBunkerSecret(ctx context.Context, id string) error
+	CleanExpiredBunkerSecrets(ctx context.Context) error
+
 	// Lifecycle
 	Close() error
 }
@@ -246,6 +263,7 @@ type MemoryStorage struct {
 	usersByEmail    map[string]*User
 	userSessions    map[string]*UserSession
 	userSessionsByUser map[string]map[string]*UserSession // userID -> sessionID -> UserSession
+	bunkerSecrets   map[string]*BunkerSecret              // secret value -> BunkerSecret
 }
 
 // NewMemoryStorage creates a new in-memory storage
@@ -266,6 +284,7 @@ func NewMemoryStorage() *MemoryStorage {
 		usersByEmail:       make(map[string]*User),
 		userSessions:       make(map[string]*UserSession),
 		userSessionsByUser: make(map[string]map[string]*UserSession),
+		bunkerSecrets:      make(map[string]*BunkerSecret),
 	}
 }
 
@@ -971,6 +990,75 @@ func (m *MemoryStorage) CleanExpiredUserSessions(ctx context.Context) error {
 			if userSessions, exists := m.userSessionsByUser[session.UserID]; exists {
 				delete(userSessions, id)
 			}
+		}
+	}
+	return nil
+}
+
+// Bunker secret management
+
+func (m *MemoryStorage) CreateBunkerSecret(ctx context.Context, secret *BunkerSecret) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.bunkerSecrets[secret.Secret] = secret
+	return nil
+}
+
+func (m *MemoryStorage) ValidateBunkerSecret(ctx context.Context, keyPubkey, secret string) (*BunkerSecret, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	bs, exists := m.bunkerSecrets[secret]
+	if !exists {
+		return nil, ErrBunkerSecretInvalid
+	}
+
+	// Check if it's for the right key
+	if bs.KeyPubkey != keyPubkey {
+		return nil, ErrBunkerSecretInvalid
+	}
+
+	// Check if expired
+	if time.Now().After(bs.ExpiresAt) {
+		delete(m.bunkerSecrets, secret)
+		return nil, ErrBunkerSecretInvalid
+	}
+
+	// Check if already used
+	if bs.UsedAt != nil {
+		return nil, ErrBunkerSecretInvalid
+	}
+
+	// Mark as used
+	now := time.Now()
+	bs.UsedAt = &now
+
+	return bs, nil
+}
+
+func (m *MemoryStorage) DeleteBunkerSecret(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Find and delete by ID
+	for secret, bs := range m.bunkerSecrets {
+		if bs.ID == id {
+			delete(m.bunkerSecrets, secret)
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *MemoryStorage) CleanExpiredBunkerSecrets(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	for secret, bs := range m.bunkerSecrets {
+		if now.After(bs.ExpiresAt) {
+			delete(m.bunkerSecrets, secret)
 		}
 	}
 	return nil

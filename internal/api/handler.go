@@ -1692,6 +1692,20 @@ func (h *Handler) handleBunkerConnect(w http.ResponseWriter, r *http.Request) {
 	rand.Read(secretBytes)
 	secret := fmt.Sprintf("%x", secretBytes)
 
+	// Store the secret for validation on connect
+	bunkerSecret := &storage.BunkerSecret{
+		ID:        generateID(),
+		KeyPubkey: key.Pubkey,
+		Secret:    secret,
+		ExpiresAt: time.Now().Add(24 * time.Hour), // Secret valid for 24 hours
+		CreatedAt: time.Now(),
+	}
+	if err := h.storage.CreateBunkerSecret(r.Context(), bunkerSecret); err != nil {
+		slog.Error("failed to store bunker secret", "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to generate bunker URI")
+		return
+	}
+
 	// Build bunker URI
 	// bunker://<pubkey>?relay=<relay>&secret=<secret>
 	relays := h.config.Relays
