@@ -22,7 +22,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /signer ./cmd/signer
 # Runtime stage
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata
+# Retry logic for transient network errors
+RUN for i in 1 2 3 4 5; do \
+      apk add --no-cache ca-certificates tzdata && break || \
+      echo "Attempt $i failed, retrying in 5s..." && sleep 5; \
+    done
 
 # Create non-root user
 RUN adduser -D -u 1000 signer
