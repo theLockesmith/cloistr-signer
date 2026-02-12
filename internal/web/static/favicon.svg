@@ -1,20 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <!-- Background - original dark -->
-  <rect width="64" height="64" rx="12" fill="#1E1E2E"/>
-
-  <!-- Archway frame -->
-  <g fill="none" stroke="#E5E7EB" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M 14 52 L 14 24 A 18 18 0 0 1 50 24 L 50 52"/>
-  </g>
-
-  <!-- Signer symbol: key - all purple -->
-  <g fill="none" stroke="#8B5CF6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-    <!-- Key head (circle) -->
-    <circle cx="28" cy="34" r="6"/>
-    <!-- Key shaft -->
-    <line x1="34" y1="34" x2="44" y2="34"/>
-    <!-- Key teeth -->
-    <line x1="40" y1="34" x2="40" y2="38"/>
-    <line x1="44" y1="34" x2="44" y2="40"/>
+  <!-- Cloistr: Two-tone C shell with pearl -->
+  <g>
+    <!-- Outer/back layer (darker purple) -->
+    <path d="M54,14 Q62,32 54,50 Q42,62 24,62 Q4,62 4,32 Q4,2 24,2 Q42,2 54,14 L46,22 Q38,12 24,12 Q12,12 12,32 Q12,52 24,52 Q38,52 46,42 Z" fill="#7C3AED"/>
+    <!-- Inner/front layer (Nostr purple) -->
+    <path d="M50,18 Q56,32 50,46 Q40,54 24,54 Q10,54 10,32 Q10,10 24,10 Q40,10 50,18 L44,24 Q36,16 24,16 Q16,16 16,32 Q16,48 24,48 Q36,48 44,40 Z" fill="#8B5CF6"/>
+    <!-- Pearl (light purple) -->
+    <circle cx="46" cy="32" r="9" fill="#E9D5FF"/>
   </g>
 </svg>
