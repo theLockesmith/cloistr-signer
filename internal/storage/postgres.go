@@ -43,9 +43,10 @@ func NewPostgresStorage(dsn string) (*PostgresStorage, error) {
 }
 
 // migrate runs database migrations
+// Table names are prefixed with 'signer_' to avoid conflicts with the cloistr platform schema
 func (ps *PostgresStorage) migrate() error {
 	schema := `
-	CREATE TABLE IF NOT EXISTS keys (
+	CREATE TABLE IF NOT EXISTS signer_keys (
 		id TEXT PRIMARY KEY,
 		name TEXT,
 		pubkey TEXT UNIQUE NOT NULL,
@@ -54,10 +55,10 @@ func (ps *PostgresStorage) migrate() error {
 		created_by TEXT
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_keys_pubkey ON keys(pubkey);
-	CREATE INDEX IF NOT EXISTS idx_keys_name ON keys(name);
+	CREATE INDEX IF NOT EXISTS idx_signer_keys_pubkey ON signer_keys(pubkey);
+	CREATE INDEX IF NOT EXISTS idx_signer_keys_name ON signer_keys(name);
 
-	CREATE TABLE IF NOT EXISTS permissions (
+	CREATE TABLE IF NOT EXISTS signer_permissions (
 		key_id TEXT NOT NULL,
 		user_pubkey TEXT NOT NULL,
 		methods TEXT[] NOT NULL DEFAULT '{}',
@@ -67,9 +68,9 @@ func (ps *PostgresStorage) migrate() error {
 		PRIMARY KEY (key_id, user_pubkey)
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_permissions_key_id ON permissions(key_id);
+	CREATE INDEX IF NOT EXISTS idx_signer_permissions_key_id ON signer_permissions(key_id);
 
-	CREATE TABLE IF NOT EXISTS sessions (
+	CREATE TABLE IF NOT EXISTS signer_sessions (
 		id TEXT PRIMARY KEY,
 		key_id TEXT NOT NULL,
 		client_pubkey TEXT NOT NULL,
@@ -79,10 +80,10 @@ func (ps *PostgresStorage) migrate() error {
 		UNIQUE (key_id, client_pubkey)
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_sessions_key_client ON sessions(key_id, client_pubkey);
-	CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_signer_sessions_key_client ON signer_sessions(key_id, client_pubkey);
+	CREATE INDEX IF NOT EXISTS idx_signer_sessions_expires ON signer_sessions(expires_at);
 
-	CREATE TABLE IF NOT EXISTS policies (
+	CREATE TABLE IF NOT EXISTS signer_policies (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
 		description TEXT,
@@ -91,18 +92,18 @@ func (ps *PostgresStorage) migrate() error {
 		created_by TEXT
 	);
 
-	CREATE TABLE IF NOT EXISTS policy_rules (
+	CREATE TABLE IF NOT EXISTS signer_policy_rules (
 		id TEXT PRIMARY KEY,
-		policy_id TEXT NOT NULL REFERENCES policies(id) ON DELETE CASCADE,
+		policy_id TEXT NOT NULL REFERENCES signer_policies(id) ON DELETE CASCADE,
 		method TEXT NOT NULL,
 		allowed_kinds INTEGER[] DEFAULT '{}',
 		max_usage INTEGER DEFAULT 0,
 		current_usage INTEGER DEFAULT 0
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_policy_rules_policy ON policy_rules(policy_id);
+	CREATE INDEX IF NOT EXISTS idx_signer_policy_rules_policy ON signer_policy_rules(policy_id);
 
-	CREATE TABLE IF NOT EXISTS tokens (
+	CREATE TABLE IF NOT EXISTS signer_tokens (
 		id TEXT PRIMARY KEY,
 		policy_id TEXT NOT NULL,
 		key_id TEXT NOT NULL,
@@ -114,9 +115,9 @@ func (ps *PostgresStorage) migrate() error {
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_tokens_key_id ON tokens(key_id);
+	CREATE INDEX IF NOT EXISTS idx_signer_tokens_key_id ON signer_tokens(key_id);
 
-	CREATE TABLE IF NOT EXISTS pending_requests (
+	CREATE TABLE IF NOT EXISTS signer_pending_requests (
 		id TEXT PRIMARY KEY,
 		key_pubkey TEXT NOT NULL,
 		client_pubkey TEXT NOT NULL,
@@ -127,10 +128,10 @@ func (ps *PostgresStorage) migrate() error {
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_pending_requests_key ON pending_requests(key_pubkey);
-	CREATE INDEX IF NOT EXISTS idx_pending_requests_expires ON pending_requests(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_signer_pending_requests_key ON signer_pending_requests(key_pubkey);
+	CREATE INDEX IF NOT EXISTS idx_signer_pending_requests_expires ON signer_pending_requests(expires_at);
 
-	CREATE TABLE IF NOT EXISTS users (
+	CREATE TABLE IF NOT EXISTS signer_web_accounts (
 		id TEXT PRIMARY KEY,
 		username TEXT UNIQUE NOT NULL,
 		email TEXT UNIQUE,
@@ -149,17 +150,13 @@ func (ps *PostgresStorage) migrate() error {
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
-	-- Migrations for existing databases
-	ALTER TABLE users ADD COLUMN IF NOT EXISTS pubkey TEXT;
-	ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+	CREATE INDEX IF NOT EXISTS idx_signer_web_accounts_username ON signer_web_accounts(username);
+	CREATE INDEX IF NOT EXISTS idx_signer_web_accounts_email ON signer_web_accounts(email);
+	CREATE INDEX IF NOT EXISTS idx_signer_web_accounts_pubkey ON signer_web_accounts(pubkey);
 
-	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
-	CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-	CREATE INDEX IF NOT EXISTS idx_users_pubkey ON users(pubkey);
-
-	CREATE TABLE IF NOT EXISTS user_sessions (
+	CREATE TABLE IF NOT EXISTS signer_web_sessions (
 		id TEXT PRIMARY KEY,
-		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		user_id TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
 		token_hash TEXT,
 		user_agent TEXT,
 		ip_address TEXT,
@@ -167,10 +164,10 @@ func (ps *PostgresStorage) migrate() error {
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
-	CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_signer_web_sessions_user ON signer_web_sessions(user_id);
+	CREATE INDEX IF NOT EXISTS idx_signer_web_sessions_expires ON signer_web_sessions(expires_at);
 
-	CREATE TABLE IF NOT EXISTS bunker_secrets (
+	CREATE TABLE IF NOT EXISTS signer_bunker_secrets (
 		id TEXT PRIMARY KEY,
 		key_pubkey TEXT NOT NULL,
 		secret TEXT NOT NULL UNIQUE,
@@ -179,9 +176,9 @@ func (ps *PostgresStorage) migrate() error {
 		used_at TIMESTAMPTZ
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_bunker_secrets_key_pubkey ON bunker_secrets(key_pubkey);
-	CREATE INDEX IF NOT EXISTS idx_bunker_secrets_secret ON bunker_secrets(secret);
-	CREATE INDEX IF NOT EXISTS idx_bunker_secrets_expires ON bunker_secrets(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_signer_bunker_secrets_key_pubkey ON signer_bunker_secrets(key_pubkey);
+	CREATE INDEX IF NOT EXISTS idx_signer_bunker_secrets_secret ON signer_bunker_secrets(secret);
+	CREATE INDEX IF NOT EXISTS idx_signer_bunker_secrets_expires ON signer_bunker_secrets(expires_at);
 	`
 
 	_, err := ps.db.Exec(schema)
@@ -191,8 +188,15 @@ func (ps *PostgresStorage) migrate() error {
 // Key management
 
 func (ps *PostgresStorage) CreateKey(ctx context.Context, key *Key) error {
+	// Ensure the pubkey exists in the platform users table
+	// The signer is a FREE service, so we just ensure the user exists
+	if err := ps.EnsurePlatformUser(ctx, key.Pubkey); err != nil {
+		// Log but don't fail - platform table might not exist in standalone mode
+		// The signer should work independently of the platform
+	}
+
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO keys (id, name, pubkey, encrypted_nsec, created_at, created_by)
+		INSERT INTO signer_keys (id, name, pubkey, encrypted_nsec, created_at, created_by)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		key.ID, key.Name, key.Pubkey, key.EncryptedNsec, key.CreatedAt, key.CreatedBy)
 	if err != nil {
@@ -208,7 +212,7 @@ func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) 
 	key := &Key{}
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
-		FROM keys WHERE id = $1`, id).
+		FROM signer_keys WHERE id = $1`, id).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.CreatedAt, &key.CreatedBy)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
@@ -223,7 +227,7 @@ func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*
 	key := &Key{}
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
-		FROM keys WHERE pubkey = $1`, pubkey).
+		FROM signer_keys WHERE pubkey = $1`, pubkey).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.CreatedAt, &key.CreatedBy)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
@@ -238,7 +242,7 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 	key := &Key{}
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
-		FROM keys WHERE name = $1`, name).
+		FROM signer_keys WHERE name = $1`, name).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.CreatedAt, &key.CreatedBy)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
@@ -252,7 +256,7 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 func (ps *PostgresStorage) ListKeys(ctx context.Context) ([]*Key, error) {
 	rows, err := ps.db.QueryContext(ctx, `
 		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
-		FROM keys ORDER BY created_at DESC`)
+		FROM signer_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +274,7 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context) ([]*Key, error) {
 }
 
 func (ps *PostgresStorage) DeleteKey(ctx context.Context, id string) error {
-	result, err := ps.db.ExecContext(ctx, `DELETE FROM keys WHERE id = $1`, id)
+	result, err := ps.db.ExecContext(ctx, `DELETE FROM signer_keys WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -282,7 +286,7 @@ func (ps *PostgresStorage) DeleteKey(ctx context.Context, id string) error {
 		return ErrKeyNotFound
 	}
 	// Also delete related permissions
-	_, _ = ps.db.ExecContext(ctx, `DELETE FROM permissions WHERE key_id = $1`, id)
+	_, _ = ps.db.ExecContext(ctx, `DELETE FROM signer_permissions WHERE key_id = $1`, id)
 	return nil
 }
 
@@ -290,7 +294,7 @@ func (ps *PostgresStorage) DeleteKey(ctx context.Context, id string) error {
 
 func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) error {
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id)
+		INSERT INTO signer_permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (key_id, user_pubkey) DO UPDATE SET
 			methods = EXCLUDED.methods,
@@ -308,7 +312,7 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 	var allowedKinds pq.Int64Array
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id
-		FROM permissions WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey).
+		FROM signer_permissions WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey).
 		Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotAuthorized
@@ -333,7 +337,7 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([]*Permission, error) {
 	rows, err := ps.db.QueryContext(ctx, `
 		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id
-		FROM permissions WHERE key_id = $1`, keyID)
+		FROM signer_permissions WHERE key_id = $1`, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +366,7 @@ func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([
 
 func (ps *PostgresStorage) DeletePermission(ctx context.Context, keyID, userPubkey string) error {
 	_, err := ps.db.ExecContext(ctx, `
-		DELETE FROM permissions WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey)
+		DELETE FROM signer_permissions WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey)
 	return err
 }
 
@@ -370,7 +374,7 @@ func (ps *PostgresStorage) DeletePermission(ctx context.Context, keyID, userPubk
 
 func (ps *PostgresStorage) CreateSession(ctx context.Context, session *Session) error {
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO sessions (id, key_id, client_pubkey, permissions, created_at, expires_at)
+		INSERT INTO signer_sessions (id, key_id, client_pubkey, permissions, created_at, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (key_id, client_pubkey) DO UPDATE SET
 			id = EXCLUDED.id,
@@ -385,7 +389,7 @@ func (ps *PostgresStorage) GetSession(ctx context.Context, id string) (*Session,
 	session := &Session{}
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at
-		FROM sessions WHERE id = $1 AND expires_at > NOW()`, id).
+		FROM signer_sessions WHERE id = $1 AND expires_at > NOW()`, id).
 		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, pq.Array(&session.Permissions), &session.CreatedAt, &session.ExpiresAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
@@ -400,7 +404,7 @@ func (ps *PostgresStorage) GetSessionByClient(ctx context.Context, keyID, client
 	session := &Session{}
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at
-		FROM sessions WHERE key_id = $1 AND client_pubkey = $2 AND expires_at > NOW()`, keyID, clientPubkey).
+		FROM signer_sessions WHERE key_id = $1 AND client_pubkey = $2 AND expires_at > NOW()`, keyID, clientPubkey).
 		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, pq.Array(&session.Permissions), &session.CreatedAt, &session.ExpiresAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
@@ -412,12 +416,12 @@ func (ps *PostgresStorage) GetSessionByClient(ctx context.Context, keyID, client
 }
 
 func (ps *PostgresStorage) DeleteSession(ctx context.Context, id string) error {
-	_, err := ps.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = $1`, id)
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_sessions WHERE id = $1`, id)
 	return err
 }
 
 func (ps *PostgresStorage) CleanExpiredSessions(ctx context.Context) error {
-	_, err := ps.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < NOW()`)
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_sessions WHERE expires_at < NOW()`)
 	return err
 }
 
@@ -431,7 +435,7 @@ func (ps *PostgresStorage) CreatePolicy(ctx context.Context, policy *Policy) err
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO policies (id, name, description, expires_at, created_at, created_by)
+		INSERT INTO signer_policies (id, name, description, expires_at, created_at, created_by)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		policy.ID, policy.Name, policy.Description, policy.ExpiresAt, policy.CreatedAt, policy.CreatedBy)
 	if err != nil {
@@ -440,7 +444,7 @@ func (ps *PostgresStorage) CreatePolicy(ctx context.Context, policy *Policy) err
 
 	for _, rule := range policy.Rules {
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO policy_rules (id, policy_id, method, allowed_kinds, max_usage, current_usage)
+			INSERT INTO signer_policy_rules (id, policy_id, method, allowed_kinds, max_usage, current_usage)
 			VALUES ($1, $2, $3, $4, $5, $6)`,
 			rule.ID, policy.ID, rule.Method, intArrayToInt64(rule.AllowedKinds), rule.MaxUsage, rule.CurrentUsage)
 		if err != nil {
@@ -457,7 +461,7 @@ func (ps *PostgresStorage) GetPolicy(ctx context.Context, id string) (*Policy, e
 	var description, createdBy sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, name, description, expires_at, created_at, created_by
-		FROM policies WHERE id = $1`, id).
+		FROM signer_policies WHERE id = $1`, id).
 		Scan(&policy.ID, &policy.Name, &description, &expiresAt, &policy.CreatedAt, &createdBy)
 	if err == sql.ErrNoRows {
 		return nil, ErrPolicyNotFound
@@ -482,7 +486,7 @@ func (ps *PostgresStorage) GetPolicy(ctx context.Context, id string) (*Policy, e
 	// Load rules
 	rows, err := ps.db.QueryContext(ctx, `
 		SELECT id, policy_id, method, allowed_kinds, max_usage, current_usage
-		FROM policy_rules WHERE policy_id = $1`, id)
+		FROM signer_policy_rules WHERE policy_id = $1`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +508,7 @@ func (ps *PostgresStorage) GetPolicy(ctx context.Context, id string) (*Policy, e
 func (ps *PostgresStorage) ListPolicies(ctx context.Context) ([]*Policy, error) {
 	rows, err := ps.db.QueryContext(ctx, `
 		SELECT id, name, description, expires_at, created_at, created_by
-		FROM policies WHERE expires_at IS NULL OR expires_at > NOW()
+		FROM signer_policies WHERE expires_at IS NULL OR expires_at > NOW()
 		ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -538,7 +542,7 @@ func (ps *PostgresStorage) ListPolicies(ctx context.Context) ([]*Policy, error) 
 	for _, policy := range policies {
 		ruleRows, err := ps.db.QueryContext(ctx, `
 			SELECT id, policy_id, method, allowed_kinds, max_usage, current_usage
-			FROM policy_rules WHERE policy_id = $1`, policy.ID)
+			FROM signer_policy_rules WHERE policy_id = $1`, policy.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -559,7 +563,7 @@ func (ps *PostgresStorage) ListPolicies(ctx context.Context) ([]*Policy, error) 
 }
 
 func (ps *PostgresStorage) DeletePolicy(ctx context.Context, id string) error {
-	result, err := ps.db.ExecContext(ctx, `DELETE FROM policies WHERE id = $1`, id)
+	result, err := ps.db.ExecContext(ctx, `DELETE FROM signer_policies WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -575,7 +579,7 @@ func (ps *PostgresStorage) DeletePolicy(ctx context.Context, id string) error {
 
 func (ps *PostgresStorage) IncrementRuleUsage(ctx context.Context, ruleID string) error {
 	result, err := ps.db.ExecContext(ctx, `
-		UPDATE policy_rules SET current_usage = current_usage + 1 WHERE id = $1`, ruleID)
+		UPDATE signer_policy_rules SET current_usage = current_usage + 1 WHERE id = $1`, ruleID)
 	if err != nil {
 		return err
 	}
@@ -593,7 +597,7 @@ func (ps *PostgresStorage) IncrementRuleUsage(ctx context.Context, ruleID string
 
 func (ps *PostgresStorage) CreateToken(ctx context.Context, token *Token) error {
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO tokens (id, policy_id, key_id, client_name, created_by, expires_at, redeemed_at, redeemed_by, created_at)
+		INSERT INTO signer_tokens (id, policy_id, key_id, client_name, created_by, expires_at, redeemed_at, redeemed_by, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		token.ID, token.PolicyID, token.KeyID, token.ClientName, token.CreatedBy,
 		token.ExpiresAt, token.RedeemedAt, token.RedeemedBy, token.CreatedAt)
@@ -606,7 +610,7 @@ func (ps *PostgresStorage) GetToken(ctx context.Context, id string) (*Token, err
 	var expiresAt, redeemedAt sql.NullTime
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, policy_id, key_id, client_name, created_by, expires_at, redeemed_at, redeemed_by, created_at
-		FROM tokens WHERE id = $1`, id).
+		FROM signer_tokens WHERE id = $1`, id).
 		Scan(&token.ID, &token.PolicyID, &token.KeyID, &clientName, &createdBy,
 			&expiresAt, &redeemedAt, &redeemedBy, &token.CreatedAt)
 	if err == sql.ErrNoRows {
@@ -637,7 +641,7 @@ func (ps *PostgresStorage) GetToken(ctx context.Context, id string) (*Token, err
 func (ps *PostgresStorage) ListTokens(ctx context.Context, keyID string) ([]*Token, error) {
 	rows, err := ps.db.QueryContext(ctx, `
 		SELECT id, policy_id, key_id, client_name, created_by, expires_at, redeemed_at, redeemed_by, created_at
-		FROM tokens WHERE key_id = $1 ORDER BY created_at DESC`, keyID)
+		FROM signer_tokens WHERE key_id = $1 ORDER BY created_at DESC`, keyID)
 	if err != nil {
 		return nil, err
 	}
@@ -688,7 +692,7 @@ func (ps *PostgresStorage) RedeemToken(ctx context.Context, tokenID, redeemerPub
 
 	now := time.Now()
 	_, err = ps.db.ExecContext(ctx, `
-		UPDATE tokens SET redeemed_at = $1, redeemed_by = $2 WHERE id = $3`,
+		UPDATE signer_tokens SET redeemed_at = $1, redeemed_by = $2 WHERE id = $3`,
 		now, redeemerPubkey, tokenID)
 	if err != nil {
 		return nil, err
@@ -700,7 +704,7 @@ func (ps *PostgresStorage) RedeemToken(ctx context.Context, tokenID, redeemerPub
 }
 
 func (ps *PostgresStorage) DeleteToken(ctx context.Context, id string) error {
-	result, err := ps.db.ExecContext(ctx, `DELETE FROM tokens WHERE id = $1`, id)
+	result, err := ps.db.ExecContext(ctx, `DELETE FROM signer_tokens WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -722,7 +726,7 @@ func (ps *PostgresStorage) CreatePendingRequest(ctx context.Context, req *Pendin
 		return err
 	}
 	_, err = ps.db.ExecContext(ctx, `
-		INSERT INTO pending_requests (id, key_pubkey, client_pubkey, method, params, event_kind, expires_at, created_at)
+		INSERT INTO signer_pending_requests (id, key_pubkey, client_pubkey, method, params, event_kind, expires_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		req.ID, req.KeyPubkey, req.ClientPubkey, req.Method, paramsJSON, req.EventKind, req.ExpiresAt, req.CreatedAt)
 	return err
@@ -734,7 +738,7 @@ func (ps *PostgresStorage) GetPendingRequest(ctx context.Context, id string) (*P
 	var eventKind sql.NullInt64
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, key_pubkey, client_pubkey, method, params, event_kind, expires_at, created_at
-		FROM pending_requests WHERE id = $1 AND expires_at > NOW()`, id).
+		FROM signer_pending_requests WHERE id = $1 AND expires_at > NOW()`, id).
 		Scan(&req.ID, &req.KeyPubkey, &req.ClientPubkey, &req.Method, &paramsJSON, &eventKind, &req.ExpiresAt, &req.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrRequestNotFound
@@ -758,7 +762,7 @@ func (ps *PostgresStorage) GetPendingRequest(ctx context.Context, id string) (*P
 func (ps *PostgresStorage) ListPendingRequests(ctx context.Context, keyPubkey string) ([]*PendingRequest, error) {
 	rows, err := ps.db.QueryContext(ctx, `
 		SELECT id, key_pubkey, client_pubkey, method, params, event_kind, expires_at, created_at
-		FROM pending_requests WHERE key_pubkey = $1 AND expires_at > NOW()
+		FROM signer_pending_requests WHERE key_pubkey = $1 AND expires_at > NOW()
 		ORDER BY created_at DESC`, keyPubkey)
 	if err != nil {
 		return nil, err
@@ -788,12 +792,12 @@ func (ps *PostgresStorage) ListPendingRequests(ctx context.Context, keyPubkey st
 }
 
 func (ps *PostgresStorage) DeletePendingRequest(ctx context.Context, id string) error {
-	_, err := ps.db.ExecContext(ctx, `DELETE FROM pending_requests WHERE id = $1`, id)
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_pending_requests WHERE id = $1`, id)
 	return err
 }
 
 func (ps *PostgresStorage) CleanExpiredRequests(ctx context.Context) error {
-	_, err := ps.db.ExecContext(ctx, `DELETE FROM pending_requests WHERE expires_at < NOW()`)
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_pending_requests WHERE expires_at < NOW()`)
 	return err
 }
 
@@ -804,7 +808,7 @@ func (ps *PostgresStorage) CreateUser(ctx context.Context, user *User) error {
 		user.Role = "user"
 	}
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO users (id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
+		INSERT INTO signer_web_accounts (id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
 		user.ID, user.Username, nullString(user.Email), nullString(user.Pubkey), user.Role,
@@ -824,28 +828,28 @@ func (ps *PostgresStorage) GetUser(ctx context.Context, id string) (*User, error
 	return ps.scanUser(ps.db.QueryRowContext(ctx, `
 		SELECT id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
-		FROM users WHERE id = $1`, id))
+		FROM signer_web_accounts WHERE id = $1`, id))
 }
 
 func (ps *PostgresStorage) GetUserByUsername(ctx context.Context, username string) (*User, error) {
 	return ps.scanUser(ps.db.QueryRowContext(ctx, `
 		SELECT id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
-		FROM users WHERE username = $1`, username))
+		FROM signer_web_accounts WHERE username = $1`, username))
 }
 
 func (ps *PostgresStorage) GetUserByPubkey(ctx context.Context, pubkey string) (*User, error) {
 	return ps.scanUser(ps.db.QueryRowContext(ctx, `
 		SELECT id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
-		FROM users WHERE pubkey = $1`, pubkey))
+		FROM signer_web_accounts WHERE pubkey = $1`, pubkey))
 }
 
 func (ps *PostgresStorage) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	return ps.scanUser(ps.db.QueryRowContext(ctx, `
 		SELECT id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
-		FROM users WHERE email = $1`, email))
+		FROM signer_web_accounts WHERE email = $1`, email))
 }
 
 func (ps *PostgresStorage) scanUser(row *sql.Row) (*User, error) {
@@ -887,7 +891,7 @@ func (ps *PostgresStorage) ListUsers(ctx context.Context) ([]*User, error) {
 	rows, err := ps.db.QueryContext(ctx, `
 		SELECT id, username, email, pubkey, role, password_hash, mfa_secret, mfa_enabled, backup_codes, backup_codes_used,
 			failed_login_attempts, locked_until, last_login_at, last_login_ip, created_at, updated_at
-		FROM users ORDER BY created_at DESC`)
+		FROM signer_web_accounts ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -929,7 +933,7 @@ func (ps *PostgresStorage) ListUsers(ctx context.Context) ([]*User, error) {
 func (ps *PostgresStorage) UpdateUser(ctx context.Context, user *User) error {
 	user.UpdatedAt = time.Now()
 	result, err := ps.db.ExecContext(ctx, `
-		UPDATE users SET username = $1, email = $2, pubkey = $3, role = $4, password_hash = $5, mfa_secret = $6, mfa_enabled = $7,
+		UPDATE signer_web_accounts SET username = $1, email = $2, pubkey = $3, role = $4, password_hash = $5, mfa_secret = $6, mfa_enabled = $7,
 			backup_codes = $8, backup_codes_used = $9, failed_login_attempts = $10, locked_until = $11,
 			last_login_at = $12, last_login_ip = $13, updated_at = $14
 		WHERE id = $15`,
@@ -951,7 +955,7 @@ func (ps *PostgresStorage) UpdateUser(ctx context.Context, user *User) error {
 }
 
 func (ps *PostgresStorage) DeleteUser(ctx context.Context, id string) error {
-	result, err := ps.db.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, id)
+	result, err := ps.db.ExecContext(ctx, `DELETE FROM signer_web_accounts WHERE id = $1`, id)
 	if err != nil {
 		return err
 	}
@@ -967,7 +971,7 @@ func (ps *PostgresStorage) DeleteUser(ctx context.Context, id string) error {
 
 func (ps *PostgresStorage) IncrementFailedLogins(ctx context.Context, userID string) error {
 	result, err := ps.db.ExecContext(ctx, `
-		UPDATE users SET failed_login_attempts = failed_login_attempts + 1, updated_at = NOW()
+		UPDATE signer_web_accounts SET failed_login_attempts = failed_login_attempts + 1, updated_at = NOW()
 		WHERE id = $1`, userID)
 	if err != nil {
 		return err
@@ -984,7 +988,7 @@ func (ps *PostgresStorage) IncrementFailedLogins(ctx context.Context, userID str
 
 func (ps *PostgresStorage) ResetFailedLogins(ctx context.Context, userID string) error {
 	result, err := ps.db.ExecContext(ctx, `
-		UPDATE users SET failed_login_attempts = 0, updated_at = NOW()
+		UPDATE signer_web_accounts SET failed_login_attempts = 0, updated_at = NOW()
 		WHERE id = $1`, userID)
 	if err != nil {
 		return err
@@ -1001,7 +1005,7 @@ func (ps *PostgresStorage) ResetFailedLogins(ctx context.Context, userID string)
 
 func (ps *PostgresStorage) LockUser(ctx context.Context, userID string, until time.Time) error {
 	result, err := ps.db.ExecContext(ctx, `
-		UPDATE users SET locked_until = $1, updated_at = NOW()
+		UPDATE signer_web_accounts SET locked_until = $1, updated_at = NOW()
 		WHERE id = $2`, until, userID)
 	if err != nil {
 		return err
@@ -1018,7 +1022,7 @@ func (ps *PostgresStorage) LockUser(ctx context.Context, userID string, until ti
 
 func (ps *PostgresStorage) UnlockUser(ctx context.Context, userID string) error {
 	result, err := ps.db.ExecContext(ctx, `
-		UPDATE users SET locked_until = NULL, failed_login_attempts = 0, updated_at = NOW()
+		UPDATE signer_web_accounts SET locked_until = NULL, failed_login_attempts = 0, updated_at = NOW()
 		WHERE id = $1`, userID)
 	if err != nil {
 		return err
@@ -1037,7 +1041,7 @@ func (ps *PostgresStorage) UnlockUser(ctx context.Context, userID string) error 
 
 func (ps *PostgresStorage) CreateUserSession(ctx context.Context, session *UserSession) error {
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO user_sessions (id, user_id, token_hash, user_agent, ip_address, expires_at, created_at)
+		INSERT INTO signer_web_sessions (id, user_id, token_hash, user_agent, ip_address, expires_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		session.ID, session.UserID, nullString(session.Token), nullString(session.UserAgent),
 		nullString(session.IPAddress), session.ExpiresAt, session.CreatedAt)
@@ -1049,7 +1053,7 @@ func (ps *PostgresStorage) GetUserSession(ctx context.Context, id string) (*User
 	var tokenHash, userAgent, ipAddress sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, user_id, token_hash, user_agent, ip_address, expires_at, created_at
-		FROM user_sessions WHERE id = $1 AND expires_at > NOW()`, id).
+		FROM signer_web_sessions WHERE id = $1 AND expires_at > NOW()`, id).
 		Scan(&session.ID, &session.UserID, &tokenHash, &userAgent, &ipAddress, &session.ExpiresAt, &session.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
@@ -1073,7 +1077,7 @@ func (ps *PostgresStorage) GetUserSession(ctx context.Context, id string) (*User
 func (ps *PostgresStorage) ListUserSessions(ctx context.Context, userID string) ([]*UserSession, error) {
 	rows, err := ps.db.QueryContext(ctx, `
 		SELECT id, user_id, token_hash, user_agent, ip_address, expires_at, created_at
-		FROM user_sessions WHERE user_id = $1 AND expires_at > NOW()
+		FROM signer_web_sessions WHERE user_id = $1 AND expires_at > NOW()
 		ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, err
@@ -1102,17 +1106,17 @@ func (ps *PostgresStorage) ListUserSessions(ctx context.Context, userID string) 
 }
 
 func (ps *PostgresStorage) DeleteUserSession(ctx context.Context, id string) error {
-	_, err := ps.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE id = $1`, id)
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_web_sessions WHERE id = $1`, id)
 	return err
 }
 
 func (ps *PostgresStorage) DeleteUserSessions(ctx context.Context, userID string) error {
-	_, err := ps.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id = $1`, userID)
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_web_sessions WHERE user_id = $1`, userID)
 	return err
 }
 
 func (ps *PostgresStorage) CleanExpiredUserSessions(ctx context.Context) error {
-	_, err := ps.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE expires_at < NOW()`)
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_web_sessions WHERE expires_at < NOW()`)
 	return err
 }
 
@@ -1120,7 +1124,7 @@ func (ps *PostgresStorage) CleanExpiredUserSessions(ctx context.Context) error {
 
 func (ps *PostgresStorage) CreateBunkerSecret(ctx context.Context, secret *BunkerSecret) error {
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO bunker_secrets (id, key_pubkey, secret, expires_at, created_at, used_at)
+		INSERT INTO signer_bunker_secrets (id, key_pubkey, secret, expires_at, created_at, used_at)
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		secret.ID, secret.KeyPubkey, secret.Secret, secret.ExpiresAt, secret.CreatedAt, secret.UsedAt)
 	return err
@@ -1131,7 +1135,7 @@ func (ps *PostgresStorage) ValidateBunkerSecret(ctx context.Context, keyPubkey, 
 	var usedAt sql.NullTime
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, key_pubkey, secret, expires_at, created_at, used_at
-		FROM bunker_secrets WHERE secret = $1 AND key_pubkey = $2`, secret, keyPubkey).
+		FROM signer_bunker_secrets WHERE secret = $1 AND key_pubkey = $2`, secret, keyPubkey).
 		Scan(&bs.ID, &bs.KeyPubkey, &bs.Secret, &bs.ExpiresAt, &bs.CreatedAt, &usedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrBunkerSecretInvalid
@@ -1143,7 +1147,7 @@ func (ps *PostgresStorage) ValidateBunkerSecret(ctx context.Context, keyPubkey, 
 	// Check if expired
 	if time.Now().After(bs.ExpiresAt) {
 		// Clean up expired secret
-		_, _ = ps.db.ExecContext(ctx, `DELETE FROM bunker_secrets WHERE id = $1`, bs.ID)
+		_, _ = ps.db.ExecContext(ctx, `DELETE FROM signer_bunker_secrets WHERE id = $1`, bs.ID)
 		return nil, ErrBunkerSecretInvalid
 	}
 
@@ -1154,7 +1158,7 @@ func (ps *PostgresStorage) ValidateBunkerSecret(ctx context.Context, keyPubkey, 
 
 	// Mark as used
 	now := time.Now()
-	_, err = ps.db.ExecContext(ctx, `UPDATE bunker_secrets SET used_at = $1 WHERE id = $2`, now, bs.ID)
+	_, err = ps.db.ExecContext(ctx, `UPDATE signer_bunker_secrets SET used_at = $1 WHERE id = $2`, now, bs.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -1164,12 +1168,36 @@ func (ps *PostgresStorage) ValidateBunkerSecret(ctx context.Context, keyPubkey, 
 }
 
 func (ps *PostgresStorage) DeleteBunkerSecret(ctx context.Context, id string) error {
-	_, err := ps.db.ExecContext(ctx, `DELETE FROM bunker_secrets WHERE id = $1`, id)
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_bunker_secrets WHERE id = $1`, id)
 	return err
 }
 
 func (ps *PostgresStorage) CleanExpiredBunkerSecrets(ctx context.Context) error {
-	_, err := ps.db.ExecContext(ctx, `DELETE FROM bunker_secrets WHERE expires_at < NOW()`)
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_bunker_secrets WHERE expires_at < NOW()`)
+	return err
+}
+
+// EnsurePlatformUser upserts a pubkey into the platform users table.
+// This integrates with the cloistr platform's unified user management.
+// The signer is a FREE service, so we just ensure the user exists - no access checks needed.
+func (ps *PostgresStorage) EnsurePlatformUser(ctx context.Context, pubkey string) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO users (pubkey, enabled, created_at, updated_at)
+		VALUES ($1, TRUE, NOW(), NOW())
+		ON CONFLICT (pubkey) DO NOTHING`,
+		pubkey)
+	return err
+}
+
+// GrantServiceAccess grants a user access to a service in the platform.
+// Used when a user signs up for a service.
+func (ps *PostgresStorage) GrantServiceAccess(ctx context.Context, pubkey string, serviceSlug string) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO user_service_access (pubkey, service_id, enabled, created_at)
+		SELECT $1, id, TRUE, NOW()
+		FROM services WHERE slug = $2
+		ON CONFLICT (pubkey, service_id) DO NOTHING`,
+		pubkey, serviceSlug)
 	return err
 }
 
