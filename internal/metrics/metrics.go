@@ -141,11 +141,11 @@ func normalizePath(path string) string {
 		}
 	case len(path) > 17 && path[:17] == "/api/v1/requests/":
 		return "/api/v1/requests/:id"
-	case len(path) > 16 && path[:16] == "/api/v1/bunker/":
+	case len(path) > 15 && path[:15] == "/api/v1/bunker/":
 		return "/api/v1/bunker/:id"
-	case len(path) > 16 && path[:16] == "/api/v1/tokens/":
+	case len(path) > 15 && path[:15] == "/api/v1/tokens/":
 		return "/api/v1/tokens/:id"
-	case len(path) > 18 && path[:18] == "/api/v1/policies/":
+	case len(path) > 17 && path[:17] == "/api/v1/policies/":
 		return "/api/v1/policies/:id"
 	case len(path) > 9 && path[:9] == "/approve/":
 		return "/approve/:id"

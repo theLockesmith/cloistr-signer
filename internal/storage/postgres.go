@@ -297,7 +297,7 @@ func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) 
 			allowed_kinds = EXCLUDED.allowed_kinds,
 			expires_at = EXCLUDED.expires_at,
 			policy_id = EXCLUDED.policy_id`,
-		perm.KeyID, perm.UserPubkey, perm.Methods, perm.AllowedKinds, perm.ExpiresAt, perm.PolicyID)
+		perm.KeyID, perm.UserPubkey, pq.Array(perm.Methods), intArrayToInt64(perm.AllowedKinds), perm.ExpiresAt, perm.PolicyID)
 	return err
 }
 
@@ -305,10 +305,11 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 	perm := &Permission{}
 	var expiresAt sql.NullTime
 	var policyID sql.NullString
+	var allowedKinds pq.Int64Array
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id
 		FROM permissions WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey).
-		Scan(&perm.KeyID, &perm.UserPubkey, &perm.Methods, &perm.AllowedKinds, &expiresAt, &policyID)
+		Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotAuthorized
 	}
@@ -316,6 +317,7 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 		return nil, err
 	}
 
+	perm.AllowedKinds = int64ArrayToInt(allowedKinds)
 	if expiresAt.Valid {
 		perm.ExpiresAt = &expiresAt.Time
 		if time.Now().After(*perm.ExpiresAt) {
@@ -342,9 +344,11 @@ func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([
 		perm := &Permission{}
 		var expiresAt sql.NullTime
 		var policyID sql.NullString
-		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, &perm.Methods, &perm.AllowedKinds, &expiresAt, &policyID); err != nil {
+		var allowedKinds pq.Int64Array
+		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID); err != nil {
 			return nil, err
 		}
+		perm.AllowedKinds = int64ArrayToInt(allowedKinds)
 		if expiresAt.Valid {
 			perm.ExpiresAt = &expiresAt.Time
 		}
@@ -373,7 +377,7 @@ func (ps *PostgresStorage) CreateSession(ctx context.Context, session *Session) 
 			permissions = EXCLUDED.permissions,
 			created_at = EXCLUDED.created_at,
 			expires_at = EXCLUDED.expires_at`,
-		session.ID, session.KeyID, session.ClientPubkey, session.Permissions, session.CreatedAt, session.ExpiresAt)
+		session.ID, session.KeyID, session.ClientPubkey, pq.Array(session.Permissions), session.CreatedAt, session.ExpiresAt)
 	return err
 }
 
@@ -382,7 +386,7 @@ func (ps *PostgresStorage) GetSession(ctx context.Context, id string) (*Session,
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at
 		FROM sessions WHERE id = $1 AND expires_at > NOW()`, id).
-		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, &session.Permissions, &session.CreatedAt, &session.ExpiresAt)
+		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, pq.Array(&session.Permissions), &session.CreatedAt, &session.ExpiresAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
 	}
@@ -397,7 +401,7 @@ func (ps *PostgresStorage) GetSessionByClient(ctx context.Context, keyID, client
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at
 		FROM sessions WHERE key_id = $1 AND client_pubkey = $2 AND expires_at > NOW()`, keyID, clientPubkey).
-		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, &session.Permissions, &session.CreatedAt, &session.ExpiresAt)
+		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, pq.Array(&session.Permissions), &session.CreatedAt, &session.ExpiresAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
 	}
@@ -438,7 +442,7 @@ func (ps *PostgresStorage) CreatePolicy(ctx context.Context, policy *Policy) err
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO policy_rules (id, policy_id, method, allowed_kinds, max_usage, current_usage)
 			VALUES ($1, $2, $3, $4, $5, $6)`,
-			rule.ID, policy.ID, rule.Method, rule.AllowedKinds, rule.MaxUsage, rule.CurrentUsage)
+			rule.ID, policy.ID, rule.Method, intArrayToInt64(rule.AllowedKinds), rule.MaxUsage, rule.CurrentUsage)
 		if err != nil {
 			return err
 		}
@@ -486,9 +490,11 @@ func (ps *PostgresStorage) GetPolicy(ctx context.Context, id string) (*Policy, e
 
 	for rows.Next() {
 		rule := &PolicyRule{}
-		if err := rows.Scan(&rule.ID, &rule.PolicyID, &rule.Method, &rule.AllowedKinds, &rule.MaxUsage, &rule.CurrentUsage); err != nil {
+		var allowedKinds pq.Int64Array
+		if err := rows.Scan(&rule.ID, &rule.PolicyID, &rule.Method, &allowedKinds, &rule.MaxUsage, &rule.CurrentUsage); err != nil {
 			return nil, err
 		}
+		rule.AllowedKinds = int64ArrayToInt(allowedKinds)
 		policy.Rules = append(policy.Rules, rule)
 	}
 
@@ -538,10 +544,12 @@ func (ps *PostgresStorage) ListPolicies(ctx context.Context) ([]*Policy, error) 
 		}
 		for ruleRows.Next() {
 			rule := &PolicyRule{}
-			if err := ruleRows.Scan(&rule.ID, &rule.PolicyID, &rule.Method, &rule.AllowedKinds, &rule.MaxUsage, &rule.CurrentUsage); err != nil {
+			var allowedKinds pq.Int64Array
+			if err := ruleRows.Scan(&rule.ID, &rule.PolicyID, &rule.Method, &allowedKinds, &rule.MaxUsage, &rule.CurrentUsage); err != nil {
 				ruleRows.Close()
 				return nil, err
 			}
+			rule.AllowedKinds = int64ArrayToInt(allowedKinds)
 			policy.Rules = append(policy.Rules, rule)
 		}
 		ruleRows.Close()
@@ -1175,9 +1183,11 @@ func isDuplicateError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// PostgreSQL unique violation error code is 23505
-	return err.Error() == "pq: duplicate key value violates unique constraint" ||
-		(len(err.Error()) > 5 && err.Error()[:5] == "pq: ")
+	// Check for PostgreSQL unique violation error code 23505
+	if pqErr, ok := err.(*pq.Error); ok {
+		return pqErr.Code == "23505"
+	}
+	return false
 }
 
 func nullString(s string) sql.NullString {
@@ -1185,4 +1195,26 @@ func nullString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+func int64ArrayToInt(arr pq.Int64Array) []int {
+	if arr == nil {
+		return nil
+	}
+	result := make([]int, len(arr))
+	for i, v := range arr {
+		result[i] = int(v)
+	}
+	return result
+}
+
+func intArrayToInt64(arr []int) pq.Int64Array {
+	if arr == nil {
+		return nil
+	}
+	result := make(pq.Int64Array, len(arr))
+	for i, v := range arr {
+		result[i] = int64(v)
+	}
+	return result
 }
