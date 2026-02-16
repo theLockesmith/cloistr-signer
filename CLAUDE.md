@@ -30,7 +30,9 @@ docker build -t coldforge-signer .
 cmd/signer/main.go          # Entry point, server setup
 internal/
   config/config.go          # Configuration (env + yaml)
-  storage/storage.go        # Key, permission, and user storage
+  storage/
+    storage.go              # Storage interface + in-memory backend
+    postgres.go             # PostgreSQL storage backend
   nostr/client.go           # Relay client with NIP-42 auth
   signer/signer.go          # NIP-46 request handling
   api/handler.go            # HTTP management API
@@ -41,6 +43,7 @@ internal/
   nip89/nip89.go            # NIP-89 service announcements
   vault/vault.go            # HashiCorp Vault integration
   audit/audit.go            # Audit logging (memory/JSON backends)
+  metrics/metrics.go        # Prometheus metrics and HTTP middleware
   web/                      # Web UI
     web.go                  # Web handlers and routes
     templates/              # HTML templates
@@ -289,10 +292,17 @@ Controls how the signer handles requests from unknown clients (no existing permi
 - [x] One-time use secrets with 24-hour expiry
 - [x] Connected apps management UI (/apps)
 
+### Completed (Phase 10 - Test Coverage)
+- [x] PostgreSQL storage tests (54 tests)
+- [x] Metrics package tests (19 tests)
+- [x] Fixed PostgreSQL array scanning bugs (pq.Array usage)
+- [x] Fixed metrics path normalization bugs
+- [x] Total: 311+ unit tests across all packages
+
 ### Roadmap to Production
 
-**Core functionality complete! Next:**
-- [ ] Unit and integration tests
+**Core functionality and tests complete! Next:**
+- [ ] Production PostgreSQL deployment (Atlas vars/main.yml)
 - [ ] Production Vault configuration
 - [ ] Documentation
 - [ ] Deprecate nsecbunker
@@ -312,6 +322,28 @@ ansible-playbook ... \
 ```
 
 ## Testing
+
+### Unit Tests
+
+```bash
+# Run all unit tests
+go test ./...
+
+# Run with verbose output
+go test -v ./...
+
+# Run tests for a specific package
+go test ./internal/storage/...
+go test ./internal/metrics/...
+
+# Run PostgreSQL storage tests (requires database)
+TEST_DATABASE_URL="postgres://user:pass@localhost:5432/testdb?sslmode=disable" go test -v ./internal/storage/...
+
+# Run with coverage
+go test -cover ./...
+```
+
+### Integration Tests
 
 ```bash
 # Port-forward to deployed signer
@@ -344,4 +376,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-02-12 (Phase 9 complete - Bunker secret validation, Connected apps UI)
+**Last Updated:** 2026-02-16 (Phase 10 complete - Unit tests for PostgreSQL storage and metrics)
