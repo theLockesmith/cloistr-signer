@@ -1,4 +1,4 @@
-module gitlab.coldforge.xyz/coldforge/coldforge-signer
+module git.coldforge.xyz/coldforge/cloistr-signer
 
 go 1.24.0
 
