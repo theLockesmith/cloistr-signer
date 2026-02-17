@@ -12,10 +12,10 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip04"
 	"github.com/nbd-wtf/go-nostr/nip44"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/metrics"
-	relay "gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/nostr"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/storage"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
+	relay "git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 const (

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 )
 
 var (

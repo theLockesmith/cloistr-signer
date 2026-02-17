@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/auth"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/storage"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/auth"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 // mockStatusProvider implements StatusProvider for testing

@@ -9,9 +9,9 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip04"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
-	relay "gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/nostr"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/storage"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	relay "git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 const (

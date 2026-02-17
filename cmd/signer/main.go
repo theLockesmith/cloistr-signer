@@ -10,14 +10,14 @@ import (
 	"time"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/admin"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/api"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/metrics"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/nostr"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/signer"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/storage"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/web"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/admin"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/api"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/signer"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/web"
 )
 
 func main() {

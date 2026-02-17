@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/metrics"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
 )
 
 // Client manages connections to Nostr relays

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/config"
-	"gitlab.coldforge.xyz/coldforge/coldforge-signer/internal/storage"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 func TestNormalizePubkey(t *testing.T) {
