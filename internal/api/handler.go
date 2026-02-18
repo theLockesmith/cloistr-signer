@@ -13,6 +13,7 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/auth"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/signer"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
 )
@@ -23,10 +24,11 @@ type Handler struct {
 	signer     *signer.Signer
 	storage    storage.Storage
 	authConfig *auth.Config
+	encryptor  *crypto.Encryptor
 }
 
 // NewHandler creates a new API handler
-func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage) *Handler {
+func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage, encryptor *crypto.Encryptor) *Handler {
 	return &Handler{
 		config:  cfg,
 		signer:  signer,
@@ -40,6 +42,7 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 			MaxFailedAttempts: cfg.Auth.MaxFailedLogins,
 			MFAIssuer:         cfg.Auth.MFAIssuer,
 		},
+		encryptor: encryptor,
 	}
 }
 
@@ -282,11 +285,23 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		pubkey = pk
 	}
 
+	// Encrypt the private key if encryptor is configured
+	encryptedKey := privateKey
+	if h.encryptor != nil {
+		encrypted, err := h.encryptor.Encrypt(privateKey)
+		if err != nil {
+			slog.Error("failed to encrypt private key", "error", err)
+			h.errorResponse(w, http.StatusInternalServerError, "failed to encrypt key")
+			return
+		}
+		encryptedKey = encrypted
+	}
+
 	key := &storage.Key{
 		ID:            pubkey[:16],
 		Name:          req.Name,
 		Pubkey:        pubkey,
-		EncryptedNsec: privateKey, // TODO: Encrypt with Vault
+		EncryptedNsec: encryptedKey,
 		CreatedAt:     time.Now(),
 	}
 

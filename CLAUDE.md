@@ -44,6 +44,7 @@ internal/
   vault/vault.go            # HashiCorp Vault integration
   audit/audit.go            # Audit logging (memory/JSON backends)
   metrics/metrics.go        # Prometheus metrics and HTTP middleware
+  crypto/crypto.go          # AES-256-GCM encryption for keys at rest
   web/                      # Web UI
     web.go                  # Web handlers and routes
     templates/              # HTML templates
@@ -181,8 +182,10 @@ The approval page can be shared via link for async authorization.
 | `MFA_ISSUER` | Issuer name for TOTP | `Coldforge` |
 | `MAX_FAILED_LOGINS` | Max failed logins before lockout | `5` |
 | `LOCKOUT_MINUTES` | Lockout duration in minutes | `15` |
-| **Vault** | | |
-| `VAULT_ENABLED` | Enable HashiCorp Vault | `false` |
+| **Encryption** | | |
+| `ENCRYPTION_KEY` | 32-byte hex key for AES-256-GCM encryption of keys at rest | (none) |
+| **Vault** (optional) | | |
+| `VAULT_ENABLED` | Enable HashiCorp Vault integration | `false` |
 | `VAULT_ADDR` | Vault server address | (none) |
 | `VAULT_TOKEN` | Vault authentication token | (none) |
 | `VAULT_MOUNT_PATH` | KV secrets mount path | `secret` |
@@ -302,8 +305,8 @@ Controls how the signer handles requests from unknown clients (no existing permi
 ### Roadmap to Production
 
 **Core functionality and tests complete! Next:**
-- [ ] Production PostgreSQL deployment (Atlas vars/main.yml)
-- [ ] Production Vault configuration
+- [x] Production PostgreSQL deployment (Atlas vars/main.yml)
+- [x] Key encryption at rest (AES-256-GCM via ENCRYPTION_KEY)
 - [ ] Documentation
 - [ ] Deprecate nsecbunker
 
@@ -376,4 +379,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-02-16 (Phase 10 complete - Unit tests for PostgreSQL storage and metrics)
+**Last Updated:** 2026-02-18 (Added AES-256-GCM encryption for signing keys at rest)

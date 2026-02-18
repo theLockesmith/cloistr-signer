@@ -13,6 +13,7 @@ import (
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/admin"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/api"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/signer"
@@ -53,11 +54,25 @@ func main() {
 		slog.Info("NIP-42 relay auth enabled")
 	}
 
+	// Initialize encryptor for key encryption at rest
+	var encryptor *crypto.Encryptor
+	if cfg.Storage.EncryptionKey != "" {
+		var err error
+		encryptor, err = crypto.NewEncryptor(cfg.Storage.EncryptionKey)
+		if err != nil {
+			slog.Error("failed to initialize encryptor", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("key encryption enabled")
+	} else {
+		slog.Warn("ENCRYPTION_KEY not set, keys will be stored unencrypted")
+	}
+
 	// Initialize NIP-46 signer
-	nip46Signer := signer.New(cfg, store, relayClient)
+	nip46Signer := signer.New(cfg, store, relayClient, encryptor)
 
 	// Initialize HTTP API
-	apiHandler := api.NewHandler(cfg, nip46Signer, store)
+	apiHandler := api.NewHandler(cfg, nip46Signer, store, encryptor)
 
 	// Initialize Web UI
 	webHandler, err := web.New(cfg, store, nip46Signer, nip46Signer)
@@ -108,7 +123,17 @@ func main() {
 		// Try to use the first available key
 		keys, err := store.ListKeys(ctx)
 		if err == nil && len(keys) > 0 {
-			adminHandler.SetSignerKey(keys[0].Pubkey, keys[0].EncryptedNsec)
+			privateKey := keys[0].EncryptedNsec
+			// Decrypt if encrypted
+			if crypto.IsEncrypted(privateKey) && encryptor != nil {
+				decrypted, err := encryptor.Decrypt(privateKey)
+				if err != nil {
+					slog.Warn("failed to decrypt key for admin handler", "error", err)
+				} else {
+					privateKey = decrypted
+				}
+			}
+			adminHandler.SetSignerKey(keys[0].Pubkey, privateKey)
 			slog.Info("admin handler using first stored key", "pubkey", keys[0].Pubkey[:16]+"...")
 		}
 	}

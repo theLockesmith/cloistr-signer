@@ -13,6 +13,7 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip04"
 	"github.com/nbd-wtf/go-nostr/nip44"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
 	relay "git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
@@ -68,6 +69,7 @@ type Signer struct {
 	config         *config.Config
 	storage        storage.Storage
 	relayClient    *relay.Client
+	encryptor      *crypto.Encryptor
 	keys           map[string]string                  // pubkey -> private key (hex)
 	pendingCtx     map[string]*pendingRequestContext  // requestID -> context
 	pendingCtxLock sync.RWMutex
@@ -75,11 +77,12 @@ type Signer struct {
 }
 
 // New creates a new NIP-46 signer
-func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client) *Signer {
+func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, encryptor *crypto.Encryptor) *Signer {
 	return &Signer{
 		config:      cfg,
 		storage:     store,
 		relayClient: relayClient,
+		encryptor:   encryptor,
 		keys:        make(map[string]string),
 		pendingCtx:  make(map[string]*pendingRequestContext),
 	}
@@ -102,7 +105,17 @@ func (s *Signer) Start(ctx context.Context) error {
 
 	// Load any existing keys into runtime map
 	for _, key := range keys {
-		s.keys[key.Pubkey] = key.EncryptedNsec
+		privateKey := key.EncryptedNsec
+		// Decrypt if encrypted and encryptor is available
+		if crypto.IsEncrypted(privateKey) && s.encryptor != nil {
+			decrypted, err := s.encryptor.Decrypt(privateKey)
+			if err != nil {
+				slog.Error("failed to decrypt key", "pubkey", key.Pubkey[:16]+"...", "error", err)
+				continue
+			}
+			privateKey = decrypted
+		}
+		s.keys[key.Pubkey] = privateKey
 	}
 
 	if len(keys) == 0 {

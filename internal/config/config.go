@@ -28,9 +28,10 @@ type ServerConfig struct {
 
 // StorageConfig holds storage backend configuration
 type StorageConfig struct {
-	Type     string `yaml:"type"` // "memory", "postgres", "sqlite"
-	DSN      string `yaml:"dsn"`
-	VaultURL string `yaml:"vault_url"`
+	Type          string `yaml:"type"` // "memory", "postgres", "sqlite"
+	DSN           string `yaml:"dsn"`
+	VaultURL      string `yaml:"vault_url"`
+	EncryptionKey string `yaml:"encryption_key"` // 32-byte hex key for AES-256-GCM encryption
 }
 
 // AuthConfig holds authentication configuration
@@ -141,6 +142,10 @@ func Load() (*Config, error) {
 
 	if vaultURL := os.Getenv("VAULT_URL"); vaultURL != "" {
 		cfg.Storage.VaultURL = vaultURL
+	}
+
+	if encryptionKey := os.Getenv("ENCRYPTION_KEY"); encryptionKey != "" {
+		cfg.Storage.EncryptionKey = encryptionKey
 	}
 
 	if adminPubkeys := os.Getenv("ADMIN_PUBKEYS"); adminPubkeys != "" {
