@@ -307,7 +307,7 @@ Controls how the signer handles requests from unknown clients (no existing permi
 **Core functionality and tests complete! Next:**
 - [x] Production PostgreSQL deployment (Atlas vars/main.yml)
 - [x] Key encryption at rest (AES-256-GCM via ENCRYPTION_KEY)
-- [ ] Documentation
+- [x] Documentation (docs/user-guide.md, admin-guide.md, api-reference.md)
 - [ ] Deprecate nsecbunker
 
 ## Deployment
@@ -379,4 +379,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-02-18 (Added AES-256-GCM encryption for signing keys at rest)
+**Last Updated:** 2026-02-18 (Added documentation: user guide, admin guide, API reference)
