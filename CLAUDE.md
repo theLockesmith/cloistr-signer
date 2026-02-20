@@ -4,9 +4,14 @@
 
 **Domain:** signer.cloistr.xyz (Cloistr is the consumer-facing brand for Coldforge Nostr services)
 
+## REQUIRED READING (Before ANY Action)
+
+**Claude MUST read this file at the start of every session:**
+- `~/claude/coldforge/cloistr/CLAUDE.md` - Cloistr project rules (contains further required reading)
+
 ## Overview
 
-coldforge-signer is our Kubernetes-native NIP-46 remote signer, replacing nsecbunker as the identity foundation for all Coldforge services. Written in Go for minimal footprint and fast startup.
+coldforge-signer is our Kubernetes-native NIP-46 remote signer, serving as the identity foundation for all Coldforge services. Written in Go for minimal footprint and fast startup. (nsecbunker was deprecated 2026-02-19)
 
 ## Quick Start
 
@@ -308,7 +313,7 @@ Controls how the signer handles requests from unknown clients (no existing permi
 - [x] Production PostgreSQL deployment (Atlas vars/main.yml)
 - [x] Key encryption at rest (AES-256-GCM via ENCRYPTION_KEY)
 - [x] Documentation (docs/user-guide.md, admin-guide.md, api-reference.md)
-- [ ] Deprecate nsecbunker
+- [x] Deprecate nsecbunker (2026-02-19: Atlas role removed, namespace deleted)
 
 ## Deployment
 
@@ -379,4 +384,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-02-18 (Added documentation: user guide, admin guide, API reference)
+**Last Updated:** 2026-02-19 (Deprecated nsecbunker: Atlas role removed, namespace deleted)
