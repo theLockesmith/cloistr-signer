@@ -69,7 +69,7 @@ func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHa
 
 	// Create a map of page templates, each inheriting from base
 	templates := make(map[string]*template.Template)
-	pageFiles := []string{"home.html", "login.html", "register.html", "approval.html", "dashboard.html", "keys.html", "requests.html", "users.html"}
+	pageFiles := []string{"home.html", "login.html", "register.html", "approval.html", "dashboard.html", "keys.html", "apps.html", "requests.html", "users.html"}
 
 	for _, page := range pageFiles {
 		// Clone base template
