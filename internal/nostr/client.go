@@ -18,6 +18,11 @@ type Client struct {
 	relays    map[string]*nostr.Relay
 	authKey   string // Private key for NIP-42 auth (hex)
 	mu        sync.RWMutex
+
+	// Subscription state for reconnection
+	subFilters nostr.Filters
+	subHandler func(*nostr.Event)
+	subMu      sync.RWMutex
 }
 
 // NewClient creates a new relay client
@@ -205,6 +210,12 @@ func (c *Client) Subscribe(ctx context.Context, filters nostr.Filters, handler f
 
 // SubscribeWithReconnect maintains a subscription with automatic reconnection
 func (c *Client) SubscribeWithReconnect(ctx context.Context, filters nostr.Filters, handler func(*nostr.Event)) {
+	// Store subscription state for reconnection
+	c.subMu.Lock()
+	c.subFilters = filters
+	c.subHandler = handler
+	c.subMu.Unlock()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -232,6 +243,12 @@ func (c *Client) reconnectIfNeeded(ctx context.Context) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Get current subscription state
+	c.subMu.RLock()
+	filters := c.subFilters
+	handler := c.subHandler
+	c.subMu.RUnlock()
+
 	for _, url := range c.relayURLs {
 		if _, exists := c.relays[url]; !exists {
 			relay, err := nostr.RelayConnect(ctx, url)
@@ -242,6 +259,21 @@ func (c *Client) reconnectIfNeeded(ctx context.Context) {
 			c.relays[url] = relay
 			metrics.SetRelayConnections(len(c.relays))
 			slog.Info("reconnected to relay", "url", url)
+
+			// Re-establish subscription on the reconnected relay
+			if filters != nil && handler != nil {
+				go func(url string, relay *nostr.Relay) {
+					sub, err := relay.Subscribe(ctx, filters)
+					if err != nil {
+						slog.Warn("failed to subscribe on reconnected relay", "url", url, "error", err)
+						return
+					}
+					slog.Info("subscribed on reconnected relay", "url", url, "filters", filters)
+					for ev := range sub.Events {
+						handler(ev)
+					}
+				}(url, relay)
+			}
 		}
 	}
 }
