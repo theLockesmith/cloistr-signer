@@ -11,12 +11,188 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/auth"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
 )
+
+// EventPreview contains parsed event data for display in approval UI
+type EventPreview struct {
+	Kind        int      `json:"kind"`
+	KindName    string   `json:"kind_name"`
+	Content     string   `json:"content"`
+	ContentFull string   `json:"content_full"`
+	Tags        []string `json:"tags"`       // Human-readable tag summary
+	Mentions    []string `json:"mentions"`   // npubs mentioned
+	CreatedAt   string   `json:"created_at"`
+	HasContent  bool     `json:"has_content"`
+}
+
+// kindName returns a human-readable name for a Nostr event kind
+func kindName(kind int) string {
+	names := map[int]string{
+		0:     "Metadata",
+		1:     "Short Text Note",
+		2:     "Recommend Relay",
+		3:     "Follows",
+		4:     "Encrypted DM",
+		5:     "Event Deletion",
+		6:     "Repost",
+		7:     "Reaction",
+		8:     "Badge Award",
+		9:     "Group Chat Message",
+		10:    "Group Chat Threaded Reply",
+		11:    "Group Thread",
+		12:    "Group Thread Reply",
+		13:    "Seal",
+		14:    "Direct Message",
+		16:    "Generic Repost",
+		17:    "Reaction to Website",
+		40:    "Channel Creation",
+		41:    "Channel Metadata",
+		42:    "Channel Message",
+		43:    "Channel Hide Message",
+		44:    "Channel Mute User",
+		1021:  "Bid",
+		1022:  "Bid Confirmation",
+		1040:  "OpenTimestamps",
+		1059:  "Gift Wrap",
+		1063:  "File Metadata",
+		1311:  "Live Chat Message",
+		1617:  "Patches",
+		1621:  "Issues",
+		1622:  "Replies",
+		1971:  "Problem Tracker",
+		1984:  "Reporting",
+		1985:  "Label",
+		4550:  "Community Post Approval",
+		5000:  "Job Request",
+		6000:  "Job Result",
+		7000:  "Job Feedback",
+		9041:  "Zap Goal",
+		9734:  "Zap Request",
+		9735:  "Zap",
+		10000: "Mute List",
+		10001: "Pin List",
+		10002: "Relay List",
+		10003: "Bookmark List",
+		10004: "Communities List",
+		10005: "Public Chats List",
+		10006: "Blocked Relays List",
+		10007: "Search Relays List",
+		10009: "User Groups",
+		10015: "Interests List",
+		10030: "Emoji List",
+		10096: "File Storage Servers",
+		13194: "Wallet Info",
+		21000: "Lightning Pub RPC",
+		22242: "Client Authentication",
+		23194: "Wallet Request",
+		23195: "Wallet Response",
+		24133: "NIP-46 Request",
+		27235: "HTTP Auth",
+		30000: "Follow Sets",
+		30001: "Generic Lists",
+		30002: "Relay Sets",
+		30003: "Bookmark Sets",
+		30004: "Curation Sets",
+		30008: "Profile Badges",
+		30009: "Badge Definition",
+		30015: "Interest Sets",
+		30017: "Create/Update Stall",
+		30018: "Create/Update Product",
+		30019: "Marketplace UI/UX",
+		30020: "Product Sold as Auction",
+		30023: "Long-form Content",
+		30024: "Draft Long-form Content",
+		30030: "Emoji Sets",
+		30063: "Release Artifact Sets",
+		30078: "App-specific Data",
+		30311: "Live Event",
+		30315: "User Statuses",
+		30402: "Classified Listing",
+		30403: "Draft Classified Listing",
+		31922: "Date-Based Calendar Event",
+		31923: "Time-Based Calendar Event",
+		31924: "Calendar",
+		31925: "Calendar Event RSVP",
+		31989: "Handler Recommendation",
+		31990: "Handler Information",
+		34235: "Video Event",
+		34236: "Short-form Portrait Video",
+		34237: "Video View",
+		34550: "Community Definition",
+	}
+
+	if name, ok := names[kind]; ok {
+		return name
+	}
+	if kind >= 5000 && kind < 6000 {
+		return "Job Request"
+	}
+	if kind >= 6000 && kind < 7000 {
+		return "Job Result"
+	}
+	if kind >= 7000 && kind < 8000 {
+		return "Job Feedback"
+	}
+	return fmt.Sprintf("Kind %d", kind)
+}
+
+// parseEventPreview parses a Nostr event JSON string into an EventPreview
+func parseEventPreview(eventJSON string) *EventPreview {
+	var event nostr.Event
+	if err := json.Unmarshal([]byte(eventJSON), &event); err != nil {
+		return nil
+	}
+
+	preview := &EventPreview{
+		Kind:       event.Kind,
+		KindName:   kindName(event.Kind),
+		HasContent: len(event.Content) > 0,
+	}
+
+	// Truncate content for preview
+	if len(event.Content) > 200 {
+		preview.Content = event.Content[:200] + "..."
+	} else {
+		preview.Content = event.Content
+	}
+	preview.ContentFull = event.Content
+
+	// Format created_at if present
+	if event.CreatedAt > 0 {
+		preview.CreatedAt = time.Unix(int64(event.CreatedAt), 0).Format("2006-01-02 15:04:05")
+	}
+
+	// Parse tags for context
+	for _, tag := range event.Tags {
+		if len(tag) < 2 {
+			continue
+		}
+		switch tag[0] {
+		case "p":
+			// Mention
+			if len(tag[1]) == 64 {
+				npub, _ := nip19.EncodePublicKey(tag[1])
+				if npub != "" {
+					preview.Mentions = append(preview.Mentions, npub[:16]+"...")
+				}
+			}
+		case "e":
+			preview.Tags = append(preview.Tags, "replies to event")
+		case "t":
+			preview.Tags = append(preview.Tags, "#"+tag[1])
+		case "a":
+			preview.Tags = append(preview.Tags, "references article")
+		}
+	}
+
+	return preview
+}
 
 //go:embed templates/*.html static/*
 var content embed.FS
@@ -58,6 +234,17 @@ func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHa
 		"json": func(v interface{}) template.JS {
 			b, _ := json.Marshal(v)
 			return template.JS(b)
+		},
+		"kindName": kindName,
+		"npubShort": func(pubkey string) string {
+			if len(pubkey) != 64 {
+				return pubkey
+			}
+			npub, err := nip19.EncodePublicKey(pubkey)
+			if err != nil {
+				return pubkey[:12] + "..."
+			}
+			return npub[:12] + "..." + npub[len(npub)-4:]
 		},
 	}
 
@@ -229,11 +416,31 @@ func (h *Handler) handleApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse event preview if this is a sign_event request
+	var eventPreview *EventPreview
+	if req.Method == "sign_event" {
+		if eventJSON, ok := req.Params["0"].(string); ok {
+			eventPreview = parseEventPreview(eventJSON)
+		}
+	}
+
+	// Get key name for display
+	var keyName string
+	keys, _ := h.storage.ListKeys(r.Context())
+	for _, key := range keys {
+		if key.Pubkey == req.KeyPubkey {
+			keyName = key.Name
+			break
+		}
+	}
+
 	h.render(w, "approval.html", map[string]interface{}{
-		"Title":     "Authorize Request - Coldforge Signer",
-		"Request":   req,
-		"RequestID": requestID,
-		"ExpiresIn": time.Until(req.ExpiresAt).Round(time.Second).String(),
+		"Title":        "Authorize Request - Coldforge Signer",
+		"Request":      req,
+		"RequestID":    requestID,
+		"ExpiresIn":    time.Until(req.ExpiresAt).Round(time.Second).String(),
+		"EventPreview": eventPreview,
+		"KeyName":      keyName,
 	})
 }
 
@@ -638,8 +845,9 @@ func (h *Handler) handleAPIApprove(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		RequestID string `json:"request_id"`
-		Remember  bool   `json:"remember"`
+		RequestID    string `json:"request_id"`
+		Remember     bool   `json:"remember"`
+		AllowedKinds []int  `json:"allowed_kinds,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -657,18 +865,30 @@ func (h *Handler) handleAPIApprove(w http.ResponseWriter, r *http.Request) {
 	// If remember, create a persistent permission
 	if req.Remember {
 		perm := &storage.Permission{
-			KeyID:      pendingReq.KeyPubkey,
-			UserPubkey: pendingReq.ClientPubkey,
-			Methods:    []string{pendingReq.Method, "connect"},
+			KeyID:        pendingReq.KeyPubkey,
+			UserPubkey:   pendingReq.ClientPubkey,
+			Methods:      []string{pendingReq.Method, "connect"},
+			AllowedKinds: req.AllowedKinds,
 		}
 		h.storage.SetPermission(r.Context(), perm)
+
+		if len(req.AllowedKinds) > 0 {
+			slog.Info("request approved via web with kind restriction",
+				"id", req.RequestID,
+				"method", pendingReq.Method,
+				"allowed_kinds", req.AllowedKinds)
+		} else {
+			slog.Info("request approved via web with full access",
+				"id", req.RequestID,
+				"method", pendingReq.Method)
+		}
+	} else {
+		slog.Info("request approved via web (one-time)", "id", req.RequestID, "method", pendingReq.Method)
 	}
 
 	// Delete and notify signer
 	h.storage.DeletePendingRequest(r.Context(), req.RequestID)
 	h.reqHandler.ApproveRequest(req.RequestID, pendingReq)
-
-	slog.Info("request approved via web", "id", req.RequestID, "method", pendingReq.Method)
 
 	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success": true,

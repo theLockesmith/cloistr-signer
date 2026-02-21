@@ -31,18 +31,24 @@
             {{if .Request.EventKind}}
             <div class="detail-row">
                 <span class="detail-label">Event Kind:</span>
-                <span class="detail-value">{{.Request.EventKind}}</span>
+                <span class="detail-value">
+                    <span class="kind-tag">{{.Request.EventKind}}</span>
+                    <span class="kind-name">{{kindName .Request.EventKind}}</span>
+                </span>
             </div>
             {{end}}
 
             <div class="detail-row">
                 <span class="detail-label">Client:</span>
-                <span class="detail-value pubkey">{{truncate .Request.ClientPubkey 16}}...</span>
+                <span class="detail-value pubkey">{{npubShort .Request.ClientPubkey}}</span>
             </div>
 
             <div class="detail-row">
-                <span class="detail-label">Key:</span>
-                <span class="detail-value pubkey">{{truncate .Request.KeyPubkey 16}}...</span>
+                <span class="detail-label">Signing Key:</span>
+                <span class="detail-value">
+                    {{if .KeyName}}<strong>{{.KeyName}}</strong> - {{end}}
+                    <span class="pubkey">{{npubShort .Request.KeyPubkey}}</span>
+                </span>
             </div>
 
             <div class="detail-row">
@@ -51,11 +57,53 @@
             </div>
         </div>
 
+        {{if .EventPreview}}
+        <div class="event-preview">
+            <h3>Event Content Preview</h3>
+
+            {{if .EventPreview.HasContent}}
+            <div class="preview-content">
+                <pre id="content-preview">{{.EventPreview.Content}}</pre>
+                {{if gt (len .EventPreview.ContentFull) 200}}
+                <button type="button" class="btn btn-sm btn-secondary" id="expand-content">Show Full Content</button>
+                <pre id="content-full" style="display: none;">{{.EventPreview.ContentFull}}</pre>
+                {{end}}
+            </div>
+            {{else}}
+            <p class="text-muted">No text content (this event type may use tags or other data)</p>
+            {{end}}
+
+            {{if .EventPreview.Tags}}
+            <div class="preview-tags">
+                <strong>Context:</strong>
+                {{range .EventPreview.Tags}}
+                <span class="tag">{{.}}</span>
+                {{end}}
+            </div>
+            {{end}}
+
+            {{if .EventPreview.Mentions}}
+            <div class="preview-mentions">
+                <strong>Mentions:</strong>
+                {{range .EventPreview.Mentions}}
+                <span class="mention">{{.}}</span>
+                {{end}}
+            </div>
+            {{end}}
+        </div>
+        {{end}}
+
         <div class="approval-options">
             <label class="checkbox-label">
                 <input type="checkbox" id="remember" name="remember">
-                <span>Remember this permission for future requests</span>
+                <span>Remember this app (approve all future requests)</span>
             </label>
+            {{if .Request.EventKind}}
+            <label class="checkbox-label">
+                <input type="checkbox" id="remember-kind" name="remember-kind">
+                <span>Only remember for <strong>{{kindName .Request.EventKind}}</strong> events (kind {{.Request.EventKind}})</span>
+            </label>
+            {{end}}
         </div>
 
         <div class="approval-actions" id="action-buttons">
@@ -67,31 +115,80 @@
     <script>
     document.addEventListener('DOMContentLoaded', function() {
         const requestID = '{{.RequestID}}';
+        const eventKind = {{if .Request.EventKind}}{{.Request.EventKind}}{{else}}null{{end}};
         const approveBtn = document.getElementById('approve-btn');
         const denyBtn = document.getElementById('deny-btn');
         const rememberCheckbox = document.getElementById('remember');
+        const rememberKindCheckbox = document.getElementById('remember-kind');
         const successDiv = document.getElementById('success-message');
         const errorDiv = document.getElementById('error-message');
         const actionButtons = document.getElementById('action-buttons');
+        const expandBtn = document.getElementById('expand-content');
+        const contentPreview = document.getElementById('content-preview');
+        const contentFull = document.getElementById('content-full');
+
+        // Handle remember checkbox logic
+        if (rememberCheckbox && rememberKindCheckbox) {
+            rememberCheckbox.addEventListener('change', function() {
+                if (this.checked) {
+                    rememberKindCheckbox.checked = false;
+                }
+            });
+            rememberKindCheckbox.addEventListener('change', function() {
+                if (this.checked) {
+                    rememberCheckbox.checked = false;
+                }
+            });
+        }
+
+        // Handle expand content button
+        if (expandBtn) {
+            expandBtn.addEventListener('click', function() {
+                if (contentFull.style.display === 'none') {
+                    contentPreview.style.display = 'none';
+                    contentFull.style.display = 'block';
+                    expandBtn.textContent = 'Show Less';
+                } else {
+                    contentPreview.style.display = 'block';
+                    contentFull.style.display = 'none';
+                    expandBtn.textContent = 'Show Full Content';
+                }
+            });
+        }
 
         approveBtn.addEventListener('click', async function() {
             approveBtn.disabled = true;
             denyBtn.disabled = true;
 
+            const body = {
+                request_id: requestID,
+                remember: rememberCheckbox ? rememberCheckbox.checked : false
+            };
+
+            // If "remember for this kind only" is checked, send the kind restriction
+            if (rememberKindCheckbox && rememberKindCheckbox.checked && eventKind !== null) {
+                body.remember = true;
+                body.allowed_kinds = [eventKind];
+            }
+
             try {
                 const response = await fetch('/web/api/approve', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        request_id: requestID,
-                        remember: rememberCheckbox.checked
-                    })
+                    body: JSON.stringify(body)
                 });
 
                 const data = await response.json();
                 if (data.success) {
                     actionButtons.style.display = 'none';
-                    successDiv.textContent = 'Request approved! You can close this page.';
+                    let msg = 'Request approved!';
+                    if (body.allowed_kinds) {
+                        msg += ' Future requests for this event type will be auto-approved.';
+                    } else if (body.remember) {
+                        msg += ' Future requests from this app will be auto-approved.';
+                    }
+                    msg += ' You can close this page.';
+                    successDiv.textContent = msg;
                     successDiv.style.display = 'block';
                 } else {
                     showError(data.error || 'Failed to approve');

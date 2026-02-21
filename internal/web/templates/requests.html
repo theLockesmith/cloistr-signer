@@ -22,13 +22,17 @@
             <tr data-id="{{.ID}}">
                 <td>
                     <span class="method-tag">{{.Method}}</span>
-                    {{if .EventKind}}<span class="kind-tag">kind:{{.EventKind}}</span>{{end}}
+                    {{if .EventKind}}
+                    <span class="kind-tag" title="{{kindName .EventKind}}">kind:{{.EventKind}}</span>
+                    <span class="kind-name">{{kindName .EventKind}}</span>
+                    {{end}}
                 </td>
-                <td class="pubkey">{{truncate .ClientPubkey 16}}...</td>
-                <td class="pubkey">{{truncate .KeyPubkey 16}}...</td>
+                <td class="pubkey">{{npubShort .ClientPubkey}}</td>
+                <td class="pubkey">{{npubShort .KeyPubkey}}</td>
                 <td>{{formatTime .CreatedAt}}</td>
                 <td>{{formatTime .ExpiresAt}}</td>
                 <td>
+                    <a href="/approve/{{.ID}}" class="btn btn-sm btn-primary" title="View details">View</a>
                     <button class="btn btn-sm btn-success approve-btn" data-id="{{.ID}}">Approve</button>
                     <button class="btn btn-sm btn-danger deny-btn" data-id="{{.ID}}">Deny</button>
                 </td>
