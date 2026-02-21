@@ -51,9 +51,13 @@ func (ps *PostgresStorage) migrate() error {
 		name TEXT,
 		pubkey TEXT UNIQUE NOT NULL,
 		encrypted_nsec TEXT NOT NULL,
+		require_approval BOOLEAN NOT NULL DEFAULT FALSE,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		created_by TEXT
 	);
+
+	-- Add require_approval column if it doesn't exist (migration)
+	ALTER TABLE signer_keys ADD COLUMN IF NOT EXISTS require_approval BOOLEAN NOT NULL DEFAULT FALSE;
 
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_pubkey ON signer_keys(pubkey);
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_name ON signer_keys(name);
@@ -65,8 +69,12 @@ func (ps *PostgresStorage) migrate() error {
 		allowed_kinds INTEGER[] DEFAULT '{}',
 		expires_at TIMESTAMPTZ,
 		policy_id TEXT,
+		require_approval BOOLEAN,
 		PRIMARY KEY (key_id, user_pubkey)
 	);
+
+	-- Add require_approval column if it doesn't exist (migration)
+	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS require_approval BOOLEAN;
 
 	CREATE INDEX IF NOT EXISTS idx_signer_permissions_key_id ON signer_permissions(key_id);
 
@@ -211,9 +219,9 @@ func (ps *PostgresStorage) CreateKey(ctx context.Context, key *Key) error {
 func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) {
 	key := &Key{}
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
+		SELECT id, name, pubkey, encrypted_nsec, require_approval, created_at, created_by
 		FROM signer_keys WHERE id = $1`, id).
-		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.CreatedAt, &key.CreatedBy)
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, &key.CreatedAt, &key.CreatedBy)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -226,9 +234,9 @@ func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) 
 func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*Key, error) {
 	key := &Key{}
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
+		SELECT id, name, pubkey, encrypted_nsec, require_approval, created_at, created_by
 		FROM signer_keys WHERE pubkey = $1`, pubkey).
-		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.CreatedAt, &key.CreatedBy)
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, &key.CreatedAt, &key.CreatedBy)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -241,9 +249,9 @@ func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*
 func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key, error) {
 	key := &Key{}
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
+		SELECT id, name, pubkey, encrypted_nsec, require_approval, created_at, created_by
 		FROM signer_keys WHERE name = $1`, name).
-		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.CreatedAt, &key.CreatedBy)
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, &key.CreatedAt, &key.CreatedBy)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -255,7 +263,7 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 
 func (ps *PostgresStorage) ListKeys(ctx context.Context) ([]*Key, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, encrypted_nsec, created_at, created_by
+		SELECT id, name, pubkey, encrypted_nsec, require_approval, created_at, created_by
 		FROM signer_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -265,12 +273,30 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context) ([]*Key, error) {
 	var keys []*Key
 	for rows.Next() {
 		key := &Key{}
-		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.CreatedAt, &key.CreatedBy); err != nil {
+		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, &key.CreatedAt, &key.CreatedBy); err != nil {
 			return nil, err
 		}
 		keys = append(keys, key)
 	}
 	return keys, rows.Err()
+}
+
+func (ps *PostgresStorage) UpdateKey(ctx context.Context, key *Key) error {
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE signer_keys SET name = $1, require_approval = $2
+		WHERE id = $3`,
+		key.Name, key.RequireApproval, key.ID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrKeyNotFound
+	}
+	return nil
 }
 
 func (ps *PostgresStorage) DeleteKey(ctx context.Context, id string) error {
@@ -294,14 +320,15 @@ func (ps *PostgresStorage) DeleteKey(ctx context.Context, id string) error {
 
 func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) error {
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO signer_permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO signer_permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (key_id, user_pubkey) DO UPDATE SET
 			methods = EXCLUDED.methods,
 			allowed_kinds = EXCLUDED.allowed_kinds,
 			expires_at = EXCLUDED.expires_at,
-			policy_id = EXCLUDED.policy_id`,
-		perm.KeyID, perm.UserPubkey, pq.Array(perm.Methods), intArrayToInt64(perm.AllowedKinds), perm.ExpiresAt, perm.PolicyID)
+			policy_id = EXCLUDED.policy_id,
+			require_approval = EXCLUDED.require_approval`,
+		perm.KeyID, perm.UserPubkey, pq.Array(perm.Methods), intArrayToInt64(perm.AllowedKinds), perm.ExpiresAt, perm.PolicyID, perm.RequireApproval)
 	return err
 }
 
@@ -310,10 +337,11 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 	var expiresAt sql.NullTime
 	var policyID sql.NullString
 	var allowedKinds pq.Int64Array
+	var requireApproval sql.NullBool
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id
+		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval
 		FROM signer_permissions WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey).
-		Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID)
+		Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotAuthorized
 	}
@@ -331,12 +359,15 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 	if policyID.Valid {
 		perm.PolicyID = policyID.String
 	}
+	if requireApproval.Valid {
+		perm.RequireApproval = &requireApproval.Bool
+	}
 	return perm, nil
 }
 
 func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([]*Permission, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id
+		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval
 		FROM signer_permissions WHERE key_id = $1`, keyID)
 	if err != nil {
 		return nil, err
@@ -349,7 +380,8 @@ func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([
 		var expiresAt sql.NullTime
 		var policyID sql.NullString
 		var allowedKinds pq.Int64Array
-		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID); err != nil {
+		var requireApproval sql.NullBool
+		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval); err != nil {
 			return nil, err
 		}
 		perm.AllowedKinds = int64ArrayToInt(allowedKinds)
@@ -358,6 +390,9 @@ func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([
 		}
 		if policyID.Valid {
 			perm.PolicyID = policyID.String
+		}
+		if requireApproval.Valid {
+			perm.RequireApproval = &requireApproval.Bool
 		}
 		perms = append(perms, perm)
 	}

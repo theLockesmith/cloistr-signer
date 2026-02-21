@@ -16,6 +16,7 @@
             <tr>
                 <th>Name</th>
                 <th>Public Key</th>
+                <th>Approval</th>
                 <th>Created</th>
                 <th>Actions</th>
             </tr>
@@ -25,6 +26,12 @@
             <tr data-id="{{.ID}}">
                 <td>{{.Name}}</td>
                 <td class="pubkey">{{truncate .Pubkey 24}}...</td>
+                <td>
+                    <label class="toggle-switch" title="Require manual approval for signing requests">
+                        <input type="checkbox" class="approval-toggle" data-id="{{.ID}}" {{if .RequireApproval}}checked{{end}}>
+                        <span class="toggle-slider"></span>
+                    </label>
+                </td>
                 <td>{{formatTime .CreatedAt}}</td>
                 <td>
                     <button class="btn btn-sm btn-primary connect-btn" data-id="{{.ID}}" data-name="{{.Name}}">Connect</button>
@@ -34,7 +41,7 @@
             </tr>
             {{else}}
             <tr>
-                <td colspan="4" class="text-center text-muted">No keys created yet</td>
+                <td colspan="5" class="text-center text-muted">No keys created yet</td>
             </tr>
             {{end}}
         </tbody>
@@ -247,6 +254,31 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             } catch (err) {
                 showMessage('Failed to delete key', 'error');
+            }
+        });
+    });
+
+    // Approval toggle
+    document.querySelectorAll('.approval-toggle').forEach(toggle => {
+        toggle.addEventListener('change', async function() {
+            const id = this.dataset.id;
+            const requireApproval = this.checked;
+
+            try {
+                const response = await fetch(`/api/v1/keys/${id}`, {
+                    method: 'PATCH',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({require_approval: requireApproval})
+                });
+                if (response.ok) {
+                    showMessage(requireApproval ? 'Approval required for this key' : 'Auto-approve enabled for this key', 'success');
+                } else {
+                    this.checked = !requireApproval; // Revert
+                    showMessage('Failed to update key', 'error');
+                }
+            } catch (err) {
+                this.checked = !requireApproval; // Revert
+                showMessage('Failed to update key', 'error');
             }
         });
     });

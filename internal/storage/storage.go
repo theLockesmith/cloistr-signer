@@ -32,22 +32,24 @@ var (
 
 // Key represents a stored signing key
 type Key struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Pubkey      string    `json:"pubkey"`
-	EncryptedNsec string  `json:"-"` // Never exposed in JSON
-	CreatedAt   time.Time `json:"created_at"`
-	CreatedBy   string    `json:"created_by"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Pubkey          string    `json:"pubkey"`
+	EncryptedNsec   string    `json:"-"` // Never exposed in JSON
+	RequireApproval bool      `json:"require_approval"` // If true, requests need manual approval
+	CreatedAt       time.Time `json:"created_at"`
+	CreatedBy       string    `json:"created_by"`
 }
 
 // Permission defines what a user can do with a key
 type Permission struct {
-	KeyID        string     `json:"key_id"`
-	UserPubkey   string     `json:"user_pubkey"`
-	Methods      []string   `json:"methods"` // "sign_event", "encrypt", "decrypt", "ping", etc.
-	AllowedKinds []int      `json:"allowed_kinds,omitempty"` // Empty = all kinds
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
-	PolicyID     string     `json:"policy_id,omitempty"` // Source policy for usage tracking
+	KeyID           string     `json:"key_id"`
+	UserPubkey      string     `json:"user_pubkey"`
+	Methods         []string   `json:"methods"` // "sign_event", "encrypt", "decrypt", "ping", etc.
+	AllowedKinds    []int      `json:"allowed_kinds,omitempty"` // Empty = all kinds
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+	PolicyID        string     `json:"policy_id,omitempty"`        // Source policy for usage tracking
+	RequireApproval *bool      `json:"require_approval,omitempty"` // Override key's default (nil = use key default)
 }
 
 // Session represents an active NIP-46 session
@@ -160,6 +162,7 @@ type Storage interface {
 	GetKeyByPubkey(ctx context.Context, pubkey string) (*Key, error)
 	GetKeyByName(ctx context.Context, name string) (*Key, error)
 	ListKeys(ctx context.Context) ([]*Key, error)
+	UpdateKey(ctx context.Context, key *Key) error
 	DeleteKey(ctx context.Context, id string) error
 
 	// Permission management
@@ -349,6 +352,30 @@ func (m *MemoryStorage) ListKeys(ctx context.Context) ([]*Key, error) {
 		keys = append(keys, key)
 	}
 	return keys, nil
+}
+
+func (m *MemoryStorage) UpdateKey(ctx context.Context, key *Key) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	existing, exists := m.keys[key.ID]
+	if !exists {
+		return ErrKeyNotFound
+	}
+
+	// Handle name change
+	if existing.Name != key.Name {
+		if existing.Name != "" {
+			delete(m.keysByName, existing.Name)
+		}
+		if key.Name != "" {
+			m.keysByName[key.Name] = key
+		}
+	}
+
+	m.keys[key.ID] = key
+	m.keysByPubkey[key.Pubkey] = key
+	return nil
 }
 
 func (m *MemoryStorage) DeleteKey(ctx context.Context, id string) error {

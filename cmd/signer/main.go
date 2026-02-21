@@ -48,12 +48,6 @@ func main() {
 	// Initialize relay client
 	relayClient := nostr.NewClient(cfg.Relays)
 
-	// Set auth key for NIP-42 relay authentication
-	if cfg.RelayAuthKey != "" {
-		relayClient.SetAuthKey(cfg.RelayAuthKey)
-		slog.Info("NIP-42 relay auth enabled")
-	}
-
 	// Initialize encryptor for key encryption at rest
 	var encryptor *crypto.Encryptor
 	if cfg.Storage.EncryptionKey != "" {
@@ -66,6 +60,34 @@ func main() {
 		slog.Info("key encryption enabled")
 	} else {
 		slog.Warn("ENCRYPTION_KEY not set, keys will be stored unencrypted")
+	}
+
+	// Set auth key for NIP-42 relay authentication
+	// If RELAY_AUTH_KEY is set, use it. Otherwise, use the first signing key.
+	if cfg.RelayAuthKey != "" {
+		relayClient.SetAuthKey(cfg.RelayAuthKey)
+		slog.Info("NIP-42 relay auth enabled")
+	} else {
+		// Try to use the first available signing key for relay auth
+		keys, err := store.ListKeys(context.Background())
+		if err == nil && len(keys) > 0 {
+			privateKey := keys[0].EncryptedNsec
+			// Decrypt if encrypted
+			if encryptor != nil && crypto.IsEncrypted(privateKey) {
+				decrypted, err := encryptor.Decrypt(privateKey)
+				if err != nil {
+					slog.Warn("failed to decrypt key for relay auth", "error", err)
+				} else {
+					privateKey = decrypted
+				}
+			}
+			if privateKey != "" {
+				relayClient.SetAuthKey(privateKey)
+				slog.Info("NIP-42 relay auth enabled using first signing key", "pubkey", keys[0].Pubkey[:16]+"...")
+			}
+		} else {
+			slog.Warn("no RELAY_AUTH_KEY set and no signing keys available for NIP-42 auth")
+		}
 	}
 
 	// Initialize NIP-46 signer

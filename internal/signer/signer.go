@@ -253,6 +253,13 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 			return
 		}
 
+		// Check if this permission requires approval (hybrid mode)
+		if s.shouldRequireApproval(ctx, targetPubkey, perm) {
+			slog.Info("permission requires approval", "client", clientPubkey[:16]+"...", "method", request.Method)
+			s.handlePendingApproval(ctx, targetPubkey, privateKey, clientPubkey, request, perm, useNIP44)
+			return
+		}
+
 		// Handle the request
 		result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, perm)
 		if err != nil {
@@ -299,7 +306,8 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 	}
 
 	// No permission - check if we should auto-approve or wait for authorization
-	if !s.config.Auth.RequireApproval {
+	// Use hybrid approval check: permission (nil here) -> key -> global config
+	if !s.shouldRequireApproval(ctx, targetPubkey, nil) {
 		// Auto-approve: create a temporary permission with full access
 		slog.Info("auto-approving request (approval not required)", "client", clientPubkey[:16]+"...", "method", request.Method)
 		tempPerm := &storage.Permission{
@@ -317,13 +325,19 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 		return
 	}
 
+	// Approval required - handle pending approval flow
+	s.handlePendingApproval(ctx, targetPubkey, privateKey, clientPubkey, request, nil, useNIP44)
+}
+
+// handlePendingApproval handles the approval workflow for requests that need manual authorization
+func (s *Signer) handlePendingApproval(ctx context.Context, targetPubkey, privateKey, clientPubkey string, request *NIP46Request, perm *storage.Permission, useNIP44 bool) {
 	// Create pending request context
 	reqCtx := &pendingRequestContext{
 		targetPubkey: targetPubkey,
 		privateKey:   privateKey,
 		clientPubkey: clientPubkey,
 		request:      request,
-		perm:         nil, // No permission yet
+		perm:         perm,
 	}
 
 	// Notify admins if enabled
@@ -346,8 +360,11 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 		return
 	}
 
-	// Request was approved - use the approved permission or create a temporary one
+	// Request was approved - use the approved permission, existing permission, or create a temporary one
 	permToUse := approvedPerm
+	if permToUse == nil {
+		permToUse = perm
+	}
 	if permToUse == nil {
 		// Create a temporary permission for this request only
 		permToUse = &storage.Permission{
@@ -376,6 +393,24 @@ func (s *Signer) isMethodAllowed(perm *storage.Permission, method string) bool {
 		}
 	}
 	return false
+}
+
+// shouldRequireApproval determines if manual approval is needed for a request.
+// Priority: permission setting -> key setting -> global config
+func (s *Signer) shouldRequireApproval(ctx context.Context, targetPubkey string, perm *storage.Permission) bool {
+	// 1. Check permission-level override (if permission exists and has explicit setting)
+	if perm != nil && perm.RequireApproval != nil {
+		return *perm.RequireApproval
+	}
+
+	// 2. Check key-level setting
+	key, err := s.storage.GetKeyByPubkey(ctx, targetPubkey)
+	if err == nil && key.RequireApproval {
+		return true
+	}
+
+	// 3. Fall back to global config
+	return s.config.Auth.RequireApproval
 }
 
 // checkPolicyUsage checks if a method can be used based on policy usage limits

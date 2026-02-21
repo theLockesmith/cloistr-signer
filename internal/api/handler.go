@@ -152,10 +152,11 @@ type CreateKeyRequest struct {
 }
 
 type KeyResponse struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Pubkey    string    `json:"pubkey"`
-	CreatedAt time.Time `json:"created_at"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Pubkey          string    `json:"pubkey"`
+	RequireApproval bool      `json:"require_approval"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +187,8 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			h.handleGetKey(w, r, keyID)
+		case http.MethodPatch:
+			h.handleUpdateKey(w, r, keyID)
 		case http.MethodDelete:
 			h.handleDeleteKey(w, r, keyID)
 		default:
@@ -234,10 +237,11 @@ func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
 	response := make([]KeyResponse, len(keys))
 	for i, key := range keys {
 		response[i] = KeyResponse{
-			ID:        key.ID,
-			Name:      key.Name,
-			Pubkey:    key.Pubkey,
-			CreatedAt: key.CreatedAt,
+			ID:              key.ID,
+			Name:            key.Name,
+			Pubkey:          key.Pubkey,
+			RequireApproval: key.RequireApproval,
+			CreatedAt:       key.CreatedAt,
 		}
 	}
 
@@ -343,6 +347,54 @@ func (h *Handler) handleGetKey(w http.ResponseWriter, r *http.Request, id string
 		Name:      key.Name,
 		Pubkey:    key.Pubkey,
 		CreatedAt: key.CreatedAt,
+	})
+}
+
+type UpdateKeyRequest struct {
+	Name            *string `json:"name,omitempty"`
+	RequireApproval *bool   `json:"require_approval,omitempty"`
+}
+
+func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id string) {
+	var req UpdateKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Get existing key
+	key, err := h.storage.GetKey(r.Context(), id)
+	if err != nil {
+		if err == storage.ErrKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Apply updates
+	if req.Name != nil {
+		key.Name = *req.Name
+	}
+	if req.RequireApproval != nil {
+		key.RequireApproval = *req.RequireApproval
+	}
+
+	// Save updates
+	if err := h.storage.UpdateKey(r.Context(), key); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to update key")
+		return
+	}
+
+	slog.Info("updated key", "id", id, "require_approval", key.RequireApproval)
+
+	h.jsonResponse(w, http.StatusOK, KeyResponse{
+		ID:              key.ID,
+		Name:            key.Name,
+		Pubkey:          key.Pubkey,
+		RequireApproval: key.RequireApproval,
+		CreatedAt:       key.CreatedAt,
 	})
 }
 
