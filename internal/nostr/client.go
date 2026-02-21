@@ -73,7 +73,12 @@ func (c *Client) Connect(ctx context.Context) error {
 
 // authenticateRelay performs NIP-42 authentication with a relay
 func (c *Client) authenticateRelay(ctx context.Context, relay *nostr.Relay) error {
-	err := relay.Auth(ctx, func(event *nostr.Event) error {
+	// Use a dedicated context with sufficient timeout for auth
+	// The parent context might have a tight deadline from HTTP handlers
+	authCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := relay.Auth(authCtx, func(event *nostr.Event) error {
 		pubkey, err := nostr.GetPublicKey(c.authKey)
 		if err != nil {
 			return err
