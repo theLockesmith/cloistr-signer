@@ -12,6 +12,12 @@ import (
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
 )
 
+// subscription holds a filter and handler pair for reconnection
+type subscription struct {
+	filters nostr.Filters
+	handler func(*nostr.Event)
+}
+
 // Client manages connections to Nostr relays
 type Client struct {
 	relayURLs []string
@@ -19,10 +25,9 @@ type Client struct {
 	authKey   string // Private key for NIP-42 auth (hex)
 	mu        sync.RWMutex
 
-	// Subscription state for reconnection
-	subFilters nostr.Filters
-	subHandler func(*nostr.Event)
-	subMu      sync.RWMutex
+	// Subscription state for reconnection - supports multiple subscriptions
+	subscriptions []subscription
+	subMu         sync.RWMutex
 }
 
 // NewClient creates a new relay client
@@ -215,20 +220,18 @@ func (c *Client) Subscribe(ctx context.Context, filters nostr.Filters, handler f
 
 // SubscribeWithReconnect maintains a subscription with automatic reconnection
 func (c *Client) SubscribeWithReconnect(ctx context.Context, filters nostr.Filters, handler func(*nostr.Event)) {
-	// Store subscription state for reconnection
+	// Store subscription state for reconnection (append, don't overwrite)
 	c.subMu.Lock()
-	c.subFilters = filters
-	c.subHandler = handler
+	c.subscriptions = append(c.subscriptions, subscription{filters: filters, handler: handler})
+	subIndex := len(c.subscriptions) - 1
 	c.subMu.Unlock()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			c.Subscribe(ctx, filters, handler)
+	// Subscribe to currently connected relays
+	c.Subscribe(ctx, filters, handler)
 
-			// Check connections periodically and reconnect if needed
+	// Only the first subscription starts the reconnect ticker
+	if subIndex == 0 {
+		go func() {
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
 
@@ -240,18 +243,21 @@ func (c *Client) SubscribeWithReconnect(ctx context.Context, filters nostr.Filte
 					c.reconnectIfNeeded(ctx)
 				}
 			}
-		}
+		}()
 	}
+
+	// Block until context is done
+	<-ctx.Done()
 }
 
 func (c *Client) reconnectIfNeeded(ctx context.Context) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Get current subscription state
+	// Get current subscriptions
 	c.subMu.RLock()
-	filters := c.subFilters
-	handler := c.subHandler
+	subs := make([]subscription, len(c.subscriptions))
+	copy(subs, c.subscriptions)
 	c.subMu.RUnlock()
 
 	for _, url := range c.relayURLs {
@@ -265,19 +271,19 @@ func (c *Client) reconnectIfNeeded(ctx context.Context) {
 			metrics.SetRelayConnections(len(c.relays))
 			slog.Info("reconnected to relay", "url", url)
 
-			// Re-establish subscription on the reconnected relay
-			if filters != nil && handler != nil {
-				go func(url string, relay *nostr.Relay) {
-					sub, err := relay.Subscribe(ctx, filters)
+			// Re-establish ALL subscriptions on the reconnected relay
+			for _, sub := range subs {
+				go func(url string, relay *nostr.Relay, filters nostr.Filters, handler func(*nostr.Event)) {
+					subscription, err := relay.Subscribe(ctx, filters)
 					if err != nil {
 						slog.Warn("failed to subscribe on reconnected relay", "url", url, "error", err)
 						return
 					}
 					slog.Info("subscribed on reconnected relay", "url", url, "filters", filters)
-					for ev := range sub.Events {
+					for ev := range subscription.Events {
 						handler(ev)
 					}
-				}(url, relay)
+				}(url, relay, sub.filters, sub.handler)
 			}
 		}
 	}
