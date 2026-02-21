@@ -315,6 +315,23 @@ Controls how the signer handles requests from unknown clients (no existing permi
 - [x] Documentation (docs/user-guide.md, admin-guide.md, api-reference.md)
 - [x] Deprecate nsecbunker (2026-02-19: Atlas role removed, namespace deleted)
 
+### Phase 11 - Enhanced Approval & Connection UX
+
+**Per-key approval mode (basic):**
+- [x] Per-key `require_approval` toggle in DB and UI
+- [x] Per-permission approval override (hybrid: permission → key → global)
+- [x] Auto-use signing key for NIP-42 relay auth
+
+**Granular approval (in progress):**
+- [ ] Per-kind approval rules (approve kinds 1,7 but require approval for kind 30023)
+- [ ] Approval UI showing event content preview
+- [ ] Remember approval choices per-app
+
+**Bidirectional connection dialogs:**
+- [ ] Per-key "Connect" dialog accepts nostrconnect:// URIs (connect TO apps)
+- [ ] "Connect to App" dialog accepts both nostrconnect:// and bunker:// URIs
+- [ ] Unified connection dialog for all connection flows
+
 ## Deployment
 
 ```bash
