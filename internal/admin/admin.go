@@ -126,6 +126,11 @@ func (h *Handler) handleEvent(event *nostr.Event) {
 		return
 	}
 
+	// Ignore messages from our own pubkey (prevents loops)
+	if event.PubKey == h.signerPubkey {
+		return
+	}
+
 	// Verify sender is an admin
 	if !h.isAdmin(event.PubKey) {
 		slog.Debug("ignoring DM from non-admin", "pubkey", event.PubKey[:16]+"...")
