@@ -332,6 +332,50 @@ Controls how the signer handles requests from unknown clients (no existing permi
 - [ ] "Connect to App" dialog accepts both nostrconnect:// and bunker:// URIs
 - [ ] Unified connection dialog for all connection flows
 
+### Phase 12 - Signer Chaining (Delegated Team Signing)
+
+**The Problem:** Businesses need team members to post on behalf of a shared identity without sharing the nsec. Traditional delegation (NIP-26) failed due to revocation problems and poor ecosystem adoption.
+
+**The Solution:** Signer Chaining - NIP-46 signers can act as clients to other signers, enabling a daisy-chain where personal signers (Amber, nsecbunker) proxy signing requests to an upstream business signer.
+
+```
+Team Member's Client ──► Personal Signer ──► Business Signer (cloistr)
+                              (Amber)              │
+                                              signs with
+                                            business key
+                                                   │
+Team Member's Client ◄── Personal Signer ◄────────┘
+```
+
+**Why it works:**
+- Revocation is instant (remove permission in cloistr-signer)
+- No new NIPs or protocol changes needed (NIP-46 all the way down)
+- Team members keep their preferred signer setup
+- Business maintains full control over who can sign
+
+**Implementation - Proxy Key Support (eat our own dogfood):**
+- [ ] Add "proxy key" type to storage (bunker:// URI instead of local nsec)
+- [ ] NIP-46 client mode: connect to upstream signer for proxy keys
+- [ ] Forward sign_event/encrypt/decrypt requests to upstream
+- [ ] Web UI: Add proxy key via bunker:// URI (like importing, but remote)
+- [ ] Connection management: reconnect to upstream on failure
+- [ ] Test harness: spin up coldforge-signer (upstream) + cloistr-signer (proxy) for full chain
+
+**Implementation - Upstream Signer Enhancements:**
+- [ ] Document cloistr-signer as "upstream signer" for chained connections
+- [ ] Verify NIP-46 auth flow works when connecting signer is a proxy
+- [ ] Add "delegate pubkey" field to permissions (optional override for proxy scenarios)
+- [ ] Create onboarding flow: "Invite team member" generates bunker:// URI for their signer
+- [ ] Add audit logging for chained signatures (which delegate signed what)
+- [ ] Web UI: Team management page showing delegates and their activity
+
+**Ecosystem outreach:**
+- [x] Technical documentation (`docs/signer-chaining.md`)
+- [x] Blog post for Nostr community
+- [ ] Reference implementation complete (cloistr-signer as both upstream AND proxy)
+- [ ] Feature requests to Amber, nsecbunker for "proxy key" support
+- [ ] Propose pattern as NIP-46 addendum (after adoption)
+
 ## Deployment
 
 ```bash
@@ -401,4 +445,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-02-19 (Deprecated nsecbunker: Atlas role removed, namespace deleted)
+**Last Updated:** 2026-02-21 (Added Phase 12: Signer Chaining for delegated team signing)
