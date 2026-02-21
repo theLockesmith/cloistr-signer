@@ -308,6 +308,7 @@ func (h *Handler) handleApps(w http.ResponseWriter, r *http.Request) {
 		"Title": "Connected Apps - Coldforge Signer",
 		"User":  user,
 		"Apps":  apps,
+		"Keys":  keys,
 	})
 }
 
