@@ -1832,6 +1832,11 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Parse nostrconnect:// URI
 	// Format: nostrconnect://<client-pubkey>?relay=<relay>&secret=<secret>&name=<name>&url=<url>&image=<image>
+	// Note: bunker:// URIs are for apps to connect TO us, not for us to process
+	if strings.HasPrefix(req.URI, "bunker://") {
+		h.errorResponse(w, http.StatusBadRequest, "bunker:// URIs are for apps to use - paste a nostrconnect:// URI from the app instead")
+		return
+	}
 	if !strings.HasPrefix(req.URI, "nostrconnect://") {
 		h.errorResponse(w, http.StatusBadRequest, "invalid URI - must start with nostrconnect://")
 		return

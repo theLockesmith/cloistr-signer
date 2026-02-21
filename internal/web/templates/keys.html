@@ -90,31 +90,60 @@
 
 <!-- Connect Modal -->
 <div id="connect-modal" class="modal" style="display: none;">
-    <div class="modal-content">
-        <h2>Connect to <span id="connect-key-name"></span></h2>
-        <p class="text-muted">Copy the bunker:// URI and paste it into your Nostr client to connect.</p>
+    <div class="modal-content modal-lg">
+        <h2>Connect <span id="connect-key-name"></span></h2>
 
-        <div id="connect-loading" style="text-align: center; padding: 20px;">
-            Loading...
+        <!-- Connection method tabs -->
+        <div class="connect-tabs">
+            <button type="button" class="connect-tab active" data-tab="share">Share bunker:// URI</button>
+            <button type="button" class="connect-tab" data-tab="paste">Paste nostrconnect://</button>
         </div>
 
-        <div id="connect-content" style="display: none;">
-            <div class="form-group">
-                <label>Bunker URI</label>
-                <div class="input-group">
-                    <input type="text" id="bunker-uri" readonly class="monospace">
-                    <button type="button" class="btn btn-primary" id="copy-bunker-uri">Copy</button>
+        <!-- Tab 1: Share bunker:// URI -->
+        <div id="connect-tab-share" class="connect-tab-content">
+            <p class="text-muted">Copy the bunker:// URI and paste it into your Nostr app.</p>
+
+            <div id="connect-loading" style="text-align: center; padding: 20px;">
+                Loading...
+            </div>
+
+            <div id="connect-content" style="display: none;">
+                <div class="form-group">
+                    <label>Bunker URI</label>
+                    <div class="input-group">
+                        <input type="text" id="bunker-uri" readonly class="monospace">
+                        <button type="button" class="btn btn-primary" id="copy-bunker-uri">Copy</button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Connected Relays</label>
+                    <ul id="relay-list" class="relay-uri-list"></ul>
                 </div>
             </div>
-
-            <div class="form-group">
-                <label>Connected Relays</label>
-                <ul id="relay-list" class="relay-uri-list"></ul>
-            </div>
         </div>
 
-        <div class="modal-actions">
-            <button type="button" class="btn btn-secondary" id="cancel-connect">Close</button>
+        <!-- Tab 2: Paste nostrconnect:// URI -->
+        <div id="connect-tab-paste" class="connect-tab-content" style="display: none;">
+            <p class="text-muted">Paste the connection string from your Nostr app.</p>
+
+            <form id="connect-paste-form">
+                <div class="form-group">
+                    <label for="connect-paste-uri">Connection String from App</label>
+                    <textarea id="connect-paste-uri" name="uri" required rows="3"
+                        placeholder="nostrconnect://pubkey?relay=wss://..." class="monospace"></textarea>
+                    <small>Paste the nostrconnect:// URI from your Nostr app</small>
+                </div>
+
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" id="cancel-connect">Close</button>
+                    <button type="submit" class="btn btn-primary">Connect</button>
+                </div>
+            </form>
+        </div>
+
+        <div id="connect-share-actions" class="modal-actions">
+            <button type="button" class="btn btn-secondary" id="close-connect">Close</button>
         </div>
     </div>
 </div>
@@ -290,18 +319,46 @@ document.addEventListener('DOMContentLoaded', function() {
     const connectContent = document.getElementById('connect-content');
     const bunkerUriInput = document.getElementById('bunker-uri');
     const relayList = document.getElementById('relay-list');
-    const cancelConnect = document.getElementById('cancel-connect');
     const copyBunkerUri = document.getElementById('copy-bunker-uri');
+    const connectShareActions = document.getElementById('connect-share-actions');
+    const connectPasteForm = document.getElementById('connect-paste-form');
+    let currentConnectKeyId = null;
+
+    // Tab switching for connect modal
+    document.querySelectorAll('.connect-tab').forEach(tab => {
+        tab.addEventListener('click', function() {
+            const targetTab = this.dataset.tab;
+
+            // Update active tab
+            document.querySelectorAll('.connect-tab').forEach(t => t.classList.remove('active'));
+            this.classList.add('active');
+
+            // Show correct content
+            document.getElementById('connect-tab-share').style.display = targetTab === 'share' ? 'block' : 'none';
+            document.getElementById('connect-tab-paste').style.display = targetTab === 'paste' ? 'block' : 'none';
+
+            // Show correct actions
+            connectShareActions.style.display = targetTab === 'share' ? 'flex' : 'none';
+        });
+    });
 
     document.querySelectorAll('.connect-btn').forEach(btn => {
         btn.addEventListener('click', async function() {
             const id = this.dataset.id;
             const name = this.dataset.name;
+            currentConnectKeyId = id;
 
             connectKeyName.textContent = name;
             connectLoading.style.display = 'block';
             connectContent.style.display = 'none';
             connectModal.style.display = 'flex';
+
+            // Reset to share tab
+            document.querySelectorAll('.connect-tab').forEach(t => t.classList.remove('active'));
+            document.querySelector('.connect-tab[data-tab="share"]').classList.add('active');
+            document.getElementById('connect-tab-share').style.display = 'block';
+            document.getElementById('connect-tab-paste').style.display = 'none';
+            connectShareActions.style.display = 'flex';
 
             try {
                 const response = await fetch(`/api/v1/bunker/${id}`);
@@ -322,7 +379,9 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    cancelConnect.addEventListener('click', () => connectModal.style.display = 'none');
+    // Close connect modal buttons
+    document.getElementById('close-connect').addEventListener('click', () => connectModal.style.display = 'none');
+    document.getElementById('cancel-connect').addEventListener('click', () => connectModal.style.display = 'none');
 
     connectModal.addEventListener('click', function(e) {
         if (e.target === connectModal) connectModal.style.display = 'none';
@@ -332,6 +391,40 @@ document.addEventListener('DOMContentLoaded', function() {
         navigator.clipboard.writeText(bunkerUriInput.value);
         this.textContent = 'Copied!';
         setTimeout(() => this.textContent = 'Copy', 1500);
+    });
+
+    // Handle paste form submission (nostrconnect:// or bunker://)
+    connectPasteForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const uri = document.getElementById('connect-paste-uri').value.trim();
+
+        if (!uri.startsWith('nostrconnect://')) {
+            if (uri.startsWith('bunker://')) {
+                showMessage('bunker:// URIs are for apps to use - paste a nostrconnect:// URI from the app instead', 'error');
+            } else {
+                showMessage('Invalid URI - paste a nostrconnect:// URI from your Nostr app', 'error');
+            }
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/v1/nostrconnect', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({uri: uri, key_id: currentConnectKeyId})
+            });
+
+            const data = await response.json();
+            if (response.ok) {
+                showMessage('Connected to ' + (data.app_name || 'app') + ' successfully!', 'success');
+                connectModal.style.display = 'none';
+                document.getElementById('connect-paste-uri').value = '';
+            } else {
+                showMessage(data.error || 'Failed to connect', 'error');
+            }
+        } catch (err) {
+            showMessage('Failed to connect: ' + err.message, 'error');
+        }
     });
 
     // Connect to App (nostrconnect://) functionality
