@@ -156,6 +156,7 @@ type KeyResponse struct {
 	Name            string    `json:"name"`
 	Pubkey          string    `json:"pubkey"`
 	RequireApproval bool      `json:"require_approval"`
+	Relays          []string  `json:"relays,omitempty"` // Custom relays for this key
 	CreatedAt       time.Time `json:"created_at"`
 }
 
@@ -241,6 +242,7 @@ func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
 			Name:            key.Name,
 			Pubkey:          key.Pubkey,
 			RequireApproval: key.RequireApproval,
+			Relays:          key.Relays,
 			CreatedAt:       key.CreatedAt,
 		}
 	}
@@ -324,10 +326,12 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	slog.Info("created key", "name", req.Name, "pubkey", pubkey[:16]+"...")
 
 	h.jsonResponse(w, http.StatusCreated, KeyResponse{
-		ID:        key.ID,
-		Name:      key.Name,
-		Pubkey:    key.Pubkey,
-		CreatedAt: key.CreatedAt,
+		ID:              key.ID,
+		Name:            key.Name,
+		Pubkey:          key.Pubkey,
+		RequireApproval: key.RequireApproval,
+		Relays:          key.Relays,
+		CreatedAt:       key.CreatedAt,
 	})
 }
 
@@ -343,16 +347,19 @@ func (h *Handler) handleGetKey(w http.ResponseWriter, r *http.Request, id string
 	}
 
 	h.jsonResponse(w, http.StatusOK, KeyResponse{
-		ID:        key.ID,
-		Name:      key.Name,
-		Pubkey:    key.Pubkey,
-		CreatedAt: key.CreatedAt,
+		ID:              key.ID,
+		Name:            key.Name,
+		Pubkey:          key.Pubkey,
+		RequireApproval: key.RequireApproval,
+		Relays:          key.Relays,
+		CreatedAt:       key.CreatedAt,
 	})
 }
 
 type UpdateKeyRequest struct {
-	Name            *string `json:"name,omitempty"`
-	RequireApproval *bool   `json:"require_approval,omitempty"`
+	Name            *string  `json:"name,omitempty"`
+	RequireApproval *bool    `json:"require_approval,omitempty"`
+	Relays          []string `json:"relays,omitempty"` // Custom relays for this key (empty = use global config)
 }
 
 func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id string) {
@@ -380,6 +387,9 @@ func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id str
 	if req.RequireApproval != nil {
 		key.RequireApproval = *req.RequireApproval
 	}
+	if req.Relays != nil {
+		key.Relays = req.Relays
+	}
 
 	// Save updates
 	if err := h.storage.UpdateKey(r.Context(), key); err != nil {
@@ -387,13 +397,14 @@ func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
-	slog.Info("updated key", "id", id, "require_approval", key.RequireApproval)
+	slog.Info("updated key", "id", id, "require_approval", key.RequireApproval, "relays", len(key.Relays))
 
 	h.jsonResponse(w, http.StatusOK, KeyResponse{
 		ID:              key.ID,
 		Name:            key.Name,
 		Pubkey:          key.Pubkey,
 		RequireApproval: key.RequireApproval,
+		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 	})
 }
@@ -1775,7 +1786,11 @@ func (h *Handler) handleBunkerConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Build bunker URI
 	// bunker://<pubkey>?relay=<relay>&secret=<secret>
-	relays := h.config.Relays
+	// Use key-specific relays if configured, otherwise fall back to global config
+	relays := key.Relays
+	if len(relays) == 0 {
+		relays = h.config.Relays
+	}
 	params := make([]string, 0, len(relays)+1)
 	for _, relay := range relays {
 		params = append(params, "relay="+relay)
@@ -1986,7 +2001,12 @@ func (h *Handler) handleNIP05(w http.ResponseWriter, r *http.Request) {
 
 		if name == "" || name == keyName {
 			response.Names[keyName] = key.Pubkey
-			response.Relays[key.Pubkey] = h.config.Relays
+			// Use key-specific relays if configured, otherwise fall back to global config
+			relays := key.Relays
+			if len(relays) == 0 {
+				relays = h.config.Relays
+			}
+			response.Relays[key.Pubkey] = relays
 		}
 	}
 

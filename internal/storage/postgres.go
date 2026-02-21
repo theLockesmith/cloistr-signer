@@ -59,6 +59,9 @@ func (ps *PostgresStorage) migrate() error {
 	-- Add require_approval column if it doesn't exist (migration)
 	ALTER TABLE signer_keys ADD COLUMN IF NOT EXISTS require_approval BOOLEAN NOT NULL DEFAULT FALSE;
 
+	-- Add relays column if it doesn't exist (migration for per-key relay config)
+	ALTER TABLE signer_keys ADD COLUMN IF NOT EXISTS relays TEXT[] DEFAULT '{}';
+
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_pubkey ON signer_keys(pubkey);
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_name ON signer_keys(name);
 
@@ -204,9 +207,9 @@ func (ps *PostgresStorage) CreateKey(ctx context.Context, key *Key) error {
 	}
 
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO signer_keys (id, name, pubkey, encrypted_nsec, created_at, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		key.ID, key.Name, key.Pubkey, key.EncryptedNsec, key.CreatedAt, key.CreatedBy)
+		INSERT INTO signer_keys (id, name, pubkey, encrypted_nsec, relays, created_at, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		key.ID, key.Name, key.Pubkey, key.EncryptedNsec, pq.Array(key.Relays), key.CreatedAt, key.CreatedBy)
 	if err != nil {
 		if isDuplicateError(err) {
 			return ErrKeyExists
@@ -219,9 +222,9 @@ func (ps *PostgresStorage) CreateKey(ctx context.Context, key *Key) error {
 func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) {
 	key := &Key{}
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, encrypted_nsec, require_approval, created_at, created_by
+		SELECT id, name, pubkey, encrypted_nsec, require_approval, relays, created_at, created_by
 		FROM signer_keys WHERE id = $1`, id).
-		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, &key.CreatedAt, &key.CreatedBy)
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -234,9 +237,9 @@ func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) 
 func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*Key, error) {
 	key := &Key{}
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, encrypted_nsec, require_approval, created_at, created_by
+		SELECT id, name, pubkey, encrypted_nsec, require_approval, relays, created_at, created_by
 		FROM signer_keys WHERE pubkey = $1`, pubkey).
-		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, &key.CreatedAt, &key.CreatedBy)
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -249,9 +252,9 @@ func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*
 func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key, error) {
 	key := &Key{}
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, encrypted_nsec, require_approval, created_at, created_by
+		SELECT id, name, pubkey, encrypted_nsec, require_approval, relays, created_at, created_by
 		FROM signer_keys WHERE name = $1`, name).
-		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, &key.CreatedAt, &key.CreatedBy)
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -263,7 +266,7 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 
 func (ps *PostgresStorage) ListKeys(ctx context.Context) ([]*Key, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, encrypted_nsec, require_approval, created_at, created_by
+		SELECT id, name, pubkey, encrypted_nsec, require_approval, relays, created_at, created_by
 		FROM signer_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -273,7 +276,7 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context) ([]*Key, error) {
 	var keys []*Key
 	for rows.Next() {
 		key := &Key{}
-		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, &key.CreatedAt, &key.CreatedBy); err != nil {
+		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.EncryptedNsec, &key.RequireApproval, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy); err != nil {
 			return nil, err
 		}
 		keys = append(keys, key)
@@ -283,9 +286,9 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context) ([]*Key, error) {
 
 func (ps *PostgresStorage) UpdateKey(ctx context.Context, key *Key) error {
 	result, err := ps.db.ExecContext(ctx, `
-		UPDATE signer_keys SET name = $1, require_approval = $2
-		WHERE id = $3`,
-		key.Name, key.RequireApproval, key.ID)
+		UPDATE signer_keys SET name = $1, require_approval = $2, relays = $3
+		WHERE id = $4`,
+		key.Name, key.RequireApproval, pq.Array(key.Relays), key.ID)
 	if err != nil {
 		return err
 	}

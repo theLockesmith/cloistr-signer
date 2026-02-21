@@ -37,6 +37,7 @@ type Key struct {
 	Pubkey          string    `json:"pubkey"`
 	EncryptedNsec   string    `json:"-"` // Never exposed in JSON
 	RequireApproval bool      `json:"require_approval"` // If true, requests need manual approval
+	Relays          []string  `json:"relays,omitempty"` // Custom relays for this key (nil = use global config)
 	CreatedAt       time.Time `json:"created_at"`
 	CreatedBy       string    `json:"created_by"`
 }

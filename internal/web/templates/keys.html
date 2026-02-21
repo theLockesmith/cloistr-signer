@@ -16,6 +16,7 @@
             <tr>
                 <th>Name</th>
                 <th>Public Key</th>
+                <th>Relays</th>
                 <th>Approval</th>
                 <th>Created</th>
                 <th>Actions</th>
@@ -27,6 +28,13 @@
                 <td>{{.Name}}</td>
                 <td class="pubkey">{{truncate .Pubkey 24}}...</td>
                 <td>
+                    {{if .Relays}}
+                        <span class="relay-count" title="{{range .Relays}}{{.}}&#10;{{end}}">{{len .Relays}} relay{{if gt (len .Relays) 1}}s{{end}}</span>
+                    {{else}}
+                        <span class="text-muted">default</span>
+                    {{end}}
+                </td>
+                <td>
                     <label class="toggle-switch" title="Require manual approval for signing requests">
                         <input type="checkbox" class="approval-toggle" data-id="{{.ID}}" {{if .RequireApproval}}checked{{end}}>
                         <span class="toggle-slider"></span>
@@ -35,13 +43,14 @@
                 <td>{{formatTime .CreatedAt}}</td>
                 <td>
                     <button class="btn btn-sm btn-primary connect-btn" data-id="{{.ID}}" data-name="{{.Name}}">Connect</button>
+                    <button class="btn btn-sm edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-relays="{{range $i, $r := .Relays}}{{if $i}},{{end}}{{$r}}{{end}}">Edit</button>
                     <button class="btn btn-sm copy-btn" data-pubkey="{{.Pubkey}}">Copy Pubkey</button>
                     <button class="btn btn-sm btn-danger delete-btn" data-id="{{.ID}}" data-name="{{.Name}}">Delete</button>
                 </td>
             </tr>
             {{else}}
             <tr>
-                <td colspan="5" class="text-center text-muted">No keys created yet</td>
+                <td colspan="6" class="text-center text-muted">No keys created yet</td>
             </tr>
             {{end}}
         </tbody>
@@ -174,6 +183,30 @@
             <div class="modal-actions">
                 <button type="button" class="btn btn-secondary" id="cancel-nostrconnect">Cancel</button>
                 <button type="submit" class="btn btn-primary">Connect</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Edit Key Modal -->
+<div id="edit-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+        <h2>Edit Key: <span id="edit-key-name"></span></h2>
+        <form id="edit-form">
+            <input type="hidden" id="edit-key-id">
+            <div class="form-group">
+                <label for="edit-name">Key Name</label>
+                <input type="text" id="edit-name" name="name" placeholder="e.g., Main Key">
+            </div>
+            <div class="form-group">
+                <label for="edit-relays">Custom Relays</label>
+                <textarea id="edit-relays" name="relays" rows="3"
+                    placeholder="wss://relay1.example.com&#10;wss://relay2.example.com" class="monospace"></textarea>
+                <small>One relay per line. Leave empty to use default relays from config.</small>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="cancel-edit">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save</button>
             </div>
         </form>
     </div>
@@ -468,6 +501,61 @@ document.addEventListener('DOMContentLoaded', function() {
         } catch (err) {
             showMessage('Failed to connect: ' + err.message, 'error');
         }
+    });
+
+    // Edit key modal
+    const editModal = document.getElementById('edit-modal');
+    const editForm = document.getElementById('edit-form');
+    const cancelEdit = document.getElementById('cancel-edit');
+    const editKeyName = document.getElementById('edit-key-name');
+    const editKeyId = document.getElementById('edit-key-id');
+    const editName = document.getElementById('edit-name');
+    const editRelays = document.getElementById('edit-relays');
+
+    document.querySelectorAll('.edit-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const id = this.dataset.id;
+            const name = this.dataset.name;
+            const relays = this.dataset.relays;
+
+            editKeyId.value = id;
+            editKeyName.textContent = name;
+            editName.value = name;
+            editRelays.value = relays ? relays.split(',').join('\n') : '';
+            editModal.style.display = 'flex';
+        });
+    });
+
+    cancelEdit.addEventListener('click', () => editModal.style.display = 'none');
+    editModal.addEventListener('click', function(e) {
+        if (e.target === editModal) editModal.style.display = 'none';
+    });
+
+    editForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const id = editKeyId.value;
+        const name = editName.value;
+        const relaysText = editRelays.value.trim();
+        const relays = relaysText ? relaysText.split('\n').map(r => r.trim()).filter(r => r) : [];
+
+        try {
+            const response = await fetch(`/api/v1/keys/${id}`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, relays: relays})
+            });
+
+            if (response.ok) {
+                showMessage('Key updated successfully', 'success');
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                const data = await response.json();
+                showMessage(data.error || 'Failed to update key', 'error');
+            }
+        } catch (err) {
+            showMessage('Failed to update key', 'error');
+        }
+        editModal.style.display = 'none';
     });
 
     function showMessage(text, type) {
