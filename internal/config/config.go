@@ -49,7 +49,7 @@ type AuthConfig struct {
 	NotifyAdmins         bool     `yaml:"notify_admins"`          // Send DM to admins for pending requests (default: true)
 	JWTSecret            string   `yaml:"jwt_secret"`             // Secret for JWT signing (required for user auth)
 	JWTExpiry            int      `yaml:"jwt_expiry"`             // JWT expiry in hours (default: 24)
-	MFAIssuer            string   `yaml:"mfa_issuer"`             // Issuer name for TOTP (default: Coldforge)
+	MFAIssuer            string   `yaml:"mfa_issuer"`             // Issuer name for TOTP (default: Cloistr)
 	MaxFailedLogins      int      `yaml:"max_failed_logins"`      // Max failed logins before lockout (default: 5)
 	LockoutMinutes       int      `yaml:"lockout_minutes"`        // Lockout duration in minutes (default: 15)
 }
@@ -98,7 +98,7 @@ func Load() (*Config, error) {
 			NotifyAdmins:         true,
 			JWTSecret:            "",
 			JWTExpiry:            24,
-			MFAIssuer:            "Coldforge",
+			MFAIssuer:            "Cloistr",
 			MaxFailedLogins:      5,
 			LockoutMinutes:       15,
 		},
@@ -112,7 +112,7 @@ func Load() (*Config, error) {
 			MaxEvents: 10000,
 		},
 		Service: ServiceConfig{
-			Name:         "Coldforge Signer",
+			Name:         "Cloistr Signer",
 			Description:  "NIP-46 Remote Signing Service",
 			PublishNIP89: false,
 		},

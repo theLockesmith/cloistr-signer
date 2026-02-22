@@ -357,7 +357,7 @@ func (h *Handler) handleHome(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "home.html", map[string]interface{}{
-		"Title": "Coldforge Signer",
+		"Title": "Cloistr Signer",
 	})
 }
 
@@ -371,14 +371,14 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "login.html", map[string]interface{}{
-		"Title": "Login - Coldforge Signer",
+		"Title": "Login - Cloistr Signer",
 	})
 }
 
 // handleRegister serves the registration page
 func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	h.render(w, "register.html", map[string]interface{}{
-		"Title": "Register - Coldforge Signer",
+		"Title": "Register - Cloistr Signer",
 	})
 }
 
@@ -435,7 +435,7 @@ func (h *Handler) handleApproval(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "approval.html", map[string]interface{}{
-		"Title":        "Authorize Request - Coldforge Signer",
+		"Title":        "Authorize Request - Cloistr Signer",
 		"Request":      req,
 		"RequestID":    requestID,
 		"ExpiresIn":    time.Until(req.ExpiresAt).Round(time.Second).String(),
@@ -462,7 +462,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "dashboard.html", map[string]interface{}{
-		"Title":           "Dashboard - Coldforge Signer",
+		"Title":           "Dashboard - Cloistr Signer",
 		"User":            user,
 		"Status":          status,
 		"KeyCount":        len(keys),
@@ -479,7 +479,7 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
 	keys, _ := h.storage.ListKeys(r.Context())
 
 	h.render(w, "keys.html", map[string]interface{}{
-		"Title": "Keys - Coldforge Signer",
+		"Title": "Keys - Cloistr Signer",
 		"User":  user,
 		"Keys":  keys,
 	})
@@ -512,7 +512,7 @@ func (h *Handler) handleApps(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "apps.html", map[string]interface{}{
-		"Title": "Connected Apps - Coldforge Signer",
+		"Title": "Connected Apps - Cloistr Signer",
 		"User":  user,
 		"Apps":  apps,
 		"Keys":  keys,
@@ -531,7 +531,7 @@ func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "requests.html", map[string]interface{}{
-		"Title":    "Pending Requests - Coldforge Signer",
+		"Title":    "Pending Requests - Cloistr Signer",
 		"User":     user,
 		"Requests": allPending,
 	})
@@ -548,7 +548,7 @@ func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request) {
 	users, _ := h.storage.ListUsers(r.Context())
 
 	h.render(w, "users.html", map[string]interface{}{
-		"Title": "Users - Coldforge Signer",
+		"Title": "Users - Cloistr Signer",
 		"User":  user,
 		"Users": users,
 	})

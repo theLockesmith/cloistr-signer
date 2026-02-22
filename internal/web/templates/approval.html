@@ -157,7 +157,7 @@
         }
 
         approveBtn.addEventListener('click', async function() {
-            approveBtn.disabled = true;
+            ButtonState.setLoading(approveBtn, 'Approving...');
             denyBtn.disabled = true;
 
             const body = {
@@ -192,19 +192,19 @@
                     successDiv.style.display = 'block';
                 } else {
                     showError(data.error || 'Failed to approve');
-                    approveBtn.disabled = false;
+                    ButtonState.reset(approveBtn);
                     denyBtn.disabled = false;
                 }
             } catch (err) {
                 showError('Failed to approve request');
-                approveBtn.disabled = false;
+                ButtonState.reset(approveBtn);
                 denyBtn.disabled = false;
             }
         });
 
         denyBtn.addEventListener('click', async function() {
             approveBtn.disabled = true;
-            denyBtn.disabled = true;
+            ButtonState.setLoading(denyBtn, 'Denying...');
 
             try {
                 const response = await fetch('/web/api/deny', {
@@ -223,12 +223,12 @@
                 } else {
                     showError(data.error || 'Failed to deny');
                     approveBtn.disabled = false;
-                    denyBtn.disabled = false;
+                    ButtonState.reset(denyBtn);
                 }
             } catch (err) {
                 showError('Failed to deny request');
                 approveBtn.disabled = false;
-                denyBtn.disabled = false;
+                ButtonState.reset(denyBtn);
             }
         });
 

@@ -263,6 +263,9 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e.target === modal) modal.style.display = 'none';
     });
 
+    // Enable Enter key submission for create modal
+    enableEnterSubmit(modal, createForm);
+
     // Import key modal
     const importBtn = document.getElementById('import-key-btn');
     const importModal = document.getElementById('import-modal');
@@ -276,8 +279,14 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e.target === importModal) importModal.style.display = 'none';
     });
 
+    // Enable Enter key submission for import modal
+    enableEnterSubmit(importModal, importForm);
+
     importForm.addEventListener('submit', async function(e) {
         e.preventDefault();
+        const submitBtn = importForm.querySelector('button[type="submit"]');
+        ButtonState.setLoading(submitBtn, 'Importing...');
+
         const name = document.getElementById('import-name').value;
         const privateKey = document.getElementById('import-privkey').value.trim();
 
@@ -294,9 +303,11 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 const data = await response.json();
                 showMessage(data.error || 'Failed to import key', 'error');
+                ButtonState.reset(submitBtn);
             }
         } catch (err) {
             showMessage('Failed to import key', 'error');
+            ButtonState.reset(submitBtn);
         }
         importModal.style.display = 'none';
     });
@@ -314,8 +325,12 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e.target === proxyModal) proxyModal.style.display = 'none';
     });
 
+    // Enable Enter key submission for proxy modal
+    enableEnterSubmit(proxyModal, proxyForm);
+
     proxyForm.addEventListener('submit', async function(e) {
         e.preventDefault();
+        const submitBtn = proxyForm.querySelector('button[type="submit"]');
         const name = document.getElementById('proxy-name').value;
         const bunkerUri = document.getElementById('proxy-uri').value.trim();
 
@@ -323,6 +338,8 @@ document.addEventListener('DOMContentLoaded', function() {
             showMessage('Invalid URI - must start with bunker://', 'error');
             return;
         }
+
+        ButtonState.setLoading(submitBtn, 'Adding...');
 
         try {
             const response = await fetch('/api/v1/keys', {
@@ -337,15 +354,20 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 const data = await response.json();
                 showMessage(data.error || 'Failed to add proxy key', 'error');
+                ButtonState.reset(submitBtn);
             }
         } catch (err) {
             showMessage('Failed to add proxy key', 'error');
+            ButtonState.reset(submitBtn);
         }
         proxyModal.style.display = 'none';
     });
 
     createForm.addEventListener('submit', async function(e) {
         e.preventDefault();
+        const submitBtn = createForm.querySelector('button[type="submit"]');
+        ButtonState.setLoading(submitBtn, 'Creating...');
+
         const name = document.getElementById('key-name').value;
 
         try {
@@ -361,9 +383,11 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 const data = await response.json();
                 showMessage(data.error || 'Failed to create key', 'error');
+                ButtonState.reset(submitBtn);
             }
         } catch (err) {
             showMessage('Failed to create key', 'error');
+            ButtonState.reset(submitBtn);
         }
         modal.style.display = 'none';
     });
@@ -385,6 +409,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (!confirm(`Delete key "${name}"? This cannot be undone.`)) return;
 
+            ButtonState.setLoading(this, 'Deleting...');
+
             try {
                 const response = await fetch(`/api/v1/keys/${id}`, {method: 'DELETE'});
                 if (response.ok) {
@@ -392,9 +418,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     showMessage('Key deleted', 'success');
                 } else {
                     showMessage('Failed to delete key', 'error');
+                    ButtonState.reset(this);
                 }
             } catch (err) {
                 showMessage('Failed to delete key', 'error');
+                ButtonState.reset(this);
             }
         });
     });
@@ -505,9 +533,13 @@ document.addEventListener('DOMContentLoaded', function() {
         setTimeout(() => this.textContent = 'Copy', 1500);
     });
 
+    // Enable Enter key submission for connect paste form
+    enableEnterSubmit(connectModal, connectPasteForm);
+
     // Handle paste form submission (nostrconnect:// or bunker://)
     connectPasteForm.addEventListener('submit', async function(e) {
         e.preventDefault();
+        const submitBtn = connectPasteForm.querySelector('button[type="submit"]');
         const uri = document.getElementById('connect-paste-uri').value.trim();
 
         if (!uri.startsWith('nostrconnect://')) {
@@ -518,6 +550,8 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             return;
         }
+
+        ButtonState.setLoading(submitBtn, 'Connecting...');
 
         try {
             const response = await fetch('/api/v1/nostrconnect', {
@@ -534,8 +568,10 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 showMessage(data.error || 'Failed to connect', 'error');
             }
+            ButtonState.reset(submitBtn);
         } catch (err) {
             showMessage('Failed to connect: ' + err.message, 'error');
+            ButtonState.reset(submitBtn);
         }
     });
 
@@ -552,8 +588,12 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e.target === nostrconnectModal) nostrconnectModal.style.display = 'none';
     });
 
+    // Enable Enter key submission for nostrconnect modal
+    enableEnterSubmit(nostrconnectModal, nostrconnectForm);
+
     nostrconnectForm.addEventListener('submit', async function(e) {
         e.preventDefault();
+        const submitBtn = nostrconnectForm.querySelector('button[type="submit"]');
         const uri = document.getElementById('nostrconnect-uri').value.trim();
         const keyId = document.getElementById('nostrconnect-key').value;
 
@@ -561,6 +601,8 @@ document.addEventListener('DOMContentLoaded', function() {
             showMessage('Invalid URI - must start with nostrconnect://', 'error');
             return;
         }
+
+        ButtonState.setLoading(submitBtn, 'Connecting...');
 
         try {
             const response = await fetch('/api/v1/nostrconnect', {
@@ -577,8 +619,10 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 showMessage(data.error || 'Failed to connect', 'error');
             }
+            ButtonState.reset(submitBtn);
         } catch (err) {
             showMessage('Failed to connect: ' + err.message, 'error');
+            ButtonState.reset(submitBtn);
         }
     });
 
@@ -610,8 +654,14 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e.target === editModal) editModal.style.display = 'none';
     });
 
+    // Enable Enter key submission for edit modal
+    enableEnterSubmit(editModal, editForm);
+
     editForm.addEventListener('submit', async function(e) {
         e.preventDefault();
+        const submitBtn = editForm.querySelector('button[type="submit"]');
+        ButtonState.setLoading(submitBtn, 'Saving...');
+
         const id = editKeyId.value;
         const name = editName.value;
         const relaysText = editRelays.value.trim();
@@ -630,9 +680,11 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 const data = await response.json();
                 showMessage(data.error || 'Failed to update key', 'error');
+                ButtonState.reset(submitBtn);
             }
         } catch (err) {
             showMessage('Failed to update key', 'error');
+            ButtonState.reset(submitBtn);
         }
         editModal.style.display = 'none';
     });

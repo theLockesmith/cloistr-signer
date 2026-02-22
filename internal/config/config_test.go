@@ -47,8 +47,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Auth.JWTExpiry != 24 {
 		t.Errorf("Auth.JWTExpiry = %d, want 24", cfg.Auth.JWTExpiry)
 	}
-	if cfg.Auth.MFAIssuer != "Coldforge" {
-		t.Errorf("Auth.MFAIssuer = %q, want %q", cfg.Auth.MFAIssuer, "Coldforge")
+	if cfg.Auth.MFAIssuer != "Cloistr" {
+		t.Errorf("Auth.MFAIssuer = %q, want %q", cfg.Auth.MFAIssuer, "Cloistr")
 	}
 	if cfg.Auth.MaxFailedLogins != 5 {
 		t.Errorf("Auth.MaxFailedLogins = %d, want 5", cfg.Auth.MaxFailedLogins)
@@ -68,8 +68,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Audit.Backend != "memory" {
 		t.Errorf("Audit.Backend = %q, want %q", cfg.Audit.Backend, "memory")
 	}
-	if cfg.Service.Name != "Coldforge Signer" {
-		t.Errorf("Service.Name = %q, want %q", cfg.Service.Name, "Coldforge Signer")
+	if cfg.Service.Name != "Cloistr Signer" {
+		t.Errorf("Service.Name = %q, want %q", cfg.Service.Name, "Cloistr Signer")
 	}
 	if cfg.Service.PublishNIP89 != false {
 		t.Errorf("Service.PublishNIP89 = %v, want false", cfg.Service.PublishNIP89)

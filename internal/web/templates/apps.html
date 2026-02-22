@@ -182,6 +182,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
             if (!confirm('Revoke access for this app? It will need to reconnect.')) return;
 
+            ButtonState.setLoading(this, 'Revoking...');
+
             try {
                 const response = await fetch(`/api/v1/keys/${keyId}/permissions/${pubkey}`, {
                     method: 'DELETE'
@@ -191,9 +193,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     showMessage('Access revoked', 'success');
                 } else {
                     showMessage('Failed to revoke access', 'error');
+                    ButtonState.reset(this);
                 }
             } catch (err) {
                 showMessage('Failed to revoke access', 'error');
+                ButtonState.reset(this);
             }
         });
     });
@@ -211,8 +215,12 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e.target === nostrconnectModal) nostrconnectModal.style.display = 'none';
     });
 
+    // Enable Enter key submission for nostrconnect modal
+    enableEnterSubmit(nostrconnectModal, nostrconnectForm);
+
     nostrconnectForm.addEventListener('submit', async function(e) {
         e.preventDefault();
+        const submitBtn = nostrconnectForm.querySelector('button[type="submit"]');
         const uri = document.getElementById('nostrconnect-uri').value.trim();
         const keyId = document.getElementById('nostrconnect-key').value;
 
@@ -224,6 +232,8 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             return;
         }
+
+        ButtonState.setLoading(submitBtn, 'Connecting...');
 
         try {
             const response = await fetch('/api/v1/nostrconnect', {
@@ -240,9 +250,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 setTimeout(() => location.reload(), 1500);
             } else {
                 showMessage(data.error || 'Failed to connect', 'error');
+                ButtonState.reset(submitBtn);
             }
         } catch (err) {
             showMessage('Failed to connect: ' + err.message, 'error');
+            ButtonState.reset(submitBtn);
         }
     });
 
@@ -288,6 +300,9 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e.target === editModal) editModal.style.display = 'none';
     });
 
+    // Enable Enter key submission for edit permission modal
+    enableEnterSubmit(editModal, editForm);
+
     // Kind preset buttons
     document.querySelectorAll('.preset-btn').forEach(btn => {
         btn.addEventListener('click', function() {
@@ -297,6 +312,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     editForm.addEventListener('submit', async function(e) {
         e.preventDefault();
+        const submitBtn = editForm.querySelector('button[type="submit"]');
 
         const keyPubkey = document.getElementById('edit-key-pubkey').value;
         const userPubkey = document.getElementById('edit-user-pubkey').value;
@@ -311,6 +327,8 @@ document.addEventListener('DOMContentLoaded', function() {
             showMessage('Select at least one method', 'error');
             return;
         }
+
+        ButtonState.setLoading(submitBtn, 'Saving...');
 
         // Parse allowed kinds
         const kindsInput = document.getElementById('edit-allowed-kinds').value.trim();
@@ -339,9 +357,11 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 const data = await response.json();
                 showMessage(data.error || 'Failed to update permission', 'error');
+                ButtonState.reset(submitBtn);
             }
         } catch (err) {
             showMessage('Failed to update permission: ' + err.message, 'error');
+            ButtonState.reset(submitBtn);
         }
     });
 });

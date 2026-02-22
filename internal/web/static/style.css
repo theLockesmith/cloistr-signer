@@ -1,4 +1,4 @@
-/* Coldforge Signer Web UI Styles */
+/* Cloistr Signer Web UI Styles */
 
 :root {
     --bg-primary: #0d1117;
@@ -55,9 +55,22 @@ a:hover {
 }
 
 .nav-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     font-size: 1.25rem;
     font-weight: 600;
     color: var(--text-primary);
+    text-decoration: none;
+}
+
+.nav-brand:hover {
+    color: var(--accent-primary);
+}
+
+.nav-logo {
+    height: 28px;
+    width: auto;
 }
 
 .nav-links {
@@ -128,6 +141,33 @@ a:hover {
 .btn-sm {
     padding: 0.25rem 0.5rem;
     font-size: 0.75rem;
+}
+
+.btn.loading {
+    position: relative;
+    color: transparent !important;
+}
+
+.btn.loading::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 16px;
+    height: 16px;
+    margin: -8px 0 0 -8px;
+    border: 2px solid transparent;
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+.btn-primary.loading::after {
+    border-top-color: #fff;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
 }
 
 .btn-lg {

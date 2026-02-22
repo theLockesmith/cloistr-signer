@@ -70,6 +70,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     form.addEventListener('submit', async function(e) {
         e.preventDefault();
+        const submitBtn = form.querySelector('button[type="submit"]');
 
         const username = document.getElementById('username').value;
         const email = document.getElementById('email').value;
@@ -82,6 +83,8 @@ document.addEventListener('DOMContentLoaded', function() {
             showError('Passwords do not match');
             return;
         }
+
+        ButtonState.setLoading(submitBtn, 'Registering...');
 
         try {
             const response = await fetch('/web/api/register', {
@@ -106,9 +109,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 }, 1500);
             } else {
                 showError(data.error || 'Registration failed');
+                ButtonState.reset(submitBtn);
             }
         } catch (err) {
             showError('Registration failed');
+            ButtonState.reset(submitBtn);
         }
     });
 

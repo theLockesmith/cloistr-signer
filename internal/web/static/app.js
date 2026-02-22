@@ -1,4 +1,36 @@
-// Coldforge Signer Web UI JavaScript
+// Cloistr Signer Web UI JavaScript
+
+// Button loading state utilities
+const ButtonState = {
+    setLoading(button, loadingText = 'Loading...') {
+        button.disabled = true;
+        button.dataset.originalText = button.textContent;
+        button.textContent = loadingText;
+        button.classList.add('loading');
+    },
+
+    reset(button) {
+        button.disabled = false;
+        if (button.dataset.originalText) {
+            button.textContent = button.dataset.originalText;
+            delete button.dataset.originalText;
+        }
+        button.classList.remove('loading');
+    }
+};
+
+// Modal Enter key support - call this for each modal form
+function enableEnterSubmit(modal, form) {
+    modal.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey && e.target.tagName !== 'TEXTAREA') {
+            e.preventDefault();
+            const submitBtn = form.querySelector('button[type="submit"], button.btn-primary:last-child');
+            if (submitBtn && !submitBtn.disabled) {
+                submitBtn.click();
+            }
+        }
+    });
+}
 
 // Utility functions
 const API = {
@@ -56,7 +88,7 @@ const NIP07 = {
     },
 
     async createChallenge() {
-        const challenge = 'coldforge-auth-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+        const challenge = 'cloistr-auth-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
         return challenge;
     }
 };

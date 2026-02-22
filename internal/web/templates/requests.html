@@ -55,6 +55,7 @@ document.addEventListener('DOMContentLoaded', function() {
         btn.addEventListener('click', async function() {
             const id = this.dataset.id;
             const row = this.closest('tr');
+            ButtonState.setLoading(this, 'Approving...');
 
             try {
                 const response = await fetch('/web/api/approve', {
@@ -70,9 +71,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 } else {
                     const data = await response.json();
                     showMessage(data.error || 'Failed to approve', 'error');
+                    ButtonState.reset(this);
                 }
             } catch (err) {
                 showMessage('Failed to approve request', 'error');
+                ButtonState.reset(this);
             }
         });
     });
@@ -82,6 +85,7 @@ document.addEventListener('DOMContentLoaded', function() {
         btn.addEventListener('click', async function() {
             const id = this.dataset.id;
             const row = this.closest('tr');
+            ButtonState.setLoading(this, 'Denying...');
 
             try {
                 const response = await fetch('/web/api/deny', {
@@ -97,9 +101,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 } else {
                     const data = await response.json();
                     showMessage(data.error || 'Failed to deny', 'error');
+                    ButtonState.reset(this);
                 }
             } catch (err) {
                 showMessage('Failed to deny request', 'error');
+                ButtonState.reset(this);
             }
         });
     });

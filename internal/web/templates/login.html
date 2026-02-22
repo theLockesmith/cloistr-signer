@@ -71,11 +71,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // NIP-07 login
     nip07Button.addEventListener('click', async function() {
         try {
-            nip07Button.disabled = true;
-            nip07Button.textContent = 'Signing...';
+            ButtonState.setLoading(nip07Button, 'Signing...');
 
             const pubkey = await window.nostr.getPublicKey();
-            const challenge = 'coldforge-login-' + Date.now();
+            const challenge = 'cloistr-login-' + Date.now();
 
             // Create a kind:1 event as challenge
             const event = {
@@ -103,19 +102,19 @@ document.addEventListener('DOMContentLoaded', function() {
                 window.location.href = data.redirect;
             } else {
                 showError(data.error || 'Login failed');
-                nip07Button.disabled = false;
-                nip07Button.textContent = 'Login with Nostr Extension';
+                ButtonState.reset(nip07Button);
             }
         } catch (err) {
             showError(err.message || 'NIP-07 login failed');
-            nip07Button.disabled = false;
-            nip07Button.textContent = 'Login with Nostr Extension';
+            ButtonState.reset(nip07Button);
         }
     });
 
     // Password login
     form.addEventListener('submit', async function(e) {
         e.preventDefault();
+        const submitBtn = form.querySelector('button[type="submit"]');
+        ButtonState.setLoading(submitBtn, 'Logging in...');
 
         const username = document.getElementById('username').value;
         const password = document.getElementById('password').value;
@@ -137,6 +136,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (data.mfa_required) {
                 mfaGroup.style.display = 'block';
                 document.getElementById('mfa_code').focus();
+                ButtonState.reset(submitBtn);
                 return;
             }
 
@@ -144,9 +144,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 window.location.href = data.redirect;
             } else {
                 showError(data.error || 'Login failed');
+                ButtonState.reset(submitBtn);
             }
         } catch (err) {
             showError('Login failed');
+            ButtonState.reset(submitBtn);
         }
     });
 
