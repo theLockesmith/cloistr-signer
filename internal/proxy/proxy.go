@@ -73,8 +73,9 @@ func NewClient(cfg *config.Config) *Client {
 	}
 }
 
-// Connect establishes a connection to an upstream signer
-func (c *Client) Connect(ctx context.Context, bunkerURI string) (*UpstreamConnection, error) {
+// Connect establishes a connection to an upstream signer using the provided local keypair.
+// The local keypair should be persistent to maintain permissions across restarts.
+func (c *Client) Connect(ctx context.Context, bunkerURI string, localPrivkey, localPubkey string) (*UpstreamConnection, error) {
 	// Parse the bunker URI
 	uri, err := bunker.Parse(bunkerURI)
 	if err != nil {
@@ -87,13 +88,6 @@ func (c *Client) Connect(ctx context.Context, bunkerURI string) (*UpstreamConnec
 	c.connMu.RUnlock()
 	if exists && existing.connected {
 		return existing, nil
-	}
-
-	// Generate an ephemeral keypair for this connection
-	localPrivkey := nostr.GeneratePrivateKey()
-	localPubkey, err := nostr.GetPublicKey(localPrivkey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive public key: %w", err)
 	}
 
 	if len(uri.Relays) == 0 {
@@ -131,8 +125,21 @@ func (c *Client) Connect(ctx context.Context, bunkerURI string) (*UpstreamConnec
 		return nil, fmt.Errorf("failed to connect to any upstream relay: %w", lastErr)
 	}
 
-	// Subscribe to responses from the upstream signer
-	go conn.subscribeToResponses()
+	// Subscribe to responses from the upstream signer BEFORE sending any requests
+	// This avoids race conditions where we send a request before the subscription is ready
+	subReady := make(chan struct{})
+	go conn.subscribeToResponses(subReady)
+
+	// Wait for subscription to be established (with timeout)
+	select {
+	case <-subReady:
+		// Subscription is ready
+	case <-time.After(5 * time.Second):
+		cancel()
+		return nil, fmt.Errorf("timeout waiting for upstream subscription")
+	case <-connCtx.Done():
+		return nil, connCtx.Err()
+	}
 
 	conn.connected = true
 
@@ -159,8 +166,9 @@ func (c *Client) Connect(ctx context.Context, bunkerURI string) (*UpstreamConnec
 	return conn, nil
 }
 
-// GetConnection returns an existing connection or creates a new one
-func (c *Client) GetConnection(ctx context.Context, bunkerURI string) (*UpstreamConnection, error) {
+// GetConnection returns an existing connection or creates a new one.
+// The local keypair should be persistent (from the proxy key) to maintain permissions.
+func (c *Client) GetConnection(ctx context.Context, bunkerURI string, localPrivkey, localPubkey string) (*UpstreamConnection, error) {
 	// Parse to get the pubkey
 	uri, err := bunker.Parse(bunkerURI)
 	if err != nil {
@@ -175,7 +183,7 @@ func (c *Client) GetConnection(ctx context.Context, bunkerURI string) (*Upstream
 		return conn, nil
 	}
 
-	return c.Connect(ctx, bunkerURI)
+	return c.Connect(ctx, bunkerURI, localPrivkey, localPubkey)
 }
 
 // Disconnect closes a connection to an upstream signer
@@ -201,7 +209,7 @@ func (c *Client) Close() {
 }
 
 // subscribeToResponses listens for NIP-46 responses from the upstream signer
-func (conn *UpstreamConnection) subscribeToResponses() {
+func (conn *UpstreamConnection) subscribeToResponses(ready chan<- struct{}) {
 	filters := nostr.Filters{{
 		Kinds:   []int{KindNIP46Response},
 		Authors: []string{conn.URI.SignerPubkey},
@@ -211,8 +219,17 @@ func (conn *UpstreamConnection) subscribeToResponses() {
 	sub, err := conn.relay.Subscribe(conn.ctx, filters)
 	if err != nil {
 		slog.Error("failed to subscribe to upstream responses", "error", err)
+		close(ready) // Signal ready even on error to avoid blocking
 		return
 	}
+
+	// Signal that subscription is established
+	close(ready)
+
+	slog.Debug("subscription to upstream established",
+		"upstream", conn.URI.SignerPubkey[:16]+"...",
+		"local", conn.LocalPubkey[:16]+"...",
+	)
 
 	for {
 		select {

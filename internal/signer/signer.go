@@ -496,7 +496,7 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 	// Check if this is a proxy key - forward certain methods to upstream
 	bunkerURI, isProxy := s.proxyKeys[targetPubkey]
 	if isProxy && s.shouldProxyMethod(req.Method) {
-		return s.handleProxyRequest(ctx, bunkerURI, req)
+		return s.handleProxyRequest(ctx, targetPubkey, privateKey, bunkerURI, req)
 	}
 
 	switch req.Method {
@@ -507,7 +507,7 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 	case "get_public_key":
 		// For proxy keys, return the upstream pubkey
 		if isProxy {
-			return s.getUpstreamPubkey(ctx, bunkerURI)
+			return s.getUpstreamPubkey(ctx, targetPubkey, privateKey, bunkerURI)
 		}
 		return targetPubkey, nil
 	case "get_relays":
@@ -565,7 +565,7 @@ func (s *Signer) shouldProxyMethod(method string) bool {
 }
 
 // handleProxyRequest forwards a request to the upstream signer
-func (s *Signer) handleProxyRequest(ctx context.Context, bunkerURI string, req *NIP46Request) (string, error) {
+func (s *Signer) handleProxyRequest(ctx context.Context, targetPubkey, privateKey, bunkerURI string, req *NIP46Request) (string, error) {
 	// Check proxy mode - internal mode would handle this differently
 	// For now, we always use external (relay-based) proxying
 	if s.config.Proxy.Mode == "internal" {
@@ -575,8 +575,9 @@ func (s *Signer) handleProxyRequest(ctx context.Context, bunkerURI string, req *
 		slog.Debug("internal proxy mode - checking for local key")
 	}
 
-	// Get or create connection to upstream
-	conn, err := s.proxyClient.GetConnection(ctx, bunkerURI)
+	// Get or create connection to upstream using the proxy key's persistent keypair
+	// This ensures permissions persist across restarts
+	conn, err := s.proxyClient.GetConnection(ctx, bunkerURI, privateKey, targetPubkey)
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to upstream: %w", err)
 	}
@@ -596,8 +597,8 @@ func (s *Signer) handleProxyRequest(ctx context.Context, bunkerURI string, req *
 }
 
 // getUpstreamPubkey retrieves the public key from the upstream signer
-func (s *Signer) getUpstreamPubkey(ctx context.Context, bunkerURI string) (string, error) {
-	conn, err := s.proxyClient.GetConnection(ctx, bunkerURI)
+func (s *Signer) getUpstreamPubkey(ctx context.Context, targetPubkey, privateKey, bunkerURI string) (string, error) {
+	conn, err := s.proxyClient.GetConnection(ctx, bunkerURI, privateKey, targetPubkey)
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to upstream: %w", err)
 	}
