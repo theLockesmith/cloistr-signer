@@ -12,6 +12,7 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip04"
 	"github.com/nbd-wtf/go-nostr/nip44"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/bunker"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
@@ -574,13 +575,21 @@ func (s *Signer) shouldProxyMethod(method string) bool {
 
 // handleProxyRequest forwards a request to the upstream signer
 func (s *Signer) handleProxyRequest(ctx context.Context, targetPubkey, privateKey, bunkerURI string, req *NIP46Request) (string, error) {
-	// Check proxy mode - internal mode would handle this differently
-	// For now, we always use external (relay-based) proxying
-	if s.config.Proxy.Mode == "internal" {
-		// For internal mode, check if the upstream pubkey matches one of our local keys
-		// If so, we can handle it locally without a relay round-trip
-		// This is a future optimization
-		slog.Debug("internal proxy mode - checking for local key")
+	// Parse the bunker URI to get the upstream pubkey
+	uri, err := bunker.Parse(bunkerURI)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse bunker URI: %w", err)
+	}
+
+	// Check if the upstream key is local (same signer instance)
+	// If so, handle directly without a relay round-trip
+	if upstreamPrivkey, isLocal := s.keys[uri.SignerPubkey]; isLocal {
+		slog.Info("internal proxy: handling locally",
+			"method", req.Method,
+			"proxy", targetPubkey[:16]+"...",
+			"upstream", uri.SignerPubkey[:16]+"...",
+		)
+		return s.handleInternalProxy(ctx, uri.SignerPubkey, upstreamPrivkey, targetPubkey, req)
 	}
 
 	// Get or create connection to upstream using the proxy key's persistent keypair
@@ -604,8 +613,51 @@ func (s *Signer) handleProxyRequest(ctx context.Context, targetPubkey, privateKe
 	return response.Result, nil
 }
 
+// handleInternalProxy handles proxy requests when the upstream key is on the same signer instance.
+// This avoids the relay round-trip and handles requests directly.
+func (s *Signer) handleInternalProxy(ctx context.Context, upstreamPubkey, upstreamPrivkey, proxyPubkey string, req *NIP46Request) (string, error) {
+	// Create a "virtual" permission for the proxy key accessing the upstream key
+	// The proxy key is pre-authorized with full access to the upstream
+	perm := &storage.Permission{
+		KeyID:      upstreamPubkey,
+		UserPubkey: proxyPubkey,
+		Methods:    []string{"sign_event", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt", "get_public_key"},
+	}
+
+	// Handle the request directly using the upstream key
+	switch req.Method {
+	case "sign_event":
+		return s.handleSignEvent(ctx, upstreamPubkey, upstreamPrivkey, req.Params, perm)
+	case "nip04_encrypt":
+		return s.handleNIP04Encrypt(upstreamPrivkey, req.Params)
+	case "nip04_decrypt":
+		return s.handleNIP04Decrypt(upstreamPrivkey, req.Params)
+	case "nip44_encrypt":
+		return s.handleNIP44Encrypt(upstreamPrivkey, req.Params)
+	case "nip44_decrypt":
+		return s.handleNIP44Decrypt(upstreamPrivkey, req.Params)
+	case "get_public_key":
+		return upstreamPubkey, nil
+	default:
+		return "", fmt.Errorf("method %s not supported for internal proxy", req.Method)
+	}
+}
+
 // getUpstreamPubkey retrieves the public key from the upstream signer
 func (s *Signer) getUpstreamPubkey(ctx context.Context, targetPubkey, privateKey, bunkerURI string) (string, error) {
+	// Parse the bunker URI to get the upstream pubkey
+	uri, err := bunker.Parse(bunkerURI)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse bunker URI: %w", err)
+	}
+
+	// If upstream is local, return the pubkey directly
+	if _, isLocal := s.keys[uri.SignerPubkey]; isLocal {
+		slog.Debug("internal proxy: returning local upstream pubkey", "upstream", uri.SignerPubkey[:16]+"...")
+		return uri.SignerPubkey, nil
+	}
+
+	// Otherwise connect to the upstream signer
 	conn, err := s.proxyClient.GetConnection(ctx, bunkerURI, privateKey, targetPubkey)
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to upstream: %w", err)
