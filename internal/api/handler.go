@@ -12,6 +12,7 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/auth"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/bunker"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/signer"
@@ -148,13 +149,17 @@ func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
 
 type CreateKeyRequest struct {
 	Name       string `json:"name"`
-	PrivateKey string `json:"private_key,omitempty"` // Optional - generate if not provided
+	PrivateKey string `json:"private_key,omitempty"` // Optional - generate if not provided (for local keys)
+	BunkerURI  string `json:"bunker_uri,omitempty"`  // For proxy keys - bunker:// URI to upstream signer
+	KeyType    string `json:"key_type,omitempty"`    // "local" or "proxy" (default: local)
 }
 
 type KeyResponse struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
 	Pubkey          string    `json:"pubkey"`
+	KeyType         string    `json:"key_type,omitempty"`         // "local" or "proxy"
+	UpstreamPubkey  string    `json:"upstream_pubkey,omitempty"`  // For proxy keys
 	RequireApproval bool      `json:"require_approval"`
 	Relays          []string  `json:"relays,omitempty"` // Custom relays for this key
 	CreatedAt       time.Time `json:"created_at"`
@@ -241,6 +246,8 @@ func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
 			ID:              key.ID,
 			Name:            key.Name,
 			Pubkey:          key.Pubkey,
+			KeyType:         key.KeyType,
+			UpstreamPubkey:  key.UpstreamPubkey,
 			RequireApproval: key.RequireApproval,
 			Relays:          key.Relays,
 			CreatedAt:       key.CreatedAt,
@@ -254,6 +261,12 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	var req CreateKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Handle proxy keys differently
+	if req.KeyType == storage.KeyTypeProxy || req.BunkerURI != "" {
+		h.handleCreateProxyKey(w, r, req)
 		return
 	}
 
@@ -307,6 +320,7 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		ID:            pubkey[:16],
 		Name:          req.Name,
 		Pubkey:        pubkey,
+		KeyType:       storage.KeyTypeLocal,
 		EncryptedNsec: encryptedKey,
 		CreatedAt:     time.Now(),
 	}
@@ -329,6 +343,82 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		ID:              key.ID,
 		Name:            key.Name,
 		Pubkey:          key.Pubkey,
+		KeyType:         key.KeyType,
+		RequireApproval: key.RequireApproval,
+		Relays:          key.Relays,
+		CreatedAt:       key.CreatedAt,
+	})
+}
+
+// handleCreateProxyKey creates a proxy key that forwards to an upstream signer
+func (h *Handler) handleCreateProxyKey(w http.ResponseWriter, r *http.Request, req CreateKeyRequest) {
+	if req.BunkerURI == "" {
+		h.errorResponse(w, http.StatusBadRequest, "bunker_uri is required for proxy keys")
+		return
+	}
+
+	// Parse the bunker URI to extract upstream pubkey
+	uri, err := bunker.Parse(req.BunkerURI)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid bunker URI: "+err.Error())
+		return
+	}
+
+	// Generate a local keypair for NIP-46 communication
+	localPrivateKey := nostr.GeneratePrivateKey()
+	localPubkey, err := nostr.GetPublicKey(localPrivateKey)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to generate local key")
+		return
+	}
+
+	// Encrypt the local private key if encryptor is configured
+	encryptedKey := localPrivateKey
+	if h.encryptor != nil {
+		encrypted, err := h.encryptor.Encrypt(localPrivateKey)
+		if err != nil {
+			slog.Error("failed to encrypt private key", "error", err)
+			h.errorResponse(w, http.StatusInternalServerError, "failed to encrypt key")
+			return
+		}
+		encryptedKey = encrypted
+	}
+
+	key := &storage.Key{
+		ID:             localPubkey[:16],
+		Name:           req.Name,
+		Pubkey:         localPubkey, // Local pubkey for NIP-46 communication
+		KeyType:        storage.KeyTypeProxy,
+		EncryptedNsec:  encryptedKey,
+		BunkerURI:      req.BunkerURI,
+		UpstreamPubkey: uri.SignerPubkey, // The upstream signer's pubkey
+		CreatedAt:      time.Now(),
+	}
+
+	if err := h.storage.CreateKey(r.Context(), key); err != nil {
+		if err == storage.ErrKeyExists {
+			h.errorResponse(w, http.StatusConflict, "key already exists")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to create key")
+		return
+	}
+
+	// Register the proxy key with signer for NIP-46 handling
+	h.signer.RegisterProxyKey(localPubkey, localPrivateKey, req.BunkerURI)
+
+	slog.Info("created proxy key",
+		"name", req.Name,
+		"local_pubkey", localPubkey[:16]+"...",
+		"upstream_pubkey", uri.SignerPubkey[:16]+"...",
+	)
+
+	h.jsonResponse(w, http.StatusCreated, KeyResponse{
+		ID:              key.ID,
+		Name:            key.Name,
+		Pubkey:          key.Pubkey,
+		KeyType:         key.KeyType,
+		UpstreamPubkey:  key.UpstreamPubkey,
 		RequireApproval: key.RequireApproval,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
@@ -350,6 +440,8 @@ func (h *Handler) handleGetKey(w http.ResponseWriter, r *http.Request, id string
 		ID:              key.ID,
 		Name:            key.Name,
 		Pubkey:          key.Pubkey,
+		KeyType:         key.KeyType,
+		UpstreamPubkey:  key.UpstreamPubkey,
 		RequireApproval: key.RequireApproval,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,

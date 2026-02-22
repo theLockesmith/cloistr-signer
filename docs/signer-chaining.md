@@ -187,6 +187,30 @@ The delegate's identity is proven by the NIP-46 connection itself - only the hol
 3. Clicks "Revoke" next to the team member
 4. Permission deleted - next signature request fails immediately
 
+## Configuration
+
+### Proxy Mode
+
+When both the proxy key and target key are in the same signer instance, the signer can handle delegation internally or externally:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `internal` (default) | Handle locally without relay round-trip | Production - fast, private |
+| `external` | Always use NIP-46 over relays | Testing, auditing, protocol purity |
+
+Set via environment variable:
+```bash
+PROXY_MODE=internal   # Default: fast, private
+PROXY_MODE=external   # Always use relays
+```
+
+### Timeout
+
+Upstream proxy requests have a configurable timeout:
+```bash
+PROXY_TIMEOUT=30  # Seconds (default: 30)
+```
+
 ## Security Considerations
 
 ### Trust Model

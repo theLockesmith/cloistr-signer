@@ -30,16 +30,30 @@ var (
 	ErrBunkerSecretInvalid = errors.New("invalid bunker secret")
 )
 
+// KeyType represents the type of key storage
+const (
+	KeyTypeLocal = "local" // Key is stored locally (has EncryptedNsec)
+	KeyTypeProxy = "proxy" // Key is proxied to upstream signer (has BunkerURI)
+)
+
 // Key represents a stored signing key
 type Key struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
 	Pubkey          string    `json:"pubkey"`
-	EncryptedNsec   string    `json:"-"` // Never exposed in JSON
-	RequireApproval bool      `json:"require_approval"` // If true, requests need manual approval
-	Relays          []string  `json:"relays,omitempty"` // Custom relays for this key (nil = use global config)
+	KeyType         string    `json:"key_type"`          // "local" or "proxy" (default: local)
+	EncryptedNsec   string    `json:"-"`                 // For local keys: never exposed in JSON
+	BunkerURI       string    `json:"-"`                 // For proxy keys: bunker:// URI to upstream signer
+	UpstreamPubkey  string    `json:"upstream_pubkey,omitempty"` // For proxy keys: pubkey of the upstream signer
+	RequireApproval bool      `json:"require_approval"`  // If true, requests need manual approval
+	Relays          []string  `json:"relays,omitempty"`  // Custom relays for this key (nil = use global config)
 	CreatedAt       time.Time `json:"created_at"`
 	CreatedBy       string    `json:"created_by"`
+}
+
+// IsProxy returns true if this is a proxy key
+func (k *Key) IsProxy() bool {
+	return k.KeyType == KeyTypeProxy
 }
 
 // Permission defines what a user can do with a key

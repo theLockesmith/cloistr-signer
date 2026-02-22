@@ -16,6 +16,7 @@ import (
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
 	relay "git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/proxy"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
@@ -70,7 +71,9 @@ type Signer struct {
 	storage        storage.Storage
 	relayClient    *relay.Client
 	encryptor      *crypto.Encryptor
+	proxyClient    *proxy.Client                      // Client for upstream signer connections
 	keys           map[string]string                  // pubkey -> private key (hex)
+	proxyKeys      map[string]string                  // pubkey -> bunker URI (for proxy keys)
 	pendingCtx     map[string]*pendingRequestContext  // requestID -> context
 	pendingCtxLock sync.RWMutex
 	cancel         context.CancelFunc
@@ -83,7 +86,9 @@ func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, e
 		storage:     store,
 		relayClient: relayClient,
 		encryptor:   encryptor,
+		proxyClient: proxy.NewClient(cfg),
 		keys:        make(map[string]string),
+		proxyKeys:   make(map[string]string),
 		pendingCtx:  make(map[string]*pendingRequestContext),
 	}
 }
@@ -105,17 +110,29 @@ func (s *Signer) Start(ctx context.Context) error {
 
 	// Load any existing keys into runtime map
 	for _, key := range keys {
+		// Decrypt the local private key if needed (both local and proxy keys have this)
 		privateKey := key.EncryptedNsec
-		// Decrypt if encrypted and encryptor is available
-		if crypto.IsEncrypted(privateKey) && s.encryptor != nil {
-			decrypted, err := s.encryptor.Decrypt(privateKey)
-			if err != nil {
-				slog.Error("failed to decrypt key", "pubkey", key.Pubkey[:16]+"...", "error", err)
-				continue
+		if privateKey != "" {
+			if crypto.IsEncrypted(privateKey) && s.encryptor != nil {
+				decrypted, err := s.encryptor.Decrypt(privateKey)
+				if err != nil {
+					slog.Error("failed to decrypt key", "pubkey", key.Pubkey[:16]+"...", "error", err)
+					continue
+				}
+				privateKey = decrypted
 			}
-			privateKey = decrypted
+			s.keys[key.Pubkey] = privateKey
 		}
-		s.keys[key.Pubkey] = privateKey
+
+		// Track proxy keys separately for forwarding
+		if key.IsProxy() {
+			s.proxyKeys[key.Pubkey] = key.BunkerURI
+			upstreamShort := "unknown"
+			if key.UpstreamPubkey != "" && len(key.UpstreamPubkey) >= 16 {
+				upstreamShort = key.UpstreamPubkey[:16] + "..."
+			}
+			slog.Info("loaded proxy key", "pubkey", key.Pubkey[:16]+"...", "upstream", upstreamShort)
+		}
 	}
 
 	if len(keys) == 0 {
@@ -149,6 +166,12 @@ func (s *Signer) Stop() {
 // RegisterKey registers a key for signing (runtime, not persisted)
 func (s *Signer) RegisterKey(pubkey, privateKeyHex string) {
 	s.keys[pubkey] = privateKeyHex
+}
+
+// RegisterProxyKey registers a proxy key that forwards to an upstream signer (runtime, not persisted)
+func (s *Signer) RegisterProxyKey(pubkey, privateKeyHex, bunkerURI string) {
+	s.keys[pubkey] = privateKeyHex
+	s.proxyKeys[pubkey] = bunkerURI
 }
 
 func (s *Signer) handleEvent(event *nostr.Event) {
@@ -470,12 +493,22 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 		}
 	}
 
+	// Check if this is a proxy key - forward certain methods to upstream
+	bunkerURI, isProxy := s.proxyKeys[targetPubkey]
+	if isProxy && s.shouldProxyMethod(req.Method) {
+		return s.handleProxyRequest(ctx, bunkerURI, req)
+	}
+
 	switch req.Method {
 	case "connect":
 		return s.handleConnect(ctx, targetPubkey, clientPubkey, req.Params, perm)
 	case "ping":
 		return "pong", nil
 	case "get_public_key":
+		// For proxy keys, return the upstream pubkey
+		if isProxy {
+			return s.getUpstreamPubkey(ctx, bunkerURI)
+		}
 		return targetPubkey, nil
 	case "get_relays":
 		return s.handleGetRelays()
@@ -519,6 +552,57 @@ func (s *Signer) handleGetRelays() (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// shouldProxyMethod returns true if the method should be forwarded to the upstream signer
+func (s *Signer) shouldProxyMethod(method string) bool {
+	switch method {
+	case "sign_event", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt":
+		return true
+	default:
+		return false
+	}
+}
+
+// handleProxyRequest forwards a request to the upstream signer
+func (s *Signer) handleProxyRequest(ctx context.Context, bunkerURI string, req *NIP46Request) (string, error) {
+	// Check proxy mode - internal mode would handle this differently
+	// For now, we always use external (relay-based) proxying
+	if s.config.Proxy.Mode == "internal" {
+		// For internal mode, check if the upstream pubkey matches one of our local keys
+		// If so, we can handle it locally without a relay round-trip
+		// This is a future optimization
+		slog.Debug("internal proxy mode - checking for local key")
+	}
+
+	// Get or create connection to upstream
+	conn, err := s.proxyClient.GetConnection(ctx, bunkerURI)
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to upstream: %w", err)
+	}
+
+	// Forward the request
+	slog.Info("forwarding request to upstream",
+		"method", req.Method,
+		"upstream", conn.URI.SignerPubkey[:16]+"...",
+	)
+
+	response, err := conn.SendRequest(ctx, req.Method, req.Params)
+	if err != nil {
+		return "", fmt.Errorf("upstream request failed: %w", err)
+	}
+
+	return response.Result, nil
+}
+
+// getUpstreamPubkey retrieves the public key from the upstream signer
+func (s *Signer) getUpstreamPubkey(ctx context.Context, bunkerURI string) (string, error) {
+	conn, err := s.proxyClient.GetConnection(ctx, bunkerURI)
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to upstream: %w", err)
+	}
+
+	return conn.GetPublicKey(ctx)
 }
 
 func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey string, params []string, perm *storage.Permission) (string, error) {

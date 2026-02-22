@@ -564,6 +564,21 @@ a:hover {
     color: #000;
 }
 
+.badge-local {
+    background: var(--accent-primary);
+    color: #fff;
+}
+
+.badge-proxy {
+    background: var(--accent-warning);
+    color: #000;
+}
+
+/* Proxy key styling */
+.proxy-key {
+    background: rgba(var(--accent-warning-rgb, 255, 193, 7), 0.05);
+}
+
 /* Approval page */
 .approval-container {
     max-width: 500px;

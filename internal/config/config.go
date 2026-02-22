@@ -19,6 +19,13 @@ type Config struct {
 	Vault        VaultConfig   `yaml:"vault"`
 	Audit        AuditConfig   `yaml:"audit"`
 	Service      ServiceConfig `yaml:"service"`
+	Proxy        ProxyConfig   `yaml:"proxy"`
+}
+
+// ProxyConfig holds proxy/chaining configuration
+type ProxyConfig struct {
+	Mode    string `yaml:"mode"`    // "internal" or "external" (default: internal)
+	Timeout int    `yaml:"timeout"` // Timeout for upstream requests in seconds (default: 30)
 }
 
 // ServerConfig holds HTTP server configuration
@@ -108,6 +115,10 @@ func Load() (*Config, error) {
 			Name:         "Coldforge Signer",
 			Description:  "NIP-46 Remote Signing Service",
 			PublishNIP89: false,
+		},
+		Proxy: ProxyConfig{
+			Mode:    "internal",
+			Timeout: 30,
 		},
 	}
 
@@ -224,6 +235,14 @@ func Load() (*Config, error) {
 	}
 	if publishNIP89 := os.Getenv("PUBLISH_NIP89"); publishNIP89 == "true" || publishNIP89 == "1" {
 		cfg.Service.PublishNIP89 = true
+	}
+
+	// Proxy configuration
+	if proxyMode := os.Getenv("PROXY_MODE"); proxyMode != "" {
+		cfg.Proxy.Mode = proxyMode
+	}
+	if proxyTimeout := os.Getenv("PROXY_TIMEOUT"); proxyTimeout != "" {
+		cfg.Proxy.Timeout = getEnvInt("PROXY_TIMEOUT", 30)
 	}
 
 	return cfg, nil

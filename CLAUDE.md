@@ -204,6 +204,9 @@ The approval page can be shared via link for async authorization.
 | `SERVICE_URL` | Public service URL | (none) |
 | `NIP05_DOMAIN` | Domain for NIP-05 identifiers | (none) |
 | `PUBLISH_NIP89` | Publish NIP-89 announcements | `false` |
+| **Proxy/Chaining** (Phase 12) | | |
+| `PROXY_MODE` | How to handle local proxy keys: `internal` or `external` | `internal` |
+| `PROXY_TIMEOUT` | Timeout for upstream proxy requests in seconds | `30` |
 
 ### REQUIRE_APPROVAL Behavior
 
@@ -214,6 +217,18 @@ Controls how the signer handles requests from unknown clients (no existing permi
 - **`true`**: Requests wait for manual admin approval via the web UI (`/requests`) or admin DM commands. Opt-in for high-security or shared deployments where you want to vet each app.
 
 **Bunker Secret Validation**: When a client connects with a valid bunker:// URI secret, they are auto-approved with full access regardless of `REQUIRE_APPROVAL` setting. Secrets are one-time use and expire after 24 hours. If the secret is invalid or missing, the normal `REQUIRE_APPROVAL` behavior applies.
+
+### PROXY_MODE Behavior (Phase 12)
+
+Controls how proxy keys (keys stored as bunker:// URIs pointing to upstream signers) are handled:
+
+- **`internal` (default)**: When both the proxy key and the target key are in the same signer, handle the delegation internally without going through relays. Faster, more reliable, and more private.
+
+- **`external`**: Always use NIP-46 over relays, even for local-to-local proxying. Useful for testing, auditing, or if you want delegation visible on relays.
+
+**Multi-hop chains**: Proxy keys can chain through multiple signers (e.g., Personal → Business → Sub-brand). Each hop adds latency but the protocol supports unlimited depth.
+
+**Privacy note**: `internal` mode keeps your delegation structure private. `external` mode exposes delegation requests on relays as kind:24133 events.
 
 ## Development Status
 
@@ -354,16 +369,17 @@ Team Member's Client ◄── Personal Signer ◄────────┘
 - Team members keep their preferred signer setup
 - Business maintains full control over who can sign
 
-**Implementation - Proxy Key Support (eat our own dogfood):**
-- [ ] Add "proxy key" type to storage (bunker:// URI instead of local nsec)
-- [ ] NIP-46 client mode: connect to upstream signer for proxy keys
-- [ ] Forward sign_event/encrypt/decrypt requests to upstream
-- [ ] Web UI: Add proxy key via bunker:// URI (like importing, but remote)
-- [ ] Connection management: reconnect to upstream on failure
+**Implementation - Proxy Key Support (completed 2026-02-21):**
+- [x] Add "proxy key" type to storage (bunker:// URI + local keypair for NIP-46)
+- [x] NIP-46 client mode: `internal/proxy` package connects to upstream signers
+- [x] Forward sign_event/encrypt/decrypt requests to upstream
+- [x] Web UI: Add proxy key via bunker:// URI (keys page "Add Proxy Key" button)
+- [x] Proxy mode config: PROXY_MODE and PROXY_TIMEOUT environment variables
+- [ ] Connection management: reconnect to upstream on failure (TODO)
 - [ ] Test harness: spin up coldforge-signer (upstream) + cloistr-signer (proxy) for full chain
 
 **Implementation - Upstream Signer Enhancements:**
-- [ ] Document cloistr-signer as "upstream signer" for chained connections
+- [x] Document cloistr-signer as "upstream signer" for chained connections
 - [ ] Verify NIP-46 auth flow works when connecting signer is a proxy
 - [ ] Add "delegate pubkey" field to permissions (optional override for proxy scenarios)
 - [ ] Create onboarding flow: "Invite team member" generates bunker:// URI for their signer
@@ -373,7 +389,7 @@ Team Member's Client ◄── Personal Signer ◄────────┘
 **Ecosystem outreach:**
 - [x] Technical documentation (`docs/signer-chaining.md`)
 - [x] Blog post for Nostr community
-- [ ] Reference implementation complete (cloistr-signer as both upstream AND proxy)
+- [x] Reference implementation complete (cloistr-signer as both upstream AND proxy)
 - [ ] Feature requests to Amber, nsecbunker for "proxy key" support
 - [ ] Propose pattern as NIP-46 addendum (after adoption)
 

@@ -4,6 +4,7 @@
     <div style="display: flex; gap: 8px;">
         <button id="connect-app-btn" class="btn btn-secondary">Connect to App</button>
         <button id="import-key-btn" class="btn btn-secondary">Import Key</button>
+        <button id="add-proxy-btn" class="btn btn-secondary">Add Proxy Key</button>
         <button id="create-key-btn" class="btn btn-primary">Create Key</button>
     </div>
 </div>
@@ -15,6 +16,7 @@
         <thead>
             <tr>
                 <th>Name</th>
+                <th>Type</th>
                 <th>Public Key</th>
                 <th>Relays</th>
                 <th>Approval</th>
@@ -24,8 +26,15 @@
         </thead>
         <tbody>
             {{range .Keys}}
-            <tr data-id="{{.ID}}">
+            <tr data-id="{{.ID}}" class="{{if .IsProxy}}proxy-key{{end}}">
                 <td>{{.Name}}</td>
+                <td>
+                    {{if .IsProxy}}
+                        <span class="badge badge-proxy" title="Proxied to upstream signer">Proxy</span>
+                    {{else}}
+                        <span class="badge badge-local">Local</span>
+                    {{end}}
+                </td>
                 <td class="pubkey">{{truncate .Pubkey 24}}...</td>
                 <td>
                     {{if .Relays}}
@@ -50,7 +59,7 @@
             </tr>
             {{else}}
             <tr>
-                <td colspan="6" class="text-center text-muted">No keys created yet</td>
+                <td colspan="7" class="text-center text-muted">No keys created yet</td>
             </tr>
             {{end}}
         </tbody>
@@ -188,6 +197,33 @@
     </div>
 </div>
 
+<!-- Add Proxy Key Modal -->
+<div id="proxy-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+        <h2>Add Proxy Key</h2>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Connect to an upstream signer to sign as their identity. This enables <strong>signer chaining</strong> -
+            you can sign as a business account while keeping your personal signer.
+        </p>
+        <form id="proxy-form">
+            <div class="form-group">
+                <label for="proxy-name">Key Name</label>
+                <input type="text" id="proxy-name" name="name" required placeholder="e.g., Business Account">
+            </div>
+            <div class="form-group">
+                <label for="proxy-uri">Upstream Bunker URI</label>
+                <textarea id="proxy-uri" name="bunker_uri" required rows="3"
+                    placeholder="bunker://pubkey?relay=wss://..." class="monospace"></textarea>
+                <small>Paste the bunker:// URI from the upstream signer</small>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="cancel-proxy">Cancel</button>
+                <button type="submit" class="btn btn-primary">Add Proxy Key</button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <!-- Edit Key Modal -->
 <div id="edit-modal" class="modal" style="display: none;">
     <div class="modal-content">
@@ -263,6 +299,49 @@ document.addEventListener('DOMContentLoaded', function() {
             showMessage('Failed to import key', 'error');
         }
         importModal.style.display = 'none';
+    });
+
+    // Add Proxy Key modal
+    const proxyBtn = document.getElementById('add-proxy-btn');
+    const proxyModal = document.getElementById('proxy-modal');
+    const cancelProxy = document.getElementById('cancel-proxy');
+    const proxyForm = document.getElementById('proxy-form');
+
+    proxyBtn.addEventListener('click', () => proxyModal.style.display = 'flex');
+    cancelProxy.addEventListener('click', () => proxyModal.style.display = 'none');
+
+    proxyModal.addEventListener('click', function(e) {
+        if (e.target === proxyModal) proxyModal.style.display = 'none';
+    });
+
+    proxyForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const name = document.getElementById('proxy-name').value;
+        const bunkerUri = document.getElementById('proxy-uri').value.trim();
+
+        if (!bunkerUri.startsWith('bunker://')) {
+            showMessage('Invalid URI - must start with bunker://', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/v1/keys', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, bunker_uri: bunkerUri, key_type: 'proxy'})
+            });
+
+            if (response.ok) {
+                showMessage('Proxy key added successfully', 'success');
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                const data = await response.json();
+                showMessage(data.error || 'Failed to add proxy key', 'error');
+            }
+        } catch (err) {
+            showMessage('Failed to add proxy key', 'error');
+        }
+        proxyModal.style.display = 'none';
     });
 
     createForm.addEventListener('submit', async function(e) {
