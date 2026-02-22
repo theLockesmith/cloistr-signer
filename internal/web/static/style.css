@@ -950,6 +950,46 @@ a:hover {
     margin: 0;
 }
 
+/* Radio group for access levels */
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+}
+
+.radio-label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    cursor: pointer;
+    padding: 0.5rem;
+    border-radius: 4px;
+    transition: background 0.2s;
+}
+
+.radio-label:hover {
+    background: var(--bg-primary);
+}
+
+.radio-label input[type="radio"] {
+    margin-right: 0.5rem;
+}
+
+.radio-label span {
+    display: flex;
+    align-items: center;
+    font-weight: 500;
+}
+
+.radio-label small {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-left: 1.5rem;
+}
+
 /* Kind presets */
 .kind-presets {
     margin-top: 0.5rem;

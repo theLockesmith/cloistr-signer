@@ -52,6 +52,7 @@
                 <td>{{formatTime .CreatedAt}}</td>
                 <td>
                     <button class="btn btn-sm btn-primary connect-btn" data-id="{{.ID}}" data-name="{{.Name}}">Connect</button>
+                    <button class="btn btn-sm btn-success grant-btn" data-id="{{.ID}}" data-pubkey="{{.Pubkey}}" data-name="{{.Name}}" title="Grant signing access to another pubkey">Grant Access</button>
                     <button class="btn btn-sm edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-relays="{{range $i, $r := .Relays}}{{if $i}},{{end}}{{$r}}{{end}}">Edit</button>
                     <button class="btn btn-sm copy-btn" data-pubkey="{{.Pubkey}}">Copy Pubkey</button>
                     <button class="btn btn-sm btn-danger delete-btn" data-id="{{.ID}}" data-name="{{.Name}}">Delete</button>
@@ -201,26 +202,58 @@
 <div id="proxy-modal" class="modal" style="display: none;">
     <div class="modal-content">
         <h2>Add Proxy Key</h2>
-        <p class="text-muted" style="margin-bottom: 1rem;">
-            Connect to an upstream signer to sign as their identity. This enables <strong>signer chaining</strong> -
-            you can sign as a business account while keeping your personal signer.
-        </p>
-        <form id="proxy-form">
-            <div class="form-group">
-                <label for="proxy-name">Key Name</label>
-                <input type="text" id="proxy-name" name="name" required placeholder="e.g., Business Account">
+
+        <!-- Step 1: Form -->
+        <div id="proxy-step-form">
+            <p class="text-muted" style="margin-bottom: 1rem;">
+                Connect to an upstream signer to sign as their identity. This enables <strong>signer chaining</strong> -
+                you can sign as a business account while keeping your personal signer.
+            </p>
+            <form id="proxy-form">
+                <div class="form-group">
+                    <label for="proxy-name">Key Name</label>
+                    <input type="text" id="proxy-name" name="name" required placeholder="e.g., Business Account">
+                </div>
+                <div class="form-group">
+                    <label for="proxy-uri">Upstream Bunker URI</label>
+                    <textarea id="proxy-uri" name="bunker_uri" required rows="3"
+                        placeholder="bunker://pubkey?relay=wss://..." class="monospace"></textarea>
+                    <small>
+                        <strong>Two ways to get this:</strong><br>
+                        1. With secret: Get a bunker:// URI from upstream's "Connect" button (auto-approves)<br>
+                        2. Without secret: Use <code>bunker://&lt;upstream-pubkey&gt;?relay=&lt;relay-url&gt;</code> and ask the admin to "Grant Access" to your pubkey
+                    </small>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" id="cancel-proxy">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Add Proxy Key</button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Step 2: Success with pubkey -->
+        <div id="proxy-step-success" style="display: none;">
+            <div class="alert alert-success" style="margin-bottom: 1rem;">
+                Proxy key created successfully!
             </div>
+            <p style="margin-bottom: 1rem;">
+                <strong>Important:</strong> The upstream signer admin needs to grant access to this pubkey:
+            </p>
             <div class="form-group">
-                <label for="proxy-uri">Upstream Bunker URI</label>
-                <textarea id="proxy-uri" name="bunker_uri" required rows="3"
-                    placeholder="bunker://pubkey?relay=wss://..." class="monospace"></textarea>
-                <small>Paste the bunker:// URI from the upstream signer</small>
+                <label>Proxy Key Public Key</label>
+                <div class="input-group">
+                    <input type="text" id="proxy-pubkey-result" readonly class="monospace">
+                    <button type="button" class="btn btn-primary" id="copy-proxy-pubkey">Copy</button>
+                </div>
             </div>
+            <p class="text-muted" style="font-size: 0.9rem;">
+                Share this pubkey with the upstream signer admin. They should click <strong>"Grant Access"</strong>
+                on their key and paste this pubkey to authorize your proxy key.
+            </p>
             <div class="modal-actions">
-                <button type="button" class="btn btn-secondary" id="cancel-proxy">Cancel</button>
-                <button type="submit" class="btn btn-primary">Add Proxy Key</button>
+                <button type="button" class="btn btn-primary" id="proxy-done">Done</button>
             </div>
-        </form>
+        </div>
     </div>
 </div>
 
@@ -243,6 +276,80 @@
             <div class="modal-actions">
                 <button type="button" class="btn btn-secondary" id="cancel-edit">Cancel</button>
                 <button type="submit" class="btn btn-primary">Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Grant Access Modal -->
+<div id="grant-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+        <h2>Grant Access: <span id="grant-key-name"></span></h2>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Grant another user or signer permission to sign as this identity.
+            Perfect for delegating access to team members or proxy signers.
+        </p>
+        <form id="grant-form">
+            <input type="hidden" id="grant-key-pubkey">
+            <div class="form-group">
+                <label for="grant-user-pubkey">User's Public Key</label>
+                <input type="text" id="grant-user-pubkey" name="user_pubkey" required
+                    placeholder="npub1... or hex pubkey" class="monospace">
+                <small>The pubkey of the user or signer you want to grant access to</small>
+            </div>
+            <div class="form-group">
+                <label>Access Level</label>
+                <div class="radio-group">
+                    <label class="radio-label">
+                        <input type="radio" name="access_level" value="full" checked>
+                        <span>Full Access</span>
+                        <small>Can sign any event type</small>
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="access_level" value="custom">
+                        <span>Custom</span>
+                        <small>Choose specific methods</small>
+                    </label>
+                </div>
+            </div>
+            <div id="grant-methods-section" class="form-group" style="display: none;">
+                <label>Allowed Methods</label>
+                <div class="checkbox-group" id="grant-methods">
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="methods" value="sign_event" checked>
+                        <span>sign_event</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="methods" value="nip04_encrypt">
+                        <span>nip04_encrypt</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="methods" value="nip04_decrypt">
+                        <span>nip04_decrypt</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="methods" value="nip44_encrypt">
+                        <span>nip44_encrypt</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="methods" value="nip44_decrypt">
+                        <span>nip44_decrypt</span>
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="methods" value="get_public_key" checked>
+                        <span>get_public_key</span>
+                    </label>
+                </div>
+            </div>
+            <div id="grant-kinds-section" class="form-group" style="display: none;">
+                <label for="grant-allowed-kinds">Restrict to Event Kinds (optional)</label>
+                <input type="text" id="grant-allowed-kinds" name="allowed_kinds"
+                    placeholder="e.g., 1, 7, 30023" class="monospace">
+                <small>Comma-separated list of allowed event kinds. Leave empty for all kinds.</small>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="cancel-grant">Cancel</button>
+                <button type="submit" class="btn btn-success">Grant Access</button>
             </div>
         </form>
     </div>
@@ -317,8 +424,23 @@ document.addEventListener('DOMContentLoaded', function() {
     const proxyModal = document.getElementById('proxy-modal');
     const cancelProxy = document.getElementById('cancel-proxy');
     const proxyForm = document.getElementById('proxy-form');
+    const proxyStepForm = document.getElementById('proxy-step-form');
+    const proxyStepSuccess = document.getElementById('proxy-step-success');
+    const proxyPubkeyResult = document.getElementById('proxy-pubkey-result');
+    const copyProxyPubkey = document.getElementById('copy-proxy-pubkey');
+    const proxyDone = document.getElementById('proxy-done');
 
-    proxyBtn.addEventListener('click', () => proxyModal.style.display = 'flex');
+    function resetProxyModal() {
+        proxyStepForm.style.display = 'block';
+        proxyStepSuccess.style.display = 'none';
+        document.getElementById('proxy-name').value = '';
+        document.getElementById('proxy-uri').value = '';
+    }
+
+    proxyBtn.addEventListener('click', () => {
+        resetProxyModal();
+        proxyModal.style.display = 'flex';
+    });
     cancelProxy.addEventListener('click', () => proxyModal.style.display = 'none');
 
     proxyModal.addEventListener('click', function(e) {
@@ -348,11 +470,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 body: JSON.stringify({name: name, bunker_uri: bunkerUri, key_type: 'proxy'})
             });
 
+            const data = await response.json();
+
             if (response.ok) {
-                showMessage('Proxy key added successfully', 'success');
-                setTimeout(() => location.reload(), 1000);
+                // Show success step with pubkey
+                proxyPubkeyResult.value = data.pubkey;
+                proxyStepForm.style.display = 'none';
+                proxyStepSuccess.style.display = 'block';
+                ButtonState.reset(submitBtn);
             } else {
-                const data = await response.json();
                 showMessage(data.error || 'Failed to add proxy key', 'error');
                 ButtonState.reset(submitBtn);
             }
@@ -360,7 +486,17 @@ document.addEventListener('DOMContentLoaded', function() {
             showMessage('Failed to add proxy key', 'error');
             ButtonState.reset(submitBtn);
         }
+    });
+
+    copyProxyPubkey.addEventListener('click', function() {
+        navigator.clipboard.writeText(proxyPubkeyResult.value);
+        this.textContent = 'Copied!';
+        setTimeout(() => this.textContent = 'Copy', 1500);
+    });
+
+    proxyDone.addEventListener('click', () => {
         proxyModal.style.display = 'none';
+        location.reload();
     });
 
     createForm.addEventListener('submit', async function(e) {
@@ -688,6 +824,158 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         editModal.style.display = 'none';
     });
+
+    // Grant Access modal
+    const grantModal = document.getElementById('grant-modal');
+    const grantForm = document.getElementById('grant-form');
+    const cancelGrant = document.getElementById('cancel-grant');
+    const grantKeyName = document.getElementById('grant-key-name');
+    const grantKeyPubkey = document.getElementById('grant-key-pubkey');
+    const grantMethodsSection = document.getElementById('grant-methods-section');
+    const grantKindsSection = document.getElementById('grant-kinds-section');
+
+    document.querySelectorAll('.grant-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const id = this.dataset.id;
+            const pubkey = this.dataset.pubkey;
+            const name = this.dataset.name;
+
+            grantKeyPubkey.value = pubkey;
+            grantKeyName.textContent = name;
+            document.getElementById('grant-user-pubkey').value = '';
+            document.getElementById('grant-allowed-kinds').value = '';
+
+            // Reset to full access
+            document.querySelector('input[name="access_level"][value="full"]').checked = true;
+            grantMethodsSection.style.display = 'none';
+            grantKindsSection.style.display = 'none';
+
+            grantModal.style.display = 'flex';
+        });
+    });
+
+    // Toggle custom methods section
+    document.querySelectorAll('input[name="access_level"]').forEach(radio => {
+        radio.addEventListener('change', function() {
+            const isCustom = this.value === 'custom';
+            grantMethodsSection.style.display = isCustom ? 'block' : 'none';
+            grantKindsSection.style.display = isCustom ? 'block' : 'none';
+        });
+    });
+
+    cancelGrant.addEventListener('click', () => grantModal.style.display = 'none');
+    grantModal.addEventListener('click', function(e) {
+        if (e.target === grantModal) grantModal.style.display = 'none';
+    });
+
+    // Enable Enter key submission for grant modal
+    enableEnterSubmit(grantModal, grantForm);
+
+    grantForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const submitBtn = grantForm.querySelector('button[type="submit"]');
+
+        const keyPubkey = grantKeyPubkey.value;
+        let userPubkey = document.getElementById('grant-user-pubkey').value.trim();
+        const accessLevel = document.querySelector('input[name="access_level"]:checked').value;
+
+        // Convert npub to hex if needed
+        if (userPubkey.startsWith('npub1')) {
+            try {
+                // Simple bech32 decode for npub
+                userPubkey = npubToHex(userPubkey);
+            } catch (err) {
+                showMessage('Invalid npub format', 'error');
+                return;
+            }
+        }
+
+        // Validate hex pubkey format
+        if (!/^[0-9a-fA-F]{64}$/.test(userPubkey)) {
+            showMessage('Invalid pubkey - must be 64 hex characters or valid npub', 'error');
+            return;
+        }
+
+        ButtonState.setLoading(submitBtn, 'Granting...');
+
+        // Build methods array
+        let methods = ['*'];
+        let allowedKinds = [];
+
+        if (accessLevel === 'custom') {
+            methods = [];
+            document.querySelectorAll('#grant-methods input[type="checkbox"]:checked').forEach(cb => {
+                methods.push(cb.value);
+            });
+            if (methods.length === 0) {
+                showMessage('Select at least one method', 'error');
+                ButtonState.reset(submitBtn);
+                return;
+            }
+
+            // Parse allowed kinds
+            const kindsInput = document.getElementById('grant-allowed-kinds').value.trim();
+            if (kindsInput) {
+                allowedKinds = kindsInput.split(',')
+                    .map(k => parseInt(k.trim(), 10))
+                    .filter(k => !isNaN(k));
+            }
+        }
+
+        try {
+            const response = await fetch(`/api/v1/keys/${keyPubkey}/permissions`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    user_pubkey: userPubkey,
+                    methods: methods,
+                    allowed_kinds: allowedKinds
+                })
+            });
+
+            if (response.ok) {
+                showMessage('Access granted successfully!', 'success');
+                grantModal.style.display = 'none';
+            } else {
+                const data = await response.json();
+                showMessage(data.error || 'Failed to grant access', 'error');
+            }
+            ButtonState.reset(submitBtn);
+        } catch (err) {
+            showMessage('Failed to grant access: ' + err.message, 'error');
+            ButtonState.reset(submitBtn);
+        }
+    });
+
+    // Simple npub to hex converter (bech32 decode)
+    function npubToHex(npub) {
+        const ALPHABET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+        const data = npub.slice(5); // Remove 'npub1' prefix
+
+        let bits = [];
+        for (let i = 0; i < data.length; i++) {
+            const val = ALPHABET.indexOf(data[i]);
+            if (val === -1) throw new Error('Invalid character');
+            for (let j = 4; j >= 0; j--) {
+                bits.push((val >> j) & 1);
+            }
+        }
+
+        // Remove checksum (last 6 * 5 = 30 bits)
+        bits = bits.slice(0, bits.length - 30);
+
+        // Convert 5-bit to 8-bit
+        let bytes = [];
+        for (let i = 0; i + 8 <= bits.length; i += 8) {
+            let byte = 0;
+            for (let j = 0; j < 8; j++) {
+                byte = (byte << 1) | bits[i + j];
+            }
+            bytes.push(byte);
+        }
+
+        return bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+    }
 
     function showMessage(text, type) {
         messageDiv.textContent = text;
