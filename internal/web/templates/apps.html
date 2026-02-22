@@ -18,7 +18,8 @@
             <thead>
                 <tr>
                     <th>Client</th>
-                    <th>Permissions</th>
+                    <th>Methods</th>
+                    <th>Allowed Kinds</th>
                     <th>Expires</th>
                     <th>Actions</th>
                 </tr>
@@ -26,10 +27,19 @@
             <tbody>
                 {{range .Permissions}}
                 <tr>
-                    <td class="pubkey">{{truncate .UserPubkey 20}}...</td>
+                    <td class="pubkey">{{npubShort .UserPubkey}}</td>
                     <td>
                         {{range .Methods}}
                         <span class="badge">{{.}}</span>
+                        {{end}}
+                    </td>
+                    <td class="allowed-kinds-cell">
+                        {{if .AllowedKinds}}
+                        {{range .AllowedKinds}}
+                        <span class="kind-tag" title="{{kindName .}}">{{.}}</span>
+                        {{end}}
+                        {{else}}
+                        <span class="text-muted">All kinds</span>
                         {{end}}
                     </td>
                     <td>
@@ -40,7 +50,11 @@
                         {{end}}
                     </td>
                     <td>
-                        <button class="btn btn-sm copy-btn" data-pubkey="{{.UserPubkey}}">Copy Pubkey</button>
+                        <button class="btn btn-sm edit-btn"
+                                data-key-pubkey="{{$.KeyPubkey}}"
+                                data-pubkey="{{.UserPubkey}}"
+                                data-methods="{{json .Methods}}"
+                                data-kinds="{{json .AllowedKinds}}">Edit</button>
                         <button class="btn btn-sm btn-danger revoke-btn"
                                 data-key-id="{{$.KeyID}}"
                                 data-pubkey="{{.UserPubkey}}">Revoke</button>
@@ -88,6 +102,60 @@
             <div class="modal-actions">
                 <button type="button" class="btn btn-secondary" id="cancel-nostrconnect">Cancel</button>
                 <button type="submit" class="btn btn-primary">Connect</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Edit Permission Modal -->
+<div id="edit-permission-modal" class="modal" style="display: none;">
+    <div class="modal-content modal-lg">
+        <h2>Edit Permission</h2>
+        <p class="text-muted" style="margin-bottom: 1rem;">Configure what this app can do with your key.</p>
+
+        <form id="edit-permission-form">
+            <input type="hidden" id="edit-key-pubkey" name="key_pubkey">
+            <input type="hidden" id="edit-user-pubkey" name="user_pubkey">
+
+            <div class="form-group">
+                <label>Client Pubkey</label>
+                <input type="text" id="edit-client-display" disabled class="monospace">
+            </div>
+
+            <div class="form-group">
+                <label>Allowed Methods</label>
+                <div class="checkbox-group" id="methods-checkboxes">
+                    <label class="checkbox-label"><input type="checkbox" name="methods" value="connect"> connect</label>
+                    <label class="checkbox-label"><input type="checkbox" name="methods" value="sign_event"> sign_event</label>
+                    <label class="checkbox-label"><input type="checkbox" name="methods" value="ping"> ping</label>
+                    <label class="checkbox-label"><input type="checkbox" name="methods" value="get_public_key"> get_public_key</label>
+                    <label class="checkbox-label"><input type="checkbox" name="methods" value="get_relays"> get_relays</label>
+                    <label class="checkbox-label"><input type="checkbox" name="methods" value="nip04_encrypt"> nip04_encrypt</label>
+                    <label class="checkbox-label"><input type="checkbox" name="methods" value="nip04_decrypt"> nip04_decrypt</label>
+                    <label class="checkbox-label"><input type="checkbox" name="methods" value="nip44_encrypt"> nip44_encrypt</label>
+                    <label class="checkbox-label"><input type="checkbox" name="methods" value="nip44_decrypt"> nip44_decrypt</label>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="edit-allowed-kinds">Allowed Event Kinds (for sign_event)</label>
+                <input type="text" id="edit-allowed-kinds" name="allowed_kinds"
+                    placeholder="Leave empty for all kinds, or enter: 1, 7, 6"
+                    class="monospace">
+                <small>Comma-separated list of event kinds this app can sign. Common kinds: 1 (note), 6 (repost), 7 (reaction)</small>
+            </div>
+
+            <div class="kind-presets">
+                <span class="text-muted">Quick presets:</span>
+                <button type="button" class="btn btn-sm preset-btn" data-kinds="">All kinds</button>
+                <button type="button" class="btn btn-sm preset-btn" data-kinds="1">Notes only</button>
+                <button type="button" class="btn btn-sm preset-btn" data-kinds="1, 6, 7">Social (notes, reposts, reactions)</button>
+                <button type="button" class="btn btn-sm preset-btn" data-kinds="1, 6, 7, 30023">Social + articles</button>
+            </div>
+
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="cancel-edit-permission">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save Changes</button>
             </div>
         </form>
     </div>
@@ -184,6 +252,98 @@ document.addEventListener('DOMContentLoaded', function() {
         messageDiv.style.display = 'block';
         setTimeout(() => messageDiv.style.display = 'none', 3000);
     }
+
+    // Edit Permission Modal
+    const editModal = document.getElementById('edit-permission-modal');
+    const editForm = document.getElementById('edit-permission-form');
+    const cancelEditBtn = document.getElementById('cancel-edit-permission');
+
+    document.querySelectorAll('.edit-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const keyPubkey = this.dataset.keyPubkey;
+            const userPubkey = this.dataset.pubkey;
+            const methods = JSON.parse(this.dataset.methods || '[]');
+            const kinds = JSON.parse(this.dataset.kinds || '[]');
+
+            // Set hidden fields
+            document.getElementById('edit-key-pubkey').value = keyPubkey;
+            document.getElementById('edit-user-pubkey').value = userPubkey;
+            document.getElementById('edit-client-display').value = userPubkey;
+
+            // Set method checkboxes
+            document.querySelectorAll('#methods-checkboxes input[type="checkbox"]').forEach(cb => {
+                cb.checked = methods.includes(cb.value);
+            });
+
+            // Set allowed kinds
+            document.getElementById('edit-allowed-kinds').value = kinds.join(', ');
+
+            editModal.style.display = 'flex';
+        });
+    });
+
+    cancelEditBtn.addEventListener('click', () => editModal.style.display = 'none');
+
+    editModal.addEventListener('click', function(e) {
+        if (e.target === editModal) editModal.style.display = 'none';
+    });
+
+    // Kind preset buttons
+    document.querySelectorAll('.preset-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            document.getElementById('edit-allowed-kinds').value = this.dataset.kinds;
+        });
+    });
+
+    editForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+
+        const keyPubkey = document.getElementById('edit-key-pubkey').value;
+        const userPubkey = document.getElementById('edit-user-pubkey').value;
+
+        // Collect checked methods
+        const methods = [];
+        document.querySelectorAll('#methods-checkboxes input[type="checkbox"]:checked').forEach(cb => {
+            methods.push(cb.value);
+        });
+
+        if (methods.length === 0) {
+            showMessage('Select at least one method', 'error');
+            return;
+        }
+
+        // Parse allowed kinds
+        const kindsInput = document.getElementById('edit-allowed-kinds').value.trim();
+        let allowedKinds = [];
+        if (kindsInput) {
+            allowedKinds = kindsInput.split(',')
+                .map(k => parseInt(k.trim(), 10))
+                .filter(k => !isNaN(k));
+        }
+
+        try {
+            const response = await fetch(`/api/v1/keys/${keyPubkey}/permissions`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    user_pubkey: userPubkey,
+                    methods: methods,
+                    allowed_kinds: allowedKinds
+                })
+            });
+
+            if (response.ok) {
+                showMessage('Permission updated', 'success');
+                editModal.style.display = 'none';
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                const data = await response.json();
+                showMessage(data.error || 'Failed to update permission', 'error');
+            }
+        } catch (err) {
+            showMessage('Failed to update permission: ' + err.message, 'error');
+        }
+    });
 });
 </script>
 {{end}}

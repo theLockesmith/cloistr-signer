@@ -879,3 +879,55 @@ a:hover {
 .approval-container {
     max-width: 600px;
 }
+
+/* Checkbox group for methods */
+.checkbox-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+}
+
+.checkbox-group .checkbox-label {
+    font-size: 0.875rem;
+    margin: 0;
+}
+
+/* Kind presets */
+.kind-presets {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.kind-presets .text-muted {
+    font-size: 0.8rem;
+}
+
+.kind-presets .preset-btn {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+}
+
+/* Card styling for apps page */
+.card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.card-header {
+    padding: 0.75rem 1rem;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+}
+
+/* Allowed kinds in table */
+.allowed-kinds-cell .kind-tag {
+    margin: 0.1rem;
+}
