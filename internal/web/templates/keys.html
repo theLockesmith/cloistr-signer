@@ -302,13 +302,17 @@
                 <div class="radio-group">
                     <label class="radio-label">
                         <input type="radio" name="access_level" value="full" checked>
-                        <span>Full Access</span>
-                        <small>Can sign any event type</small>
+                        <div class="radio-text">
+                            <span>Full Access</span>
+                            <small>Can sign any event type</small>
+                        </div>
                     </label>
                     <label class="radio-label">
                         <input type="radio" name="access_level" value="custom">
-                        <span>Custom</span>
-                        <small>Choose specific methods</small>
+                        <div class="radio-text">
+                            <span>Custom</span>
+                            <small>Choose specific methods</small>
+                        </div>
                     </label>
                 </div>
             </div>
@@ -362,6 +366,17 @@ document.addEventListener('DOMContentLoaded', function() {
     const cancelBtn = document.getElementById('cancel-create');
     const createForm = document.getElementById('create-form');
     const messageDiv = document.getElementById('message');
+
+    // Global Esc key handler to close modals
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            document.querySelectorAll('.modal').forEach(m => {
+                if (m.style.display === 'flex') {
+                    m.style.display = 'none';
+                }
+            });
+        }
+    });
 
     createBtn.addEventListener('click', () => modal.style.display = 'flex');
     cancelBtn.addEventListener('click', () => modal.style.display = 'none');

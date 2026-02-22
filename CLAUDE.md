@@ -393,6 +393,100 @@ Team Member's Client ◄── Personal Signer ◄────────┘
 - [ ] Feature requests to Amber, nsecbunker for "proxy key" support
 - [ ] Propose pattern as NIP-46 addendum (after adoption)
 
+### Phase 13 - FROST Threshold Signing (Distributed Key Custody)
+
+**The Problem:** Signer chaining solves team delegation but introduces a single point of failure - the upstream business signer holds the complete private key. If compromised, the business identity is lost.
+
+**The Solution:** FROST (Flexible Round-Optimized Schnorr Threshold) signatures distribute the private key across multiple share holders. A t-of-n threshold (e.g., 3-of-5) is required to produce a valid signature. No single party ever holds the complete key.
+
+**Key Benefits:**
+- **No single point of failure:** Compromise of 1-2 shares doesn't compromise the key
+- **Key rotation without identity change:** Rotate shares, keep the same npub
+- **Geographic/organizational distribution:** Shares across data centers, team members, cold storage
+- **Combines with signer chaining:** Delegates request signatures, FROST handles custody
+
+**Architecture:**
+
+```
+                    Business npub (3-of-5 FROST)
+                              │
+     ┌──────────┬──────────┬──┴───┬──────────┬──────────┐
+     │          │          │      │          │          │
+  Share 1    Share 2    Share 3  Share 4   Share 5
+  (Infra)    (Infra)    (Cold)   (Team)    (Team)
+     │          │          │      │          │
+     └────┬─────┘          │      │          │
+          │                │      │          │
+    Coordinator         Cold     John's   Sarah's
+   (NIP-46 frontend)   Storage   Signer   Signer
+          │
+          ▼
+   Signer Chaining Layer
+   (Delegate permissions,
+    audit logging)
+          │
+    ┌─────┴─────┐
+    ▼           ▼
+  John's     Sarah's
+  Amber      nos2x
+```
+
+**Signing Scenarios (3-of-5):**
+- **Routine:** 2 infra shares + cold storage (automated, no human needed)
+- **Team participation:** 2 infra shares + John's share (John actively participates)
+- **Disaster recovery:** John + Sarah + cold (infrastructure down)
+- **Maximum decentralization:** Any 3 team members (no auto-signing)
+
+**Implementation - Core FROST Support:**
+- [ ] Research FROSTR libraries (bifrost, frost, nostrp2p)
+- [ ] Evaluate: build native FROST vs integrate FROSTR
+- [ ] Implement share holder mode (cloistr-signer holds one FROST share)
+- [ ] Implement coordinator mode (orchestrates signing across share holders)
+- [ ] FROST share storage (encrypted, separate from regular keys)
+- [ ] Signing session coordination via Nostr relays (NIP-04 encrypted DMs)
+
+**Implementation - Distributed Key Generation (DKG):**
+- [ ] Trusted dealer mode: admin generates key, distributes shares
+- [ ] Distributed mode: share holders collaboratively generate without seeing full key
+- [ ] Key ceremony UI: step-by-step DKG with verification
+- [ ] Share backup/recovery procedures
+
+**Implementation - Share Management:**
+- [ ] Web UI: FROST key management (create, view shares, thresholds)
+- [ ] Share rotation: refresh shares without changing npub
+- [ ] Share recovery: regenerate lost share from t existing shares
+- [ ] Threshold modification: change t-of-n (requires new DKG)
+
+**Implementation - Hybrid Custody Models:**
+- [ ] Team members as share holders (John holds Share 4 in his signer)
+- [ ] Infrastructure shares (always-on servers for routine signing)
+- [ ] Cold storage shares (offline, for emergencies)
+- [ ] Configurable policies: "require at least 1 team share" vs "infra-only OK"
+
+**Implementation - Integration with Signer Chaining:**
+- [ ] FROST coordinator speaks NIP-46 to delegates (unchanged interface)
+- [ ] Delegate permissions enforced BEFORE triggering FROST signing
+- [ ] Audit logs capture: delegate identity + which shares participated
+- [ ] Transparent to delegates: they don't know it's threshold-signed
+
+**Research & Ecosystem:**
+- [ ] Contact FROSTR team about integration/collaboration
+- [ ] Evaluate Igloo, Frost2x for interoperability
+- [ ] Document FROST + Signer Chaining architecture
+- [ ] Consider: could Amber hold a FROST share? (feature request)
+
+**Security Considerations:**
+- Share compromise: rotate immediately, old share becomes useless
+- Coordinator compromise: can't sign alone, only orchestrates
+- Communication security: all share coordination via NIP-04/NIP-44 encrypted
+- Offline shares: cold storage for disaster recovery, never online
+
+**Future Extensions:**
+- [ ] Hardware wallet support for share custody (Frostsnap integration?)
+- [ ] Mobile share holder app
+- [ ] Multi-organization federations (each org holds shares)
+- [ ] Time-locked shares (require delay for high-value operations)
+
 ## Deployment
 
 ```bash
@@ -462,4 +556,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-02-21 (Completed Phase 11: Enhanced approval UI with event preview and per-kind rules)
+**Last Updated:** 2026-02-22 (Added Phase 13: FROST threshold signing roadmap)
