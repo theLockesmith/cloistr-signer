@@ -179,6 +179,14 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 		return
 	}
 
+	// Ignore events authored by our own keys (these are responses, not requests)
+	// This prevents the signer from trying to process its own responses
+	// when using same-instance proxy keys
+	if _, isOurKey := s.keys[event.PubKey]; isOurKey {
+		slog.Debug("ignoring event from our own key", "event_id", event.ID, "author", event.PubKey[:16]+"...")
+		return
+	}
+
 	// Find which of our keys this is addressed to
 	targetPubkey := ""
 	for _, tag := range event.Tags {
