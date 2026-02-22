@@ -11,15 +11,16 @@ import (
 
 // Config holds all configuration for the signer service
 type Config struct {
-	Server       ServerConfig  `yaml:"server"`
-	Relays       []string      `yaml:"relays"`
-	RelayAuthKey string        `yaml:"relay_auth_key"` // Private key for NIP-42 relay auth (hex)
-	Storage      StorageConfig `yaml:"storage"`
-	Auth         AuthConfig    `yaml:"auth"`
-	Vault        VaultConfig   `yaml:"vault"`
-	Audit        AuditConfig   `yaml:"audit"`
-	Service      ServiceConfig `yaml:"service"`
-	Proxy        ProxyConfig   `yaml:"proxy"`
+	Server          ServerConfig  `yaml:"server"`
+	Relays          []string      `yaml:"relays"`
+	RelayAuthKey    string        `yaml:"relay_auth_key"`    // Private key for NIP-42 relay auth (hex)
+	MinPowDifficulty int          `yaml:"min_pow_difficulty"` // Minimum POW difficulty for publishing (0 = disabled)
+	Storage         StorageConfig `yaml:"storage"`
+	Auth            AuthConfig    `yaml:"auth"`
+	Vault           VaultConfig   `yaml:"vault"`
+	Audit           AuditConfig   `yaml:"audit"`
+	Service         ServiceConfig `yaml:"service"`
+	Proxy           ProxyConfig   `yaml:"proxy"`
 }
 
 // ProxyConfig holds proxy/chaining configuration
@@ -141,6 +142,14 @@ func Load() (*Config, error) {
 
 	if authKey := os.Getenv("RELAY_AUTH_KEY"); authKey != "" {
 		cfg.RelayAuthKey = authKey
+	}
+
+	if powStr := os.Getenv("MIN_POW_DIFFICULTY"); powStr != "" {
+		pow, err := strconv.Atoi(powStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid MIN_POW_DIFFICULTY: %w", err)
+		}
+		cfg.MinPowDifficulty = pow
 	}
 
 	if storageType := os.Getenv("STORAGE_TYPE"); storageType != "" {
