@@ -198,7 +198,7 @@ func loadOrGenerateSignerIdentity(ctx context.Context, store storage.Storage, en
 
 		pubkey, err := gonostr.GetPublicKey(storedPrivkey)
 		if err == nil {
-			slog.Info("loaded signer identity", "pubkey", pubkey[:16]+"...")
+			slog.Info("loaded signer identity", "pubkey", pubkey)
 			return storedPrivkey, pubkey
 		}
 		slog.Warn("stored signer identity invalid, regenerating", "error", err)
@@ -229,6 +229,6 @@ func loadOrGenerateSignerIdentity(ctx context.Context, store storage.Storage, en
 		return "", ""
 	}
 
-	slog.Info("generated new signer identity", "pubkey", pubkey[:16]+"...")
+	slog.Info("generated new signer identity", "pubkey", pubkey)
 	return privkey, pubkey
 }
