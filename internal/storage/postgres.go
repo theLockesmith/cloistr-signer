@@ -198,6 +198,12 @@ func (ps *PostgresStorage) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_signer_bunker_secrets_key_pubkey ON signer_bunker_secrets(key_pubkey);
 	CREATE INDEX IF NOT EXISTS idx_signer_bunker_secrets_secret ON signer_bunker_secrets(secret);
 	CREATE INDEX IF NOT EXISTS idx_signer_bunker_secrets_expires ON signer_bunker_secrets(expires_at);
+
+	CREATE TABLE IF NOT EXISTS signer_settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
 	`
 
 	_, err := ps.db.Exec(schema)
@@ -1297,6 +1303,28 @@ func (ps *PostgresStorage) GrantServiceAccess(ctx context.Context, pubkey string
 		FROM services WHERE slug = $2
 		ON CONFLICT (pubkey, service_id) DO NOTHING`,
 		pubkey, serviceSlug)
+	return err
+}
+
+func (ps *PostgresStorage) GetSetting(ctx context.Context, key string) (string, error) {
+	var value string
+	err := ps.db.QueryRowContext(ctx,
+		`SELECT value FROM signer_settings WHERE key = $1`, key).Scan(&value)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", ErrSettingNotFound
+		}
+		return "", err
+	}
+	return value, nil
+}
+
+func (ps *PostgresStorage) SetSetting(ctx context.Context, key, value string) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO signer_settings (key, value, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
+		key, value)
 	return err
 }
 

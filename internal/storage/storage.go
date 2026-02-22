@@ -11,23 +11,24 @@ import (
 )
 
 var (
-	ErrKeyNotFound      = errors.New("key not found")
-	ErrKeyExists        = errors.New("key already exists")
-	ErrNotAuthorized    = errors.New("not authorized")
-	ErrSessionNotFound  = errors.New("session not found")
-	ErrPolicyNotFound   = errors.New("policy not found")
-	ErrTokenNotFound    = errors.New("token not found")
-	ErrTokenExpired     = errors.New("token expired")
-	ErrTokenRedeemed    = errors.New("token already redeemed")
-	ErrRequestNotFound  = errors.New("request not found")
-	ErrRequestExpired   = errors.New("request expired")
-	ErrUserNotFound     = errors.New("user not found")
-	ErrUserExists       = errors.New("user already exists")
-	ErrInvalidPassword  = errors.New("invalid password")
-	ErrAccountLocked    = errors.New("account locked")
-	ErrMFARequired        = errors.New("MFA verification required")
-	ErrInvalidMFACode     = errors.New("invalid MFA code")
+	ErrKeyNotFound         = errors.New("key not found")
+	ErrKeyExists           = errors.New("key already exists")
+	ErrNotAuthorized       = errors.New("not authorized")
+	ErrSessionNotFound     = errors.New("session not found")
+	ErrPolicyNotFound      = errors.New("policy not found")
+	ErrTokenNotFound       = errors.New("token not found")
+	ErrTokenExpired        = errors.New("token expired")
+	ErrTokenRedeemed       = errors.New("token already redeemed")
+	ErrRequestNotFound     = errors.New("request not found")
+	ErrRequestExpired      = errors.New("request expired")
+	ErrUserNotFound        = errors.New("user not found")
+	ErrUserExists          = errors.New("user already exists")
+	ErrInvalidPassword     = errors.New("invalid password")
+	ErrAccountLocked       = errors.New("account locked")
+	ErrMFARequired         = errors.New("MFA verification required")
+	ErrInvalidMFACode      = errors.New("invalid MFA code")
 	ErrBunkerSecretInvalid = errors.New("invalid bunker secret")
+	ErrSettingNotFound     = errors.New("setting not found")
 )
 
 // KeyType represents the type of key storage
@@ -242,6 +243,10 @@ type Storage interface {
 	DeleteBunkerSecret(ctx context.Context, id string) error
 	CleanExpiredBunkerSecrets(ctx context.Context) error
 
+	// Settings management (for signer identity, etc.)
+	GetSetting(ctx context.Context, key string) (string, error)
+	SetSetting(ctx context.Context, key, value string) error
+
 	// Lifecycle
 	Close() error
 }
@@ -265,23 +270,24 @@ func New(cfg config.StorageConfig) (Storage, error) {
 
 // MemoryStorage is an in-memory implementation for development/testing
 type MemoryStorage struct {
-	mu              sync.RWMutex
-	keys            map[string]*Key
-	keysByPubkey    map[string]*Key
-	keysByName      map[string]*Key
-	permissions     map[string]map[string]*Permission // keyID -> userPubkey -> Permission
-	sessions        map[string]*Session
-	policies        map[string]*Policy
-	policyRules     map[string]*PolicyRule // ruleID -> PolicyRule
-	tokens          map[string]*Token
-	tokensByKey     map[string]map[string]*Token // keyID -> tokenID -> Token
-	pendingRequests map[string]*PendingRequest
-	users           map[string]*User
-	usersByUsername map[string]*User
-	usersByEmail    map[string]*User
-	userSessions    map[string]*UserSession
+	mu                 sync.RWMutex
+	keys               map[string]*Key
+	keysByPubkey       map[string]*Key
+	keysByName         map[string]*Key
+	permissions        map[string]map[string]*Permission // keyID -> userPubkey -> Permission
+	sessions           map[string]*Session
+	policies           map[string]*Policy
+	policyRules        map[string]*PolicyRule // ruleID -> PolicyRule
+	tokens             map[string]*Token
+	tokensByKey        map[string]map[string]*Token // keyID -> tokenID -> Token
+	pendingRequests    map[string]*PendingRequest
+	users              map[string]*User
+	usersByUsername    map[string]*User
+	usersByEmail       map[string]*User
+	userSessions       map[string]*UserSession
 	userSessionsByUser map[string]map[string]*UserSession // userID -> sessionID -> UserSession
-	bunkerSecrets   map[string]*BunkerSecret              // secret value -> BunkerSecret
+	bunkerSecrets      map[string]*BunkerSecret           // secret value -> BunkerSecret
+	settings           map[string]string                  // key -> value
 }
 
 // NewMemoryStorage creates a new in-memory storage
@@ -303,6 +309,7 @@ func NewMemoryStorage() *MemoryStorage {
 		userSessions:       make(map[string]*UserSession),
 		userSessionsByUser: make(map[string]map[string]*UserSession),
 		bunkerSecrets:      make(map[string]*BunkerSecret),
+		settings:           make(map[string]string),
 	}
 }
 
@@ -1103,6 +1110,25 @@ func (m *MemoryStorage) CleanExpiredBunkerSecrets(ctx context.Context) error {
 			delete(m.bunkerSecrets, secret)
 		}
 	}
+	return nil
+}
+
+func (m *MemoryStorage) GetSetting(ctx context.Context, key string) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	value, exists := m.settings[key]
+	if !exists {
+		return "", ErrSettingNotFound
+	}
+	return value, nil
+}
+
+func (m *MemoryStorage) SetSetting(ctx context.Context, key, value string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.settings[key] = value
 	return nil
 }
 

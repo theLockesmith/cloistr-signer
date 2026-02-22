@@ -62,32 +62,20 @@ func main() {
 		slog.Warn("ENCRYPTION_KEY not set, keys will be stored unencrypted")
 	}
 
+	// Load or generate signer identity keypair
+	// This is a dedicated key for the signer itself (NIP-42 auth, admin DMs, etc.)
+	signerPrivkey, signerPubkey := loadOrGenerateSignerIdentity(context.Background(), store, encryptor)
+
 	// Set auth key for NIP-42 relay authentication
-	// If RELAY_AUTH_KEY is set, use it. Otherwise, use the first signing key.
+	// Priority: RELAY_AUTH_KEY env var > signer identity
 	if cfg.RelayAuthKey != "" {
 		relayClient.SetAuthKey(cfg.RelayAuthKey)
-		slog.Info("NIP-42 relay auth enabled")
+		slog.Info("NIP-42 relay auth enabled with explicit key")
+	} else if signerPrivkey != "" {
+		relayClient.SetAuthKey(signerPrivkey)
+		slog.Info("NIP-42 relay auth enabled with signer identity", "pubkey", signerPubkey[:16]+"...")
 	} else {
-		// Try to use the first available signing key for relay auth
-		keys, err := store.ListKeys(context.Background())
-		if err == nil && len(keys) > 0 {
-			privateKey := keys[0].EncryptedNsec
-			// Decrypt if encrypted
-			if encryptor != nil && crypto.IsEncrypted(privateKey) {
-				decrypted, err := encryptor.Decrypt(privateKey)
-				if err != nil {
-					slog.Warn("failed to decrypt key for relay auth", "error", err)
-				} else {
-					privateKey = decrypted
-				}
-			}
-			if privateKey != "" {
-				relayClient.SetAuthKey(privateKey)
-				slog.Info("NIP-42 relay auth enabled using first signing key", "pubkey", keys[0].Pubkey[:16]+"...")
-			}
-		} else {
-			slog.Warn("no RELAY_AUTH_KEY set and no signing keys available for NIP-42 auth")
-		}
+		slog.Warn("no relay auth key available for NIP-42 auth")
 	}
 
 	// Initialize NIP-46 signer
@@ -134,30 +122,16 @@ func main() {
 	// Initialize admin handler for DM-based management
 	adminHandler := admin.New(cfg, store, relayClient, nip46Signer, nip46Signer)
 
-	// Set the admin communication key (prefer relay auth key, fallback to first stored key)
+	// Set the admin communication key using signer identity
 	if cfg.RelayAuthKey != "" {
 		pubkey, err := gonostr.GetPublicKey(cfg.RelayAuthKey)
 		if err == nil {
 			adminHandler.SetSignerKey(pubkey, cfg.RelayAuthKey)
-			slog.Info("admin handler using relay auth key", "pubkey", pubkey[:16]+"...")
+			slog.Info("admin handler using explicit relay auth key", "pubkey", pubkey[:16]+"...")
 		}
-	} else {
-		// Try to use the first available key
-		keys, err := store.ListKeys(ctx)
-		if err == nil && len(keys) > 0 {
-			privateKey := keys[0].EncryptedNsec
-			// Decrypt if encrypted
-			if crypto.IsEncrypted(privateKey) && encryptor != nil {
-				decrypted, err := encryptor.Decrypt(privateKey)
-				if err != nil {
-					slog.Warn("failed to decrypt key for admin handler", "error", err)
-				} else {
-					privateKey = decrypted
-				}
-			}
-			adminHandler.SetSignerKey(keys[0].Pubkey, privateKey)
-			slog.Info("admin handler using first stored key", "pubkey", keys[0].Pubkey[:16]+"...")
-		}
+	} else if signerPrivkey != "" {
+		adminHandler.SetSignerKey(signerPubkey, signerPrivkey)
+		slog.Info("admin handler using signer identity", "pubkey", signerPubkey[:16]+"...")
 	}
 
 	// Start admin DM listener
@@ -201,4 +175,60 @@ func main() {
 	}
 
 	slog.Info("shutdown complete")
+}
+
+const signerIdentityKey = "signer_identity_privkey"
+
+// loadOrGenerateSignerIdentity loads the signer's dedicated identity keypair from storage,
+// or generates a new one if it doesn't exist. This key is used for NIP-42 relay auth
+// and admin DM communication.
+func loadOrGenerateSignerIdentity(ctx context.Context, store storage.Storage, encryptor *crypto.Encryptor) (privkey, pubkey string) {
+	// Try to load existing identity
+	storedPrivkey, err := store.GetSetting(ctx, signerIdentityKey)
+	if err == nil {
+		// Decrypt if encrypted
+		if encryptor != nil && crypto.IsEncrypted(storedPrivkey) {
+			decrypted, err := encryptor.Decrypt(storedPrivkey)
+			if err != nil {
+				slog.Error("failed to decrypt signer identity", "error", err)
+				return "", ""
+			}
+			storedPrivkey = decrypted
+		}
+
+		pubkey, err := gonostr.GetPublicKey(storedPrivkey)
+		if err == nil {
+			slog.Info("loaded signer identity", "pubkey", pubkey[:16]+"...")
+			return storedPrivkey, pubkey
+		}
+		slog.Warn("stored signer identity invalid, regenerating", "error", err)
+	}
+
+	// Generate new identity
+	privkey = gonostr.GeneratePrivateKey()
+	pubkey, err = gonostr.GetPublicKey(privkey)
+	if err != nil {
+		slog.Error("failed to derive pubkey from generated key", "error", err)
+		return "", ""
+	}
+
+	// Encrypt before storing
+	toStore := privkey
+	if encryptor != nil {
+		encrypted, err := encryptor.Encrypt(privkey)
+		if err != nil {
+			slog.Error("failed to encrypt signer identity", "error", err)
+			return "", ""
+		}
+		toStore = encrypted
+	}
+
+	// Store the identity
+	if err := store.SetSetting(ctx, signerIdentityKey, toStore); err != nil {
+		slog.Error("failed to store signer identity", "error", err)
+		return "", ""
+	}
+
+	slog.Info("generated new signer identity", "pubkey", pubkey[:16]+"...")
+	return privkey, pubkey
 }
