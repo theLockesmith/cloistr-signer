@@ -6,14 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip04"
-	"github.com/nbd-wtf/go-nostr/nip13"
 	"github.com/nbd-wtf/go-nostr/nip44"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/bunker"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
@@ -857,8 +854,8 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 		return
 	}
 
-	// Publish response with adaptive POW (retry with POW if relay requires it)
-	if err := s.publishWithAdaptivePow(ctx, &event, privateKey); err != nil {
+	// Publish response with adaptive POW (relay client handles POW retry if required)
+	if err := s.relayClient.PublishWithAdaptivePow(ctx, &event, privateKey); err != nil {
 		slog.Error("failed to publish response", "error", err)
 		return
 	}
@@ -869,107 +866,6 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 		"has_error", response.Error != "",
 		"nip44", useNIP44,
 	)
-}
-
-// publishWithAdaptivePow publishes an event, automatically mining POW if required by the relay.
-// This implements adaptive POW: try without POW first, then mine and retry if needed.
-func (s *Signer) publishWithAdaptivePow(ctx context.Context, event *nostr.Event, privateKey string) error {
-	// First attempt without POW
-	err := s.relayClient.Publish(ctx, event)
-	if err == nil {
-		return nil
-	}
-
-	// Check if the error indicates POW is required
-	errStr := err.Error()
-	difficulty := parsePowRequirement(errStr)
-	if difficulty <= 0 {
-		// Not a POW error, return original error
-		return err
-	}
-
-	slog.Info("relay requires POW, mining...", "difficulty", difficulty)
-
-	// Create a fresh unsigned event for POW mining
-	// POW must be added before signing
-	unsignedEvent := nostr.Event{
-		Kind:      event.Kind,
-		Content:   event.Content,
-		CreatedAt: nostr.Timestamp(time.Now().Unix()),
-		Tags:      event.Tags,
-		PubKey:    event.PubKey,
-	}
-
-	// Mine POW with 60 second timeout
-	powCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	start := time.Now()
-	nonceTag, err := nip13.DoWork(powCtx, unsignedEvent, difficulty)
-	if err != nil {
-		return fmt.Errorf("POW mining failed: %w", err)
-	}
-
-	// Add nonce tag to event
-	unsignedEvent.Tags = append(unsignedEvent.Tags, nonceTag)
-
-	slog.Info("POW mined", "difficulty", difficulty, "duration", time.Since(start))
-
-	// Sign the POW event
-	if err := unsignedEvent.Sign(privateKey); err != nil {
-		return fmt.Errorf("failed to sign POW event: %w", err)
-	}
-
-	// Retry publish with POW
-	return s.relayClient.Publish(ctx, &unsignedEvent)
-}
-
-// parsePowRequirement extracts the required POW difficulty from a relay error message.
-// Returns 0 if the error doesn't indicate a POW requirement.
-func parsePowRequirement(errStr string) int {
-	// Common patterns:
-	// "pow: 28 bits needed"
-	// "pow: difficulty 24 required"
-	// "proof of work: need 16 bits"
-	// "min pow difficulty: 20"
-	patterns := []struct {
-		prefix string
-		suffix string
-	}{
-		{"pow: ", " bits"},
-		{"pow: difficulty ", " required"},
-		{"proof of work: need ", " bits"},
-		{"min pow difficulty: ", ""},
-		{"pow: low trust requires proof of work", ""}, // Generic, use default
-	}
-
-	for _, p := range patterns {
-		if idx := strings.Index(strings.ToLower(errStr), strings.ToLower(p.prefix)); idx >= 0 {
-			if p.prefix == "pow: low trust requires proof of work" {
-				// Generic POW error without specific difficulty, use reasonable default
-				return 16
-			}
-			start := idx + len(p.prefix)
-			end := len(errStr)
-			if p.suffix != "" {
-				if suffixIdx := strings.Index(errStr[start:], p.suffix); suffixIdx >= 0 {
-					end = start + suffixIdx
-				}
-			}
-			numStr := strings.TrimSpace(errStr[start:end])
-			// Find the first number in the string
-			for i, c := range numStr {
-				if c < '0' || c > '9' {
-					numStr = numStr[:i]
-					break
-				}
-			}
-			if num, err := strconv.Atoi(numStr); err == nil && num > 0 {
-				return num
-			}
-		}
-	}
-	return 0
 }
 
 // SendNostrConnectResponse sends a connect response to a client for nostrconnect:// flow

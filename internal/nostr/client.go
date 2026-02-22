@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip13"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
 )
 
@@ -146,6 +148,117 @@ func (c *Client) Publish(ctx context.Context, event *nostr.Event) error {
 		return nil
 	}
 	return lastErr
+}
+
+// PublishWithAdaptivePow publishes an event, automatically mining POW if required by relays.
+// The privateKey is needed to re-sign the event after adding the POW nonce tag.
+func (c *Client) PublishWithAdaptivePow(ctx context.Context, event *nostr.Event, privateKey string) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var lastErr error
+	successCount := 0
+
+	for url, relay := range c.relays {
+		err := relay.Publish(ctx, *event)
+		if err != nil {
+			// Check if auth is required
+			if c.authKey != "" && isAuthRequired(err) {
+				slog.Info("auth required, authenticating", "url", url)
+				if authErr := c.authenticateRelay(ctx, relay); authErr != nil {
+					slog.Warn("auth failed", "url", url, "error", authErr)
+				} else {
+					// Retry publish after auth
+					err = relay.Publish(ctx, *event)
+				}
+			}
+		}
+
+		// Check if POW is required
+		if err != nil {
+			difficulty := parsePowRequirement(err.Error())
+			if difficulty > 0 && privateKey != "" {
+				slog.Info("relay requires POW, mining...", "url", url, "difficulty", difficulty)
+
+				// Create a fresh unsigned event for POW mining
+				unsignedEvent := nostr.Event{
+					Kind:      event.Kind,
+					Content:   event.Content,
+					CreatedAt: nostr.Timestamp(time.Now().Unix()),
+					Tags:      event.Tags,
+					PubKey:    event.PubKey,
+				}
+
+				// Mine POW with 60 second timeout
+				powCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+				start := time.Now()
+				nonceTag, powErr := nip13.DoWork(powCtx, unsignedEvent, difficulty)
+				cancel()
+
+				if powErr != nil {
+					slog.Warn("POW mining failed", "url", url, "error", powErr)
+					lastErr = powErr
+					continue
+				}
+
+				unsignedEvent.Tags = append(unsignedEvent.Tags, nonceTag)
+				slog.Info("POW mined", "url", url, "difficulty", difficulty, "duration", time.Since(start))
+
+				if signErr := unsignedEvent.Sign(privateKey); signErr != nil {
+					slog.Warn("failed to sign POW event", "url", url, "error", signErr)
+					lastErr = signErr
+					continue
+				}
+
+				// Try publishing the POW event
+				err = relay.Publish(ctx, unsignedEvent)
+			}
+		}
+
+		if err != nil {
+			slog.Warn("failed to publish to relay", "url", url, "error", err)
+			lastErr = err
+			continue
+		}
+		successCount++
+		slog.Debug("published to relay", "url", url, "event_id", event.ID)
+	}
+
+	if successCount > 0 {
+		return nil
+	}
+	return lastErr
+}
+
+// parsePowRequirement extracts the required POW difficulty from a relay error message.
+// Returns 0 if not a POW error.
+func parsePowRequirement(errStr string) int {
+	errLower := strings.ToLower(errStr)
+
+	// Check for POW error indicators
+	if !strings.Contains(errLower, "pow") {
+		return 0
+	}
+
+	// Try to extract specific difficulty
+	// Common patterns: "pow: 28 bits needed", "requires 20 bits of proof of work"
+	for _, pattern := range []string{"pow: ", "pow:", "requires "} {
+		if idx := strings.Index(errLower, pattern); idx >= 0 {
+			numStart := idx + len(pattern)
+			numEnd := numStart
+			for numEnd < len(errLower) && errLower[numEnd] >= '0' && errLower[numEnd] <= '9' {
+				numEnd++
+			}
+			if numEnd > numStart {
+				if bits, err := strconv.Atoi(errLower[numStart:numEnd]); err == nil && bits > 0 {
+					return bits
+				}
+			}
+		}
+	}
+
+	// Generic POW error without specific difficulty - use default
+	return 16
 }
 
 // PublishToRelay publishes an event to a specific relay, connecting if necessary

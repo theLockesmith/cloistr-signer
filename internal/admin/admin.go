@@ -595,7 +595,8 @@ func (h *Handler) sendDM(ctx context.Context, signerPubkey, privateKey, recipien
 		return
 	}
 
-	if err := h.relayClient.Publish(ctx, &event); err != nil {
+	// Use adaptive POW in case relay requires it
+	if err := h.relayClient.PublishWithAdaptivePow(ctx, &event, privateKey); err != nil {
 		slog.Error("failed to publish DM", "error", err)
 		return
 	}
