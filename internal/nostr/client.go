@@ -443,6 +443,11 @@ func (c *Client) SubscribeWithRelayInfo(ctx context.Context, filters nostr.Filte
 			sub, err := relay.Subscribe(ctx, filters)
 			if err != nil {
 				slog.Warn("failed to subscribe to relay", "url", url, "error", err)
+				// Remove from map so reconnect logic can kick in
+				c.mu.Lock()
+				delete(c.relays, url)
+				metrics.SetRelayConnections(len(c.relays))
+				c.mu.Unlock()
 				return
 			}
 
@@ -451,6 +456,14 @@ func (c *Client) SubscribeWithRelayInfo(ctx context.Context, filters nostr.Filte
 			for ev := range sub.Events {
 				handler(ev, url)
 			}
+
+			// Subscription channel closed - connection dropped
+			// Remove from map so reconnect logic kicks in
+			slog.Warn("relay subscription closed, will reconnect", "url", url)
+			c.mu.Lock()
+			delete(c.relays, url)
+			metrics.SetRelayConnections(len(c.relays))
+			c.mu.Unlock()
 		}(url, relay)
 	}
 }
@@ -518,12 +531,23 @@ func (c *Client) reconnectWithRelayInfoIfNeeded(ctx context.Context, filters nos
 				sub, err := relay.Subscribe(ctx, filters)
 				if err != nil {
 					slog.Warn("failed to subscribe on reconnected relay", "url", url, "error", err)
+					// Remove from map so next reconnect cycle tries again
+					c.mu.Lock()
+					delete(c.relays, url)
+					metrics.SetRelayConnections(len(c.relays))
+					c.mu.Unlock()
 					return
 				}
 				slog.Info("subscribed on reconnected relay", "url", url, "filters", filters)
 				for ev := range sub.Events {
 					handler(ev, url)
 				}
+				// Subscription channel closed - connection dropped
+				slog.Warn("reconnected relay subscription closed, will reconnect", "url", url)
+				c.mu.Lock()
+				delete(c.relays, url)
+				metrics.SetRelayConnections(len(c.relays))
+				c.mu.Unlock()
 			}(url, relay)
 		}
 	}
