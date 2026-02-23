@@ -80,6 +80,8 @@ type Signer struct {
 	proxyKeys       map[string]string                   // pubkey -> bunker URI (for proxy keys)
 	pendingCtx      map[string]*pendingRequestContext   // requestID -> context
 	pendingCtxLock  sync.RWMutex
+	seenEvents      map[string]time.Time                // event ID -> first seen time (deduplication)
+	seenEventsLock  sync.RWMutex
 	cancel          context.CancelFunc
 }
 
@@ -96,6 +98,7 @@ func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, e
 		keyRelays:       make(map[string][]string),
 		proxyKeys:       make(map[string]string),
 		pendingCtx:      make(map[string]*pendingRequestContext),
+		seenEvents:      make(map[string]time.Time),
 	}
 }
 
@@ -191,6 +194,23 @@ func (s *Signer) handleEventWithRelay(event *nostr.Event, sourceRelay string) {
 	if event.Kind != KindNIP46Request {
 		return
 	}
+
+	// Deduplicate events - same event may arrive from multiple relays
+	// We only want to process it once (from the first relay that delivers it)
+	s.seenEventsLock.Lock()
+	if _, seen := s.seenEvents[event.ID]; seen {
+		s.seenEventsLock.Unlock()
+		slog.Debug("skipping duplicate event", "event_id", event.ID, "relay", sourceRelay)
+		return
+	}
+	s.seenEvents[event.ID] = time.Now()
+	// Cleanup old entries (keep last 5 minutes)
+	for id, t := range s.seenEvents {
+		if time.Since(t) > 5*time.Minute {
+			delete(s.seenEvents, id)
+		}
+	}
+	s.seenEventsLock.Unlock()
 
 	// Ignore events authored by our own keys (these are responses, not requests)
 	// This prevents the signer from trying to process its own responses
