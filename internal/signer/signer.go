@@ -162,10 +162,36 @@ func (s *Signer) Start(ctx context.Context) error {
 	}
 	metrics.SetKeysManaged(len(keys))
 
+	// Pre-warm per-key relay clients in background
+	// This establishes connections before the first request, avoiding timeout on first connect
+	go s.prewarmKeyRelayClients()
+
 	// Start subscription with #p filter for our keys
 	s.refreshSubscription()
 
 	return nil
+}
+
+// prewarmKeyRelayClients establishes per-key relay connections for all loaded keys.
+// This runs in the background so startup isn't blocked.
+func (s *Signer) prewarmKeyRelayClients() {
+	s.keysLock.RLock()
+	keysToWarm := make(map[string]string)
+	for pubkey, privateKey := range s.keys {
+		keysToWarm[pubkey] = privateKey
+	}
+	keyRelaysCopy := make(map[string][]string)
+	for pubkey, relays := range s.keyRelays {
+		keyRelaysCopy[pubkey] = relays
+	}
+	s.keysLock.RUnlock()
+
+	for pubkey, privateKey := range keysToWarm {
+		relays := keyRelaysCopy[pubkey]
+		slog.Info("pre-warming relay client", "pubkey", pubkey[:16]+"...")
+		s.keyRelayManager.GetClient(s.ctx, pubkey, privateKey, relays)
+	}
+	slog.Info("finished pre-warming relay clients", "count", len(keysToWarm))
 }
 
 // refreshSubscription updates the relay subscription with current pubkeys.

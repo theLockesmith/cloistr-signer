@@ -131,7 +131,9 @@ func (c *KeyRelayClient) authenticateRelay(ctx context.Context, relay *nostr.Rel
 		return nil
 	}
 
-	authCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Short timeout - if relay doesn't respond to AUTH quickly, continue without it
+	// Most relays don't require auth, and we can retry on publish if needed
+	authCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	return relay.Auth(authCtx, func(event *nostr.Event) error {
