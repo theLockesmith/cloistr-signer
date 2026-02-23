@@ -56,10 +56,26 @@ func (m *KeyRelayManager) GetClient(ctx context.Context, pubkey, privateKey stri
 		return client
 	}
 
-	// Use key-specific relays or fall back to global
-	urls := relayURLs
-	if len(urls) == 0 {
-		urls = m.globalRelays
+	// Merge key-specific relays with global relays
+	// Global relays (like relay.cloistr.xyz) are ALWAYS included as fallback
+	// This ensures messages get through even if user-specified relays rate limit
+	urlSet := make(map[string]bool)
+	var urls []string
+
+	// Add key-specific relays first (user preference)
+	for _, url := range relayURLs {
+		if !urlSet[url] {
+			urlSet[url] = true
+			urls = append(urls, url)
+		}
+	}
+
+	// Always add global relays as fallback (guaranteed delivery)
+	for _, url := range m.globalRelays {
+		if !urlSet[url] {
+			urlSet[url] = true
+			urls = append(urls, url)
+		}
 	}
 
 	client = &KeyRelayClient{
@@ -173,14 +189,23 @@ func (c *KeyRelayClient) PublishToRelay(ctx context.Context, relayURL string, ev
 // publishWithRetry handles rate-limiting, POW, and auth retry
 func (c *KeyRelayClient) publishWithRetry(ctx context.Context, relay *nostr.Relay, event *nostr.Event, url string) error {
 	var err error
-	backoff := 500 * time.Millisecond
-	maxRetries := 3
+	backoff := 1 * time.Second   // Start with 1s backoff (was 500ms)
+	maxRetries := 5              // More retries for longer rate windows (was 3)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		err = relay.Publish(ctx, *event)
 		if err == nil {
 			return nil
 		}
+
+		// Log the actual error for debugging rate limit issues
+		slog.Debug("publish failed",
+			"url", url,
+			"attempt", attempt,
+			"error", err.Error(),
+			"is_rate_limited", isRateLimited(err),
+			"is_auth_required", isAuthRequired(err),
+		)
 
 		// Handle auth required
 		if isAuthRequired(err) || isRestricted(err) {
@@ -229,8 +254,8 @@ func (c *KeyRelayClient) publishWithRetry(ctx context.Context, relay *nostr.Rela
 		case <-time.After(backoff):
 		}
 		backoff *= 2
-		if backoff > 5*time.Second {
-			backoff = 5 * time.Second
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second  // Allow longer waits for aggressive rate limiters (was 5s)
 		}
 	}
 

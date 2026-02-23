@@ -378,11 +378,16 @@ func isRateLimited(err error) bool {
 		return false
 	}
 	errStr := strings.ToLower(err.Error())
+	// NIP-01 standard: "rate-limited:" prefix
+	// Also catch common variations and patterns used by different relay implementations
 	return strings.Contains(errStr, "rate-limit") ||
 		strings.Contains(errStr, "rate limit") ||
 		strings.Contains(errStr, "slow down") ||
 		strings.Contains(errStr, "noting too much") ||
-		strings.Contains(errStr, "too many")
+		strings.Contains(errStr, "too many") ||
+		strings.Contains(errStr, "too fast") ||
+		strings.Contains(errStr, "throttle") ||
+		strings.Contains(errStr, "try again later")
 }
 
 // Subscribe creates a subscription on all connected relays
