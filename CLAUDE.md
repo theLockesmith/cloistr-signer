@@ -385,7 +385,7 @@ Team Member's Client ◄── Personal Signer ◄────────┘
 - [x] Forward sign_event/encrypt/decrypt requests to upstream
 - [x] Web UI: Add proxy key via bunker:// URI (keys page "Add Proxy Key" button)
 - [x] Proxy mode config: PROXY_MODE and PROXY_TIMEOUT environment variables
-- [ ] Connection management: reconnect to upstream on failure (TODO)
+- [x] Connection management: detect disconnect, cleanup, auto-reconnect on next request
 - [ ] Test harness: spin up coldforge-signer (upstream) + cloistr-signer (proxy) for full chain
 
 **Implementation - Upstream Signer Enhancements:**
@@ -600,4 +600,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-02-23 (Phase 12.5: NIP-46 relay scalability - per-key connections, NIP-01 retry logic)
+**Last Updated:** 2026-02-23 (Phase 12: Proxy upstream reconnection - detect disconnect, fail pending requests, auto-reconnect)

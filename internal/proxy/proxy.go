@@ -55,21 +55,39 @@ type UpstreamConnection struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	connected      bool
-	useNIP44       bool // Whether upstream supports NIP-44
+	useNIP44       bool                 // Whether upstream supports NIP-44
+	onDisconnect   func(pubkey string)  // Callback when connection is lost
+}
+
+// connectionParams stores parameters needed to reconnect
+type connectionParams struct {
+	bunkerURI    string
+	localPrivkey string
+	localPubkey  string
 }
 
 // Client manages connections to upstream signers
 type Client struct {
 	config      *config.Config
 	connections map[string]*UpstreamConnection // upstream pubkey -> connection
+	connParams  map[string]*connectionParams   // upstream pubkey -> params for reconnection
 	connMu      sync.RWMutex
+
+	// Reconnection management
+	ctx           context.Context
+	cancel        context.CancelFunc
+	reconnectOnce sync.Once
 }
 
 // NewClient creates a new proxy client
 func NewClient(cfg *config.Config) *Client {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
 		config:      cfg,
 		connections: make(map[string]*UpstreamConnection),
+		connParams:  make(map[string]*connectionParams),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
@@ -143,10 +161,29 @@ func (c *Client) Connect(ctx context.Context, bunkerURI string, localPrivkey, lo
 
 	conn.connected = true
 
-	// Store the connection
+	// Set cleanup callback for when connection is lost
+	// Note: we only delete from connections map, not connParams (needed for reconnect)
+	conn.onDisconnect = func(pubkey string) {
+		c.connMu.Lock()
+		delete(c.connections, pubkey)
+		c.connMu.Unlock()
+		slog.Info("upstream connection lost, will reconnect", "upstream", pubkey[:16]+"...")
+	}
+
+	// Store connection and params for reconnection
 	c.connMu.Lock()
 	c.connections[uri.SignerPubkey] = conn
+	c.connParams[uri.SignerPubkey] = &connectionParams{
+		bunkerURI:    bunkerURI,
+		localPrivkey: localPrivkey,
+		localPubkey:  localPubkey,
+	}
 	c.connMu.Unlock()
+
+	// Start reconnection ticker on first connection
+	c.reconnectOnce.Do(func() {
+		go c.reconnectLoop()
+	})
 
 	slog.Info("connected to upstream signer",
 		"signer", uri.SignerPubkey[:16]+"...",
@@ -197,8 +234,13 @@ func (c *Client) Disconnect(upstreamPubkey string) {
 	c.connMu.Unlock()
 }
 
-// Close closes all upstream connections
+// Close closes all upstream connections and stops the reconnection loop
 func (c *Client) Close() {
+	// Stop reconnection loop
+	if c.cancel != nil {
+		c.cancel()
+	}
+
 	c.connMu.Lock()
 	defer c.connMu.Unlock()
 
@@ -206,6 +248,45 @@ func (c *Client) Close() {
 		conn.Close()
 	}
 	c.connections = make(map[string]*UpstreamConnection)
+	c.connParams = make(map[string]*connectionParams)
+}
+
+// reconnectLoop periodically checks for disconnected upstream signers and reconnects
+func (c *Client) reconnectLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+			c.reconnectIfNeeded()
+		}
+	}
+}
+
+// reconnectIfNeeded attempts to reconnect any disconnected upstream signers
+func (c *Client) reconnectIfNeeded() {
+	c.connMu.RLock()
+	// Find params for connections that are missing or disconnected
+	var toReconnect []*connectionParams
+	for pubkey, params := range c.connParams {
+		conn, exists := c.connections[pubkey]
+		if !exists || !conn.connected {
+			toReconnect = append(toReconnect, params)
+		}
+	}
+	c.connMu.RUnlock()
+
+	// Reconnect outside the lock
+	for _, params := range toReconnect {
+		slog.Info("attempting to reconnect to upstream signer", "bunker_uri", params.bunkerURI[:40]+"...")
+		_, err := c.Connect(c.ctx, params.bunkerURI, params.localPrivkey, params.localPubkey)
+		if err != nil {
+			slog.Warn("failed to reconnect to upstream signer", "error", err)
+		}
+	}
 }
 
 // subscribeToResponses listens for NIP-46 responses from the upstream signer
@@ -231,15 +312,48 @@ func (conn *UpstreamConnection) subscribeToResponses(ready chan<- struct{}) {
 		"local", conn.LocalPubkey[:16]+"...",
 	)
 
-	for {
+	// Use for-range to detect channel closure when relay disconnects
+	for event := range sub.Events {
+		// Check context cancellation between events
 		select {
-		case event := <-sub.Events:
-			conn.handleResponse(event)
 		case <-conn.ctx.Done():
 			sub.Unsub()
 			return
+		default:
+		}
+		conn.handleResponse(event)
+	}
+
+	// Channel closed - relay disconnected silently
+	// Mark connection as disconnected so GetConnection will reconnect
+	slog.Warn("upstream relay subscription closed, connection lost",
+		"upstream", conn.URI.SignerPubkey[:16]+"...",
+		"relay", conn.relay.URL,
+	)
+	conn.connected = false
+
+	// Fail all pending requests immediately instead of letting them timeout
+	conn.failPendingRequests("upstream connection lost")
+
+	// Notify parent Client to clean up connection from map
+	if conn.onDisconnect != nil {
+		conn.onDisconnect(conn.URI.SignerPubkey)
+	}
+}
+
+// failPendingRequests sends error responses to all waiting requests
+func (conn *UpstreamConnection) failPendingRequests(reason string) {
+	conn.pendingMu.Lock()
+	defer conn.pendingMu.Unlock()
+
+	for id, pending := range conn.pending {
+		select {
+		case pending.respChan <- &NIP46Response{ID: id, Error: reason}:
+		default:
 		}
 	}
+	// Clear the map
+	conn.pending = make(map[string]*pendingResponse)
 }
 
 // handleResponse processes a response from the upstream signer
@@ -431,13 +545,14 @@ func (conn *UpstreamConnection) GetPublicKey(ctx context.Context) (string, error
 
 // Close closes the connection to the upstream signer
 func (conn *UpstreamConnection) Close() {
+	conn.connected = false
+	conn.failPendingRequests("connection closed")
 	if conn.cancel != nil {
 		conn.cancel()
 	}
 	if conn.relay != nil {
 		conn.relay.Close()
 	}
-	conn.connected = false
 }
 
 // generateRequestID generates a random request ID
