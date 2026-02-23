@@ -78,20 +78,29 @@ func (c *Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-// authenticateRelay performs NIP-42 authentication with a relay
+// authenticateRelay performs NIP-42 authentication with a relay using the client's auth key
 func (c *Client) authenticateRelay(ctx context.Context, relay *nostr.Relay) error {
+	return c.authenticateRelayWithKey(ctx, relay, c.authKey)
+}
+
+// authenticateRelayWithKey performs NIP-42 authentication with a relay using a specific private key
+func (c *Client) authenticateRelayWithKey(ctx context.Context, relay *nostr.Relay, privateKey string) error {
+	if privateKey == "" {
+		return fmt.Errorf("no private key for authentication")
+	}
+
 	// Use a dedicated context with sufficient timeout for auth
 	// The parent context might have a tight deadline from HTTP handlers
 	authCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	err := relay.Auth(authCtx, func(event *nostr.Event) error {
-		pubkey, err := nostr.GetPublicKey(c.authKey)
+		pubkey, err := nostr.GetPublicKey(privateKey)
 		if err != nil {
 			return err
 		}
 		event.PubKey = pubkey
-		return event.Sign(c.authKey)
+		return event.Sign(privateKey)
 	})
 	if err != nil {
 		return err
@@ -151,7 +160,8 @@ func (c *Client) Publish(ctx context.Context, event *nostr.Event) error {
 }
 
 // PublishWithAdaptivePow publishes an event, automatically mining POW if required by relays.
-// The privateKey is needed to re-sign the event after adding the POW nonce tag.
+// The privateKey is needed to re-sign the event after adding the POW nonce tag,
+// and also for NIP-42 authentication (so event.pubkey matches authenticated identity).
 func (c *Client) PublishWithAdaptivePow(ctx context.Context, event *nostr.Event, privateKey string) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -162,10 +172,12 @@ func (c *Client) PublishWithAdaptivePow(ctx context.Context, event *nostr.Event,
 	for url, relay := range c.relays {
 		err := relay.Publish(ctx, *event)
 		if err != nil {
-			// Check if auth is required
-			if c.authKey != "" && isAuthRequired(err) {
-				slog.Info("auth required, authenticating", "url", url)
-				if authErr := c.authenticateRelay(ctx, relay); authErr != nil {
+			// Check if auth is required or restricted (must auth as event pubkey)
+			if privateKey != "" && (isAuthRequired(err) || isRestricted(err)) {
+				slog.Info("auth required, authenticating with event key", "url", url)
+				// Authenticate with the signing key (privateKey), not the global authKey
+				// This ensures event.pubkey matches authenticated identity
+				if authErr := c.authenticateRelayWithKey(ctx, relay, privateKey); authErr != nil {
 					slog.Warn("auth failed", "url", url, "error", authErr)
 				} else {
 					// Retry publish after auth
@@ -307,6 +319,16 @@ func isAuthRequired(err error) bool {
 	errStr := strings.ToLower(err.Error())
 	return strings.Contains(errStr, "auth-required") ||
 		strings.Contains(errStr, "authentication required")
+}
+
+// isRestricted checks if an error indicates the relay restricts publishing to authenticated identity
+func isRestricted(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "restricted") ||
+		strings.Contains(errStr, "only publish events as your authenticated")
 }
 
 // Subscribe creates a subscription on all connected relays
