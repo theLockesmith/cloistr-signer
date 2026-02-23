@@ -38,7 +38,9 @@ internal/
   storage/
     storage.go              # Storage interface + in-memory backend
     postgres.go             # PostgreSQL storage backend
-  nostr/client.go           # Relay client with NIP-42 auth
+  nostr/
+    client.go               # Relay client with NIP-42 auth
+    key_relay_manager.go    # Per-key relay connections for scalability
   signer/signer.go          # NIP-46 request handling
   api/handler.go            # HTTP management API
   auth/auth.go              # JWT, bcrypt, TOTP, backup codes
@@ -393,6 +395,40 @@ Team Member's Client ◄── Personal Signer ◄────────┘
 - [ ] Feature requests to Amber, nsecbunker for "proxy key" support
 - [ ] Propose pattern as NIP-46 addendum (after adoption)
 
+### Completed (Phase 12.5 - NIP-46 Relay Scalability)
+
+**The Problem:** NIP-46 logins were failing ~90% of the time due to rate limiting on public relays like damus.io. Multiple rapid round-trips (connect → get_public_key → sign_event) triggered rate limits.
+
+**The Solution:** Per-key relay architecture with intelligent retry:
+
+**Per-Key Relay Connections:**
+- [x] Each signing key gets its own relay client (`internal/nostr/key_relay_manager.go`)
+- [x] Isolated rate limits per key (not shared across all keys)
+- [x] NIP-42 authentication as the signing key (higher limits on some relays)
+- [x] Pre-warming: Relay connections established on startup, not first request
+
+**Subscription Optimization:**
+- [x] #p filter in NIP-46 subscription (relay-side filtering, not firehose)
+- [x] Event deduplication (same event from multiple relays processed once)
+- [x] Subscription refresh when keys added/removed
+
+**Intelligent Retry with NIP-01 Prefix Detection:**
+- [x] Non-retryable errors: `invalid:`, `duplicate:`, `blocked:` (fail immediately)
+- [x] Retryable errors: everything else (rate-limited, pow, error, unknown)
+- [x] Exponential backoff: 1s initial, up to 30s max, 5 retries
+- [x] Adaptive POW: mines proof-of-work if relay demands it
+
+**Multi-Relay Fallback (User Freedom):**
+- [x] User-specified relays always tried first
+- [x] Global relays (relay.cloistr.xyz) included as reliable fallback
+- [x] Messages published to ALL configured relays (success if any accepts)
+- [x] relay.cloistr.xyz exempts kind:24133 from rate limiting
+
+**Key Files:**
+- `internal/nostr/key_relay_manager.go` - Per-key relay connections
+- `internal/nostr/client.go` - `isRetryableError()` NIP-01 detection
+- `internal/signer/signer.go` - Deduplication, #p filter subscription
+
 ### Phase 13 - FROST Threshold Signing (Distributed Key Custody)
 
 **The Problem:** Signer chaining solves team delegation but introduces a single point of failure - the upstream business signer holds the complete private key. If compromised, the business identity is lost.
@@ -556,4 +592,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-02-22 (Added Phase 13: FROST threshold signing roadmap)
+**Last Updated:** 2026-02-23 (Phase 12.5: NIP-46 relay scalability - per-key connections, NIP-01 retry logic)
