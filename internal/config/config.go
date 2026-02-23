@@ -11,16 +11,25 @@ import (
 
 // Config holds all configuration for the signer service
 type Config struct {
-	Server          ServerConfig  `yaml:"server"`
-	Relays          []string      `yaml:"relays"`
-	RelayAuthKey    string        `yaml:"relay_auth_key"`    // Private key for NIP-42 relay auth (hex)
-	MinPowDifficulty int          `yaml:"min_pow_difficulty"` // Minimum POW difficulty for publishing (0 = disabled)
-	Storage         StorageConfig `yaml:"storage"`
-	Auth            AuthConfig    `yaml:"auth"`
-	Vault           VaultConfig   `yaml:"vault"`
-	Audit           AuditConfig   `yaml:"audit"`
-	Service         ServiceConfig `yaml:"service"`
-	Proxy           ProxyConfig   `yaml:"proxy"`
+	Server           ServerConfig    `yaml:"server"`
+	Relays           []string        `yaml:"relays"`
+	RelayAuthKey     string          `yaml:"relay_auth_key"`     // Private key for NIP-42 relay auth (hex)
+	MinPowDifficulty int             `yaml:"min_pow_difficulty"` // Minimum POW difficulty for publishing (0 = disabled)
+	Storage          StorageConfig   `yaml:"storage"`
+	Auth             AuthConfig      `yaml:"auth"`
+	Vault            VaultConfig     `yaml:"vault"`
+	Audit            AuditConfig     `yaml:"audit"`
+	Service          ServiceConfig   `yaml:"service"`
+	Proxy            ProxyConfig     `yaml:"proxy"`
+	Discovery        DiscoveryConfig `yaml:"discovery"`
+}
+
+// DiscoveryConfig holds optional discovery service configuration
+type DiscoveryConfig struct {
+	URL             string `yaml:"url"`               // Discovery service URL (empty = disabled)
+	Timeout         int    `yaml:"timeout"`           // Query timeout in seconds (default: 5)
+	MaxRelays       int    `yaml:"max_relays"`        // Max relays from discovery (default: 3)
+	IncludeInBunker bool   `yaml:"include_in_bunker"` // Include discovered relays in bunker URI (default: true)
 }
 
 // ProxyConfig holds proxy/chaining configuration
@@ -120,6 +129,12 @@ func Load() (*Config, error) {
 		Proxy: ProxyConfig{
 			Mode:    "internal",
 			Timeout: 30,
+		},
+		Discovery: DiscoveryConfig{
+			URL:             "",    // Disabled by default
+			Timeout:         5,     // 5 seconds
+			MaxRelays:       3,     // Max 3 relays from discovery
+			IncludeInBunker: true,  // Include in bunker URI by default
 		},
 	}
 
@@ -252,6 +267,20 @@ func Load() (*Config, error) {
 	}
 	if proxyTimeout := os.Getenv("PROXY_TIMEOUT"); proxyTimeout != "" {
 		cfg.Proxy.Timeout = getEnvInt("PROXY_TIMEOUT", 30)
+	}
+
+	// Discovery configuration (optional - disabled if URL is empty)
+	if discoveryURL := os.Getenv("DISCOVERY_URL"); discoveryURL != "" {
+		cfg.Discovery.URL = discoveryURL
+	}
+	if discoveryTimeout := os.Getenv("DISCOVERY_TIMEOUT"); discoveryTimeout != "" {
+		cfg.Discovery.Timeout = getEnvInt("DISCOVERY_TIMEOUT", 5)
+	}
+	if discoveryMaxRelays := os.Getenv("DISCOVERY_MAX_RELAYS"); discoveryMaxRelays != "" {
+		cfg.Discovery.MaxRelays = getEnvInt("DISCOVERY_MAX_RELAYS", 3)
+	}
+	if discoveryInclude := os.Getenv("DISCOVERY_INCLUDE_IN_BUNKER"); discoveryInclude != "" {
+		cfg.Discovery.IncludeInBunker = discoveryInclude == "true" || discoveryInclude == "1"
 	}
 
 	return cfg, nil

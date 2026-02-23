@@ -52,6 +52,9 @@ internal/
   audit/audit.go            # Audit logging (memory/JSON backends)
   metrics/metrics.go        # Prometheus metrics and HTTP middleware
   crypto/crypto.go          # AES-256-GCM encryption for keys at rest
+  discovery/                # Optional relay discovery integration
+    discovery.go            # Discovery service client
+    selector.go             # Relay selection with fallbacks
   web/                      # Web UI
     web.go                  # Web handlers and routes
     templates/              # HTML templates
@@ -209,6 +212,11 @@ The approval page can be shared via link for async authorization.
 | **Proxy/Chaining** (Phase 12) | | |
 | `PROXY_MODE` | How to handle local proxy keys: `internal` or `external` | `internal` |
 | `PROXY_TIMEOUT` | Timeout for upstream proxy requests in seconds | `30` |
+| **Discovery** (optional) | | |
+| `DISCOVERY_URL` | Discovery service URL for relay selection (empty = disabled) | (none) |
+| `DISCOVERY_TIMEOUT` | Discovery query timeout in seconds | `5` |
+| `DISCOVERY_MAX_RELAYS` | Maximum relays to include from discovery | `3` |
+| `DISCOVERY_INCLUDE_IN_BUNKER` | Include discovered relays in bunker:// URI | `true` |
 
 ### REQUIRE_APPROVAL Behavior
 
