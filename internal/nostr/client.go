@@ -159,10 +159,10 @@ func (c *Client) Publish(ctx context.Context, event *nostr.Event) error {
 	return lastErr
 }
 
-// publishWithRateLimitRetry attempts to publish an event with automatic retry on rate limiting
+// publishWithRateLimitRetry attempts to publish an event with automatic retry on transient errors
 func publishWithRateLimitRetry(ctx context.Context, relay *nostr.Relay, event nostr.Event, maxRetries int) error {
 	var err error
-	backoff := 500 * time.Millisecond
+	backoff := 1 * time.Second
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		err = relay.Publish(ctx, event)
@@ -170,20 +170,21 @@ func publishWithRateLimitRetry(ctx context.Context, relay *nostr.Relay, event no
 			return nil
 		}
 
-		if !isRateLimited(err) || attempt == maxRetries {
+		// Retry any error that isn't definitively non-retryable
+		if !isRetryableError(err) || attempt == maxRetries {
 			return err
 		}
 
 		// Wait with exponential backoff before retrying
-		slog.Debug("rate limited, waiting before retry", "url", relay.URL, "backoff", backoff, "attempt", attempt+1)
+		slog.Debug("retryable error, waiting before retry", "url", relay.URL, "backoff", backoff, "attempt", attempt+1, "error", err.Error())
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(backoff):
 		}
 		backoff *= 2
-		if backoff > 5*time.Second {
-			backoff = 5 * time.Second
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
 		}
 	}
 	return err
@@ -373,21 +374,40 @@ func isRestricted(err error) bool {
 }
 
 // isRateLimited checks if an error indicates rate limiting
+// Uses NIP-01 standard prefix detection
 func isRateLimited(err error) bool {
 	if err == nil {
 		return false
 	}
 	errStr := strings.ToLower(err.Error())
-	// NIP-01 standard: "rate-limited:" prefix
-	// Also catch common variations and patterns used by different relay implementations
-	return strings.Contains(errStr, "rate-limit") ||
-		strings.Contains(errStr, "rate limit") ||
-		strings.Contains(errStr, "slow down") ||
-		strings.Contains(errStr, "noting too much") ||
-		strings.Contains(errStr, "too many") ||
-		strings.Contains(errStr, "too fast") ||
-		strings.Contains(errStr, "throttle") ||
-		strings.Contains(errStr, "try again later")
+	// NIP-01 defines standard prefixes for OK messages
+	// Primary check: standard "rate-limited:" prefix
+	return strings.HasPrefix(errStr, "rate-limited:") ||
+		strings.HasPrefix(errStr, "rate-limited")
+}
+
+// isRetryableError checks if an error should trigger a retry
+// This is more permissive than isRateLimited - we retry on any error
+// that isn't definitively non-retryable (invalid, duplicate, blocked)
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+
+	// NIP-01 non-retryable prefixes
+	if strings.HasPrefix(errStr, "invalid:") ||
+		strings.HasPrefix(errStr, "duplicate:") ||
+		strings.HasPrefix(errStr, "blocked:") {
+		return false
+	}
+
+	// Everything else is potentially retryable:
+	// - rate-limited: (yes, retry with backoff)
+	// - pow: (yes, retry with POW)
+	// - error: (maybe transient, retry)
+	// - anything else (unknown, assume retry might help)
+	return true
 }
 
 // Subscribe creates a subscription on all connected relays

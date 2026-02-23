@@ -242,12 +242,13 @@ func (c *KeyRelayClient) publishWithRetry(ctx context.Context, relay *nostr.Rela
 			}
 		}
 
-		// Handle rate limiting
-		if !isRateLimited(err) || attempt == maxRetries {
+		// Retry any error that isn't definitively non-retryable
+		// This is more permissive - we assume network/rate issues are transient
+		if !isRetryableError(err) || attempt == maxRetries {
 			return err
 		}
 
-		slog.Debug("rate limited, waiting before retry", "url", url, "backoff", backoff, "attempt", attempt+1)
+		slog.Debug("retryable error, waiting before retry", "url", url, "backoff", backoff, "attempt", attempt+1, "error", err.Error())
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
