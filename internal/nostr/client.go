@@ -159,6 +159,36 @@ func (c *Client) Publish(ctx context.Context, event *nostr.Event) error {
 	return lastErr
 }
 
+// publishWithRateLimitRetry attempts to publish an event with automatic retry on rate limiting
+func publishWithRateLimitRetry(ctx context.Context, relay *nostr.Relay, event nostr.Event, maxRetries int) error {
+	var err error
+	backoff := 500 * time.Millisecond
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		err = relay.Publish(ctx, event)
+		if err == nil {
+			return nil
+		}
+
+		if !isRateLimited(err) || attempt == maxRetries {
+			return err
+		}
+
+		// Wait with exponential backoff before retrying
+		slog.Debug("rate limited, waiting before retry", "url", relay.URL, "backoff", backoff, "attempt", attempt+1)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > 5*time.Second {
+			backoff = 5 * time.Second
+		}
+	}
+	return err
+}
+
 // PublishWithAdaptivePow publishes an event, automatically mining POW if required by relays.
 // The privateKey is needed to re-sign the event after adding the POW nonce tag,
 // and also for NIP-42 authentication (so event.pubkey matches authenticated identity).
@@ -170,7 +200,7 @@ func (c *Client) PublishWithAdaptivePow(ctx context.Context, event *nostr.Event,
 	successCount := 0
 
 	for url, relay := range c.relays {
-		err := relay.Publish(ctx, *event)
+		err := publishWithRateLimitRetry(ctx, relay, *event, 3)
 		if err != nil {
 			// Check if auth is required or restricted (must auth as event pubkey)
 			if privateKey != "" && (isAuthRequired(err) || isRestricted(err)) {
@@ -181,7 +211,7 @@ func (c *Client) PublishWithAdaptivePow(ctx context.Context, event *nostr.Event,
 					slog.Warn("auth failed", "url", url, "error", authErr)
 				} else {
 					// Retry publish after auth
-					err = relay.Publish(ctx, *event)
+					err = publishWithRateLimitRetry(ctx, relay, *event, 3)
 				}
 			}
 		}
@@ -223,7 +253,7 @@ func (c *Client) PublishWithAdaptivePow(ctx context.Context, event *nostr.Event,
 				}
 
 				// Try publishing the POW event
-				err = relay.Publish(ctx, unsignedEvent)
+				err = publishWithRateLimitRetry(ctx, relay, unsignedEvent, 3)
 
 				// POW event might still need auth
 				if err != nil && (isAuthRequired(err) || isRestricted(err)) {
@@ -232,7 +262,7 @@ func (c *Client) PublishWithAdaptivePow(ctx context.Context, event *nostr.Event,
 						slog.Warn("auth failed after POW", "url", url, "error", authErr)
 					} else {
 						// Retry POW event after auth
-						err = relay.Publish(ctx, unsignedEvent)
+						err = publishWithRateLimitRetry(ctx, relay, unsignedEvent, 3)
 					}
 				}
 			}
@@ -340,6 +370,19 @@ func isRestricted(err error) bool {
 	errStr := strings.ToLower(err.Error())
 	return strings.Contains(errStr, "restricted") ||
 		strings.Contains(errStr, "only publish events as your authenticated")
+}
+
+// isRateLimited checks if an error indicates rate limiting
+func isRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "rate-limit") ||
+		strings.Contains(errStr, "rate limit") ||
+		strings.Contains(errStr, "slow down") ||
+		strings.Contains(errStr, "noting too much") ||
+		strings.Contains(errStr, "too many")
 }
 
 // Subscribe creates a subscription on all connected relays
