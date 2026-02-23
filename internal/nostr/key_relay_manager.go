@@ -3,6 +3,7 @@ package nostr
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -186,14 +187,28 @@ func (c *KeyRelayClient) PublishToRelay(ctx context.Context, relayURL string, ev
 	return c.publishWithRetry(ctx, relay, event, relayURL)
 }
 
-// publishWithRetry handles rate-limiting, POW, and auth retry
+// isConnectionError checks if an error indicates a dead connection that needs reconnect
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "connection closed") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "use of closed") ||
+		strings.Contains(errStr, "eof")
+}
+
+// publishWithRetry handles rate-limiting, POW, auth retry, and connection recovery
 func (c *KeyRelayClient) publishWithRetry(ctx context.Context, relay *nostr.Relay, event *nostr.Event, url string) error {
 	var err error
 	backoff := 1 * time.Second   // Start with 1s backoff (was 500ms)
 	maxRetries := 5              // More retries for longer rate windows (was 3)
+	currentRelay := relay        // May be replaced on reconnection
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		err = relay.Publish(ctx, *event)
+		err = currentRelay.Publish(ctx, *event)
 		if err == nil {
 			return nil
 		}
@@ -205,7 +220,31 @@ func (c *KeyRelayClient) publishWithRetry(ctx context.Context, relay *nostr.Rela
 			"error", err.Error(),
 			"is_rate_limited", isRateLimited(err),
 			"is_auth_required", isAuthRequired(err),
+			"is_connection_error", isConnectionError(err),
 		)
+
+		// Handle connection errors by reconnecting
+		if isConnectionError(err) {
+			slog.Info("connection error detected, reconnecting", "url", url)
+			c.mu.Lock()
+			delete(c.relays, url) // Remove stale relay
+			newRelay, connectErr := nostr.RelayConnect(ctx, url)
+			if connectErr != nil {
+				c.mu.Unlock()
+				slog.Warn("failed to reconnect to relay", "url", url, "error", connectErr)
+				// Continue with backoff, maybe next attempt will succeed
+			} else {
+				c.relays[url] = newRelay
+				c.mu.Unlock()
+				currentRelay = newRelay
+				// Try auth on new connection
+				if authErr := c.authenticateRelay(ctx, newRelay); authErr != nil {
+					slog.Debug("auth failed on reconnected relay", "url", url, "error", authErr)
+				}
+				// Retry immediately after reconnect (no backoff for first post-reconnect attempt)
+				continue
+			}
+		}
 
 		// Handle auth required
 		if isAuthRequired(err) || isRestricted(err) {
