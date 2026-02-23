@@ -224,6 +224,17 @@ func (c *Client) PublishWithAdaptivePow(ctx context.Context, event *nostr.Event,
 
 				// Try publishing the POW event
 				err = relay.Publish(ctx, unsignedEvent)
+
+				// POW event might still need auth
+				if err != nil && (isAuthRequired(err) || isRestricted(err)) {
+					slog.Info("auth required after POW, authenticating with event key", "url", url)
+					if authErr := c.authenticateRelayWithKey(ctx, relay, privateKey); authErr != nil {
+						slog.Warn("auth failed after POW", "url", url, "error", authErr)
+					} else {
+						// Retry POW event after auth
+						err = relay.Publish(ctx, unsignedEvent)
+					}
+				}
 			}
 		}
 
