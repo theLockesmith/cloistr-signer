@@ -76,13 +76,17 @@ type Signer struct {
 	encryptor       *crypto.Encryptor
 	proxyClient     *proxy.Client                       // Client for upstream signer connections
 	keys            map[string]string                   // pubkey -> private key (hex)
+	keysLock        sync.RWMutex                        // Protects keys map for concurrent access
 	keyRelays       map[string][]string                 // pubkey -> configured relays (from storage)
 	proxyKeys       map[string]string                   // pubkey -> bunker URI (for proxy keys)
 	pendingCtx      map[string]*pendingRequestContext   // requestID -> context
 	pendingCtxLock  sync.RWMutex
 	seenEvents      map[string]time.Time                // event ID -> first seen time (deduplication)
 	seenEventsLock  sync.RWMutex
+	ctx             context.Context                     // Main context for subscription management
 	cancel          context.CancelFunc
+	subCancel       context.CancelFunc                  // Cancel function for current subscription
+	subLock         sync.Mutex                          // Protects subscription refresh
 }
 
 // New creates a new NIP-46 signer
@@ -104,20 +108,21 @@ func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, e
 
 // Start begins listening for NIP-46 requests
 func (s *Signer) Start(ctx context.Context) error {
-	ctx, s.cancel = context.WithCancel(ctx)
+	s.ctx, s.cancel = context.WithCancel(ctx)
 
 	// Connect to relays
-	if err := s.relayClient.Connect(ctx); err != nil {
+	if err := s.relayClient.Connect(s.ctx); err != nil {
 		return fmt.Errorf("failed to connect to relays: %w", err)
 	}
 
 	// Load keys from storage
-	keys, err := s.storage.ListKeys(ctx)
+	keys, err := s.storage.ListKeys(s.ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load keys: %w", err)
 	}
 
 	// Load any existing keys into runtime map
+	s.keysLock.Lock()
 	for _, key := range keys {
 		// Decrypt the local private key if needed (both local and proxy keys have this)
 		privateKey := key.EncryptedNsec
@@ -148,26 +153,70 @@ func (s *Signer) Start(ctx context.Context) error {
 			slog.Info("loaded proxy key", "pubkey", key.Pubkey[:16]+"...", "upstream", upstreamShort)
 		}
 	}
+	s.keysLock.Unlock()
 
 	if len(keys) == 0 {
-		slog.Warn("no keys configured yet, will respond once keys are added via API")
+		slog.Warn("no keys configured yet, will subscribe once keys are added via API")
 	} else {
 		slog.Info("loaded keys from storage", "count", len(keys))
 	}
 	metrics.SetKeysManaged(len(keys))
 
-	// Subscribe to ALL kind:24133 events - we filter by our keys in handleEvent
-	// This allows dynamic key addition via the HTTP API
-	// Using SubscribeWithRelayInfoReconnect to track source relay for targeted responses
-	filters := nostr.Filters{{
-		Kinds: []int{KindNIP46Request},
-	}}
-
-	slog.Info("subscribing to NIP-46 requests")
-
-	go s.relayClient.SubscribeWithRelayInfoReconnect(ctx, filters, s.handleEventWithRelay)
+	// Start subscription with #p filter for our keys
+	s.refreshSubscription()
 
 	return nil
+}
+
+// refreshSubscription updates the relay subscription with current pubkeys.
+// Call this when keys are added or removed.
+func (s *Signer) refreshSubscription() {
+	s.subLock.Lock()
+	defer s.subLock.Unlock()
+
+	// If Start() hasn't been called yet, skip subscription refresh
+	if s.ctx == nil {
+		return
+	}
+
+	// Cancel existing subscription if any
+	if s.subCancel != nil {
+		s.subCancel()
+	}
+
+	// Get current pubkeys
+	s.keysLock.RLock()
+	pubkeys := make([]string, 0, len(s.keys))
+	for pubkey := range s.keys {
+		pubkeys = append(pubkeys, pubkey)
+	}
+	s.keysLock.RUnlock()
+
+	if len(pubkeys) == 0 {
+		slog.Info("no keys to subscribe for, waiting for keys to be added")
+		return
+	}
+
+	// Create subscription context
+	subCtx, cancel := context.WithCancel(s.ctx)
+	s.subCancel = cancel
+
+	// Subscribe with #p filter - relay will only send events addressed to our keys
+	// This is the proper way to do NIP-46 subscriptions at scale
+	filters := nostr.Filters{{
+		Kinds: []int{KindNIP46Request},
+		Tags:  nostr.TagMap{"p": pubkeys},
+	}}
+
+	slog.Info("subscribing to NIP-46 requests", "pubkeys", len(pubkeys))
+
+	go s.relayClient.SubscribeWithRelayInfoReconnect(subCtx, filters, s.handleEventWithRelay)
+}
+
+// RefreshSubscription is the public method to trigger subscription refresh.
+// Call this after adding or removing keys via the API.
+func (s *Signer) RefreshSubscription() {
+	s.refreshSubscription()
 }
 
 // Stop stops the signer
@@ -179,14 +228,34 @@ func (s *Signer) Stop() {
 }
 
 // RegisterKey registers a key for signing (runtime, not persisted)
+// Also refreshes the relay subscription to include the new key.
 func (s *Signer) RegisterKey(pubkey, privateKeyHex string) {
+	s.keysLock.Lock()
 	s.keys[pubkey] = privateKeyHex
+	s.keysLock.Unlock()
+	s.refreshSubscription()
 }
 
 // RegisterProxyKey registers a proxy key that forwards to an upstream signer (runtime, not persisted)
+// Also refreshes the relay subscription to include the new key.
 func (s *Signer) RegisterProxyKey(pubkey, privateKeyHex, bunkerURI string) {
+	s.keysLock.Lock()
 	s.keys[pubkey] = privateKeyHex
 	s.proxyKeys[pubkey] = bunkerURI
+	s.keysLock.Unlock()
+	s.refreshSubscription()
+}
+
+// UnregisterKey removes a key from the signer (runtime only).
+// Also refreshes the relay subscription to remove the key.
+func (s *Signer) UnregisterKey(pubkey string) {
+	s.keysLock.Lock()
+	delete(s.keys, pubkey)
+	delete(s.proxyKeys, pubkey)
+	delete(s.keyRelays, pubkey)
+	s.keysLock.Unlock()
+	s.keyRelayManager.RemoveClient(pubkey)
+	s.refreshSubscription()
 }
 
 // handleEventWithRelay wraps event handling with source relay tracking for targeted responses
@@ -212,10 +281,14 @@ func (s *Signer) handleEventWithRelay(event *nostr.Event, sourceRelay string) {
 	}
 	s.seenEventsLock.Unlock()
 
+	// Lock keys for reading during event handling
+	s.keysLock.RLock()
+
 	// Ignore events authored by our own keys (these are responses, not requests)
 	// This prevents the signer from trying to process its own responses
 	// when using same-instance proxy keys
 	if _, isOurKey := s.keys[event.PubKey]; isOurKey {
+		s.keysLock.RUnlock()
 		slog.Debug("ignoring event from our own key", "event_id", event.ID, "author", event.PubKey[:16]+"...")
 		return
 	}
@@ -232,11 +305,14 @@ func (s *Signer) handleEventWithRelay(event *nostr.Event, sourceRelay string) {
 	}
 
 	if targetPubkey == "" {
+		s.keysLock.RUnlock()
 		slog.Debug("event not addressed to any of our keys", "event_id", event.ID)
 		return
 	}
 
 	privateKey := s.keys[targetPubkey]
+	s.keysLock.RUnlock()
+
 	clientPubkey := event.PubKey
 
 	slog.Info("received NIP-46 request",
