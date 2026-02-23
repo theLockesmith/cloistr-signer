@@ -180,19 +180,6 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 		return
 	}
 
-	// Log every NIP-46 event received for debugging
-	pTags := []string{}
-	for _, tag := range event.Tags {
-		if len(tag) >= 2 && tag[0] == "p" {
-			pTags = append(pTags, tag[1][:16]+"...")
-		}
-	}
-	slog.Info("NIP-46 event received",
-		"event_id", event.ID[:16]+"...",
-		"author", event.PubKey[:16]+"...",
-		"p_tags", pTags,
-	)
-
 	// Ignore events authored by our own keys (these are responses, not requests)
 	// This prevents the signer from trying to process its own responses
 	// when using same-instance proxy keys
