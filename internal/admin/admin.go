@@ -67,15 +67,24 @@ func (h *Handler) Start(ctx context.Context) error {
 
 	if h.signerPubkey == "" {
 		slog.Warn("no signer key set for admin handler, will use first available key")
+		return nil
 	}
 
-	// Subscribe to DMs addressed to our keys from admin pubkeys
+	// Subscribe to DMs addressed TO the signer FROM admin pubkeys
+	// Using #p tag filter to only get DMs meant for us, not all admin DMs
+	// Also filter by timestamp to avoid processing old historical DMs
+	since := nostr.Timestamp(time.Now().Add(-1 * time.Hour).Unix())
 	filters := nostr.Filters{{
 		Kinds:   []int{KindEncryptedDM},
 		Authors: h.config.Auth.AdminPubkeys,
+		Tags:    nostr.TagMap{"p": []string{h.signerPubkey}},
+		Since:   &since,
 	}}
 
-	slog.Info("subscribing to admin DM commands", "admin_count", len(h.config.Auth.AdminPubkeys))
+	slog.Info("subscribing to admin DM commands",
+		"admin_count", len(h.config.Auth.AdminPubkeys),
+		"signer_pubkey", h.signerPubkey[:16]+"...",
+	)
 
 	go h.relayClient.SubscribeWithReconnect(ctx, filters, h.handleEvent)
 
