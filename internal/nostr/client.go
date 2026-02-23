@@ -177,6 +177,7 @@ func (c *Client) PublishWithAdaptivePow(ctx context.Context, event *nostr.Event,
 		// Check if POW is required
 		if err != nil {
 			difficulty := parsePowRequirement(err.Error())
+			slog.Info("POW check", "url", url, "error", err.Error(), "difficulty", difficulty, "has_privkey", privateKey != "")
 			if difficulty > 0 && privateKey != "" {
 				slog.Info("relay requires POW, mining...", "url", url, "difficulty", difficulty)
 
