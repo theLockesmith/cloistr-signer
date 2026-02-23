@@ -570,6 +570,7 @@ func (h *Handler) handleApps(w http.ResponseWriter, r *http.Request) {
 	keys, _ := h.storage.ListKeys(r.Context())
 
 	var keyApps []KeyApps
+	totalUnknown := 0
 	for _, key := range keys {
 		perms, _ := h.storage.ListPermissions(r.Context(), key.Pubkey)
 		if len(perms) == 0 {
@@ -578,6 +579,13 @@ func (h *Handler) handleApps(w http.ResponseWriter, r *http.Request) {
 
 		// Group permissions by app name
 		appGroups := groupPermissionsByApp(perms)
+
+		// Count unknown apps
+		for _, g := range appGroups {
+			if g.AppName == "" {
+				totalUnknown += g.SessionCount
+			}
+		}
 
 		keyApps = append(keyApps, KeyApps{
 			KeyID:         key.ID,
@@ -589,23 +597,24 @@ func (h *Handler) handleApps(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, "apps.html", map[string]interface{}{
-		"Title":   "Connected Apps - Cloistr Signer",
-		"User":    user,
-		"KeyApps": keyApps,
-		"Keys":    keys,
+		"Title":        "Connected Apps - Cloistr Signer",
+		"User":         user,
+		"KeyApps":      keyApps,
+		"Keys":         keys,
+		"TotalUnknown": totalUnknown,
 	})
 }
 
-// groupPermissionsByApp groups permissions by app name, with unknown apps grouped separately
+// groupPermissionsByApp groups permissions by app name, with unknown apps grouped together
 func groupPermissionsByApp(perms []*storage.Permission) []AppGroup {
-	// Group by app name (empty string = unknown)
+	// Group by app name (empty string = all unknown apps grouped together)
 	groups := make(map[string]*AppGroup)
 
 	for _, perm := range perms {
 		appKey := perm.AppName
 		if appKey == "" {
-			// Use pubkey as key for unknown apps so each gets its own entry
-			appKey = "unknown:" + perm.UserPubkey
+			// Group all unknown apps together for bulk revocation
+			appKey = ""
 		}
 
 		group, exists := groups[appKey]

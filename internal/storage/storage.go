@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -263,11 +264,13 @@ type Storage interface {
 func New(cfg config.StorageConfig) (Storage, error) {
 	switch cfg.Type {
 	case "memory", "":
+		slog.Info("using in-memory storage (data will not persist across restarts)")
 		return NewMemoryStorage(), nil
 	case "postgres":
 		if cfg.DSN == "" {
 			return nil, fmt.Errorf("postgres storage requires DSN (DATABASE_URL)")
 		}
+		slog.Info("using PostgreSQL storage")
 		return NewPostgresStorage(cfg.DSN)
 	case "sqlite":
 		return nil, fmt.Errorf("sqlite storage not yet implemented")

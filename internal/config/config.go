@@ -173,6 +173,10 @@ func Load() (*Config, error) {
 
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
 		cfg.Storage.DSN = dsn
+		// Auto-select postgres if DATABASE_URL is set and STORAGE_TYPE wasn't explicit
+		if os.Getenv("STORAGE_TYPE") == "" {
+			cfg.Storage.Type = "postgres"
+		}
 	}
 
 	if vaultURL := os.Getenv("VAULT_URL"); vaultURL != "" {

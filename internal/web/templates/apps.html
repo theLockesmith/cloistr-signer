@@ -2,6 +2,11 @@
 <div class="page-header">
     <h1>Connected Apps</h1>
     <div class="header-actions">
+        {{if gt .TotalUnknown 0}}
+        <button id="cleanup-unknown-btn" class="btn btn-warning" title="Remove all sessions from apps that didn't identify themselves">
+            Clean Up Unknown ({{.TotalUnknown}})
+        </button>
+        {{end}}
         <button id="bulk-revoke-btn" class="btn btn-danger" style="display: none;">Revoke Selected</button>
         <button id="connect-app-btn" class="btn btn-primary">Connect to App</button>
     </div>
@@ -552,6 +557,78 @@ document.addEventListener('DOMContentLoaded', function() {
             ButtonState.reset(submitBtn);
         }
     });
+
+    // Clean up unknown apps
+    const cleanupBtn = document.getElementById('cleanup-unknown-btn');
+    if (cleanupBtn) {
+        cleanupBtn.addEventListener('click', async function() {
+            // Find all unknown app groups (those with empty app-name data attribute)
+            const unknownGroups = document.querySelectorAll('.app-group');
+            let unknownSessions = [];
+
+            unknownGroups.forEach(group => {
+                const revokeAllBtn = group.querySelector('.revoke-all-btn');
+                if (revokeAllBtn && !revokeAllBtn.dataset.appName) {
+                    // This is an unknown app group
+                    group.querySelectorAll('.session-row').forEach(row => {
+                        unknownSessions.push({
+                            keyPubkey: group.dataset.keyPubkey,
+                            pubkey: row.dataset.pubkey,
+                            element: row,
+                            group: group
+                        });
+                    });
+                }
+            });
+
+            if (unknownSessions.length === 0) {
+                showMessage('No unknown apps to clean up', 'info');
+                return;
+            }
+
+            if (!confirm(`Remove ${unknownSessions.length} session(s) from unknown apps? These are apps that didn't identify themselves when connecting.`)) {
+                return;
+            }
+
+            ButtonState.setLoading(this, 'Cleaning...');
+
+            let successCount = 0;
+            for (const session of unknownSessions) {
+                try {
+                    const response = await fetch(`/api/v1/keys/${session.keyPubkey}/permissions/${session.pubkey}`, {
+                        method: 'DELETE'
+                    });
+                    if (response.ok) {
+                        session.element.remove();
+                        successCount++;
+                    }
+                } catch (err) {
+                    console.error('Failed to revoke:', err);
+                }
+            }
+
+            // Remove empty unknown groups
+            unknownGroups.forEach(group => {
+                const revokeAllBtn = group.querySelector('.revoke-all-btn');
+                if (revokeAllBtn && !revokeAllBtn.dataset.appName) {
+                    const remaining = group.querySelectorAll('.session-row');
+                    if (remaining.length === 0) {
+                        group.remove();
+                    }
+                }
+            });
+
+            showMessage(`Cleaned up ${successCount} unknown session(s)`, 'success');
+            updateSessionCounts();
+
+            // Hide button if all cleaned up
+            if (successCount === unknownSessions.length) {
+                this.style.display = 'none';
+            } else {
+                ButtonState.reset(this);
+            }
+        });
+    }
 
     // Bulk revoke
     bulkRevokeBtn.addEventListener('click', async function() {
