@@ -1906,9 +1906,10 @@ type NostrConnectRequest struct {
 }
 
 type NostrConnectResponse struct {
-	Success     bool   `json:"success"`
-	AppName     string `json:"app_name,omitempty"`
-	AppURL      string `json:"app_url,omitempty"`
+	Success      bool   `json:"success"`
+	AppName      string `json:"app_name,omitempty"`
+	AppURL       string `json:"app_url,omitempty"`
+	AppImage     string `json:"app_image,omitempty"`
 	ClientPubkey string `json:"client_pubkey"`
 }
 
@@ -1961,7 +1962,7 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse query parameters
-	var relay, secret, appName, appURL string
+	var relay, secret, appName, appURL, appImage string
 	if len(parts) > 1 {
 		params := strings.Split(parts[1], "&")
 		for _, param := range params {
@@ -1984,6 +1985,8 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 				appName = value
 			case "url":
 				appURL = value
+			case "image":
+				appImage = value
 			}
 		}
 	}
@@ -2009,6 +2012,9 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 		KeyID:      key.Pubkey,
 		UserPubkey: clientPubkey,
 		Methods:    []string{"connect", "sign_event", "get_public_key", "nip44_encrypt", "nip44_decrypt"},
+		AppName:    appName,
+		AppURL:     appURL,
+		AppImage:   appImage,
 	}
 
 	if err := h.storage.SetPermission(r.Context(), perm); err != nil {
@@ -2030,6 +2036,7 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 		Success:      true,
 		AppName:      appName,
 		AppURL:       appURL,
+		AppImage:     appImage,
 		ClientPubkey: clientPubkey,
 	})
 }

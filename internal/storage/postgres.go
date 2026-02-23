@@ -87,6 +87,13 @@ func (ps *PostgresStorage) migrate() error {
 	-- Add require_approval column if it doesn't exist (migration)
 	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS require_approval BOOLEAN;
 
+	-- Add app metadata columns (migration for grouped apps UI)
+	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS app_name TEXT;
+	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS app_url TEXT;
+	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS app_image TEXT;
+	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ;
+
 	CREATE INDEX IF NOT EXISTS idx_signer_permissions_key_id ON signer_permissions(key_id);
 
 	CREATE TABLE IF NOT EXISTS signer_sessions (
@@ -389,29 +396,39 @@ func (ps *PostgresStorage) DeleteKey(ctx context.Context, id string) error {
 // Permission management
 
 func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) error {
+	// Set created_at if not set
+	if perm.CreatedAt.IsZero() {
+		perm.CreatedAt = time.Now()
+	}
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO signer_permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO signer_permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, created_at, last_used_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (key_id, user_pubkey) DO UPDATE SET
 			methods = EXCLUDED.methods,
 			allowed_kinds = EXCLUDED.allowed_kinds,
 			expires_at = EXCLUDED.expires_at,
 			policy_id = EXCLUDED.policy_id,
-			require_approval = EXCLUDED.require_approval`,
-		perm.KeyID, perm.UserPubkey, pq.Array(perm.Methods), intArrayToInt64(perm.AllowedKinds), perm.ExpiresAt, perm.PolicyID, perm.RequireApproval)
+			require_approval = EXCLUDED.require_approval,
+			app_name = COALESCE(EXCLUDED.app_name, signer_permissions.app_name),
+			app_url = COALESCE(EXCLUDED.app_url, signer_permissions.app_url),
+			app_image = COALESCE(EXCLUDED.app_image, signer_permissions.app_image)`,
+		perm.KeyID, perm.UserPubkey, pq.Array(perm.Methods), intArrayToInt64(perm.AllowedKinds), perm.ExpiresAt, perm.PolicyID, perm.RequireApproval,
+		nullString(perm.AppName), nullString(perm.AppURL), nullString(perm.AppImage), perm.CreatedAt, perm.LastUsedAt)
 	return err
 }
 
 func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey string) (*Permission, error) {
 	perm := &Permission{}
-	var expiresAt sql.NullTime
-	var policyID sql.NullString
+	var expiresAt, lastUsedAt sql.NullTime
+	var policyID, appName, appURL, appImage sql.NullString
 	var allowedKinds pq.Int64Array
 	var requireApproval sql.NullBool
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval
+		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval,
+		       app_name, app_url, app_image, created_at, last_used_at
 		FROM signer_permissions WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey).
-		Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval)
+		Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval,
+			&appName, &appURL, &appImage, &perm.CreatedAt, &lastUsedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotAuthorized
 	}
@@ -432,12 +449,25 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 	if requireApproval.Valid {
 		perm.RequireApproval = &requireApproval.Bool
 	}
+	if appName.Valid {
+		perm.AppName = appName.String
+	}
+	if appURL.Valid {
+		perm.AppURL = appURL.String
+	}
+	if appImage.Valid {
+		perm.AppImage = appImage.String
+	}
+	if lastUsedAt.Valid {
+		perm.LastUsedAt = &lastUsedAt.Time
+	}
 	return perm, nil
 }
 
 func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([]*Permission, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval
+		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval,
+		       app_name, app_url, app_image, created_at, last_used_at
 		FROM signer_permissions WHERE key_id = $1`, keyID)
 	if err != nil {
 		return nil, err
@@ -447,11 +477,12 @@ func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([
 	var perms []*Permission
 	for rows.Next() {
 		perm := &Permission{}
-		var expiresAt sql.NullTime
-		var policyID sql.NullString
+		var expiresAt, lastUsedAt sql.NullTime
+		var policyID, appName, appURL, appImage sql.NullString
 		var allowedKinds pq.Int64Array
 		var requireApproval sql.NullBool
-		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval); err != nil {
+		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval,
+			&appName, &appURL, &appImage, &perm.CreatedAt, &lastUsedAt); err != nil {
 			return nil, err
 		}
 		perm.AllowedKinds = int64ArrayToInt(allowedKinds)
@@ -464,6 +495,18 @@ func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([
 		if requireApproval.Valid {
 			perm.RequireApproval = &requireApproval.Bool
 		}
+		if appName.Valid {
+			perm.AppName = appName.String
+		}
+		if appURL.Valid {
+			perm.AppURL = appURL.String
+		}
+		if appImage.Valid {
+			perm.AppImage = appImage.String
+		}
+		if lastUsedAt.Valid {
+			perm.LastUsedAt = &lastUsedAt.Time
+		}
 		perms = append(perms, perm)
 	}
 	return perms, rows.Err()
@@ -472,6 +515,12 @@ func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([
 func (ps *PostgresStorage) DeletePermission(ctx context.Context, keyID, userPubkey string) error {
 	_, err := ps.db.ExecContext(ctx, `
 		DELETE FROM signer_permissions WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey)
+	return err
+}
+
+func (ps *PostgresStorage) UpdatePermissionLastUsed(ctx context.Context, keyID, userPubkey string) error {
+	_, err := ps.db.ExecContext(ctx, `
+		UPDATE signer_permissions SET last_used_at = NOW() WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey)
 	return err
 }
 

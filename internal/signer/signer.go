@@ -458,6 +458,13 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 			return
 		}
 
+		// Update last used timestamp (async, don't block on this)
+		go func() {
+			if err := s.storage.UpdatePermissionLastUsed(ctx, targetPubkey, clientPubkey); err != nil {
+				slog.Debug("failed to update last used timestamp", "error", err)
+			}
+		}()
+
 		s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, result, useNIP44)
 		return
 	}
@@ -487,6 +494,12 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 					s.sendError(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, err.Error(), useNIP44)
 					return
 				}
+				// Update last used timestamp (async)
+				go func() {
+					if err := s.storage.UpdatePermissionLastUsed(ctx, targetPubkey, clientPubkey); err != nil {
+						slog.Debug("failed to update last used timestamp", "error", err)
+					}
+				}()
 				s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, result, useNIP44)
 				return
 			}

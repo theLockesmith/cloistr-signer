@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -222,8 +223,59 @@ type Handler struct {
 func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHandler RequestHandler) (*Handler, error) {
 	// Create base template with functions
 	funcs := template.FuncMap{
-		"formatTime": func(t time.Time) string {
-			return t.Format("2006-01-02 15:04:05")
+		"formatTime": func(t interface{}) string {
+			switch v := t.(type) {
+			case time.Time:
+				return v.Format("2006-01-02 15:04:05")
+			case *time.Time:
+				if v == nil {
+					return "Never"
+				}
+				return v.Format("2006-01-02 15:04:05")
+			default:
+				return ""
+			}
+		},
+		"relativeTime": func(t interface{}) string {
+			var tm time.Time
+			switch v := t.(type) {
+			case time.Time:
+				tm = v
+			case *time.Time:
+				if v == nil {
+					return "Never"
+				}
+				tm = *v
+			default:
+				return ""
+			}
+
+			now := time.Now()
+			diff := now.Sub(tm)
+
+			if diff < time.Minute {
+				return "just now"
+			} else if diff < time.Hour {
+				mins := int(diff.Minutes())
+				if mins == 1 {
+					return "1 minute ago"
+				}
+				return fmt.Sprintf("%d minutes ago", mins)
+			} else if diff < 24*time.Hour {
+				hours := int(diff.Hours())
+				if hours == 1 {
+					return "1 hour ago"
+				}
+				return fmt.Sprintf("%d hours ago", hours)
+			} else if diff < 7*24*time.Hour {
+				days := int(diff.Hours() / 24)
+				if days == 1 {
+					return "yesterday"
+				}
+				return fmt.Sprintf("%d days ago", days)
+			} else {
+				return tm.Format("Jan 2, 2006")
+			}
 		},
 		"truncate": func(s string, n int) string {
 			if len(s) <= n {
@@ -493,30 +545,117 @@ type AppPermissions struct {
 	Permissions []*storage.Permission
 }
 
+// AppGroup represents an app with all its sessions (permissions) for a key
+type AppGroup struct {
+	AppName      string                // Display name (or npub if empty)
+	AppURL       string                // App URL if available
+	AppImage     string                // App icon URL if available
+	Sessions     []*storage.Permission // All sessions/permissions for this app
+	SessionCount int                   // Number of sessions
+	LastUsedAt   *time.Time            // Most recent activity across all sessions
+}
+
+// KeyApps represents all apps connected to a key, grouped by app name
+type KeyApps struct {
+	KeyID         string
+	KeyName       string
+	KeyPubkey     string
+	Apps          []AppGroup
+	TotalSessions int
+}
+
 // handleApps serves the connected apps management page
 func (h *Handler) handleApps(w http.ResponseWriter, r *http.Request) {
 	user := h.getCurrentUser(r)
 	keys, _ := h.storage.ListKeys(r.Context())
 
-	var apps []AppPermissions
+	var keyApps []KeyApps
 	for _, key := range keys {
 		perms, _ := h.storage.ListPermissions(r.Context(), key.Pubkey)
-		if len(perms) > 0 {
-			apps = append(apps, AppPermissions{
-				KeyID:       key.ID,
-				KeyName:     key.Name,
-				KeyPubkey:   key.Pubkey,
-				Permissions: perms,
-			})
+		if len(perms) == 0 {
+			continue
 		}
+
+		// Group permissions by app name
+		appGroups := groupPermissionsByApp(perms)
+
+		keyApps = append(keyApps, KeyApps{
+			KeyID:         key.ID,
+			KeyName:       key.Name,
+			KeyPubkey:     key.Pubkey,
+			Apps:          appGroups,
+			TotalSessions: len(perms),
+		})
 	}
 
 	h.render(w, "apps.html", map[string]interface{}{
-		"Title": "Connected Apps - Cloistr Signer",
-		"User":  user,
-		"Apps":  apps,
-		"Keys":  keys,
+		"Title":   "Connected Apps - Cloistr Signer",
+		"User":    user,
+		"KeyApps": keyApps,
+		"Keys":    keys,
 	})
+}
+
+// groupPermissionsByApp groups permissions by app name, with unknown apps grouped separately
+func groupPermissionsByApp(perms []*storage.Permission) []AppGroup {
+	// Group by app name (empty string = unknown)
+	groups := make(map[string]*AppGroup)
+
+	for _, perm := range perms {
+		appKey := perm.AppName
+		if appKey == "" {
+			// Use pubkey as key for unknown apps so each gets its own entry
+			appKey = "unknown:" + perm.UserPubkey
+		}
+
+		group, exists := groups[appKey]
+		if !exists {
+			group = &AppGroup{
+				AppName:  perm.AppName,
+				AppURL:   perm.AppURL,
+				AppImage: perm.AppImage,
+			}
+			groups[appKey] = group
+		}
+
+		group.Sessions = append(group.Sessions, perm)
+		group.SessionCount++
+
+		// Track most recent activity
+		if perm.LastUsedAt != nil {
+			if group.LastUsedAt == nil || perm.LastUsedAt.After(*group.LastUsedAt) {
+				group.LastUsedAt = perm.LastUsedAt
+			}
+		}
+	}
+
+	// Convert to slice and sort by last used (most recent first)
+	result := make([]AppGroup, 0, len(groups))
+	for _, group := range groups {
+		result = append(result, *group)
+	}
+
+	// Sort: known apps first (by name), then unknown apps
+	sort.Slice(result, func(i, j int) bool {
+		// Known apps before unknown
+		if (result[i].AppName != "") != (result[j].AppName != "") {
+			return result[i].AppName != ""
+		}
+		// Within same category, sort by last used (most recent first)
+		if result[i].LastUsedAt != nil && result[j].LastUsedAt != nil {
+			return result[i].LastUsedAt.After(*result[j].LastUsedAt)
+		}
+		if result[i].LastUsedAt != nil {
+			return true
+		}
+		if result[j].LastUsedAt != nil {
+			return false
+		}
+		// Fall back to app name or pubkey
+		return result[i].AppName < result[j].AppName
+	})
+
+	return result
 }
 
 // handleRequests serves the pending requests page

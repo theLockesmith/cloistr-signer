@@ -67,6 +67,12 @@ type Permission struct {
 	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 	PolicyID        string     `json:"policy_id,omitempty"`        // Source policy for usage tracking
 	RequireApproval *bool      `json:"require_approval,omitempty"` // Override key's default (nil = use key default)
+	// App metadata - populated from nostrconnect:// URI or connect request
+	AppName    string     `json:"app_name,omitempty"`
+	AppURL     string     `json:"app_url,omitempty"`
+	AppImage   string     `json:"app_image,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
 // Session represents an active NIP-46 session
@@ -187,6 +193,7 @@ type Storage interface {
 	GetPermission(ctx context.Context, keyID, userPubkey string) (*Permission, error)
 	ListPermissions(ctx context.Context, keyID string) ([]*Permission, error)
 	DeletePermission(ctx context.Context, keyID, userPubkey string) error
+	UpdatePermissionLastUsed(ctx context.Context, keyID, userPubkey string) error
 
 	// Session management
 	CreateSession(ctx context.Context, session *Session) error
@@ -428,6 +435,11 @@ func (m *MemoryStorage) SetPermission(ctx context.Context, perm *Permission) err
 		return ErrKeyNotFound
 	}
 
+	// Set CreatedAt if not already set
+	if perm.CreatedAt.IsZero() {
+		perm.CreatedAt = time.Now()
+	}
+
 	if m.permissions[perm.KeyID] == nil {
 		m.permissions[perm.KeyID] = make(map[string]*Permission)
 	}
@@ -482,6 +494,25 @@ func (m *MemoryStorage) DeletePermission(ctx context.Context, keyID, userPubkey 
 	}
 
 	delete(perms, userPubkey)
+	return nil
+}
+
+func (m *MemoryStorage) UpdatePermissionLastUsed(ctx context.Context, keyID, userPubkey string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	perms, exists := m.permissions[keyID]
+	if !exists {
+		return nil
+	}
+
+	perm, exists := perms[userPubkey]
+	if !exists {
+		return nil
+	}
+
+	now := time.Now()
+	perm.LastUsedAt = &now
 	return nil
 }
 

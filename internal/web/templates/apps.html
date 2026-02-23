@@ -1,68 +1,97 @@
 {{define "content"}}
 <div class="page-header">
     <h1>Connected Apps</h1>
-    <button id="connect-app-btn" class="btn btn-primary">Connect to App</button>
+    <div class="header-actions">
+        <button id="bulk-revoke-btn" class="btn btn-danger" style="display: none;">Revoke Selected</button>
+        <button id="connect-app-btn" class="btn btn-primary">Connect to App</button>
+    </div>
 </div>
 
 <div id="message" class="alert" style="display: none;"></div>
 
-{{if .Apps}}
-{{range .Apps}}
-<div class="card" style="margin-bottom: 1rem;">
+{{if .KeyApps}}
+{{range .KeyApps}}
+<div class="card key-apps-card" style="margin-bottom: 1.5rem;">
     <div class="card-header">
         <strong>{{.KeyName}}</strong>
         <span class="text-muted">({{truncate .KeyPubkey 16}}...)</span>
+        <span class="badge" style="margin-left: 0.5rem;">{{.TotalSessions}} session{{if ne .TotalSessions 1}}s{{end}}</span>
     </div>
-    <div class="table-container">
-        <table class="data-table">
-            <thead>
-                <tr>
-                    <th>Client</th>
-                    <th>Methods</th>
-                    <th>Allowed Kinds</th>
-                    <th>Expires</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                {{range .Permissions}}
-                <tr>
-                    <td class="pubkey">{{npubShort .UserPubkey}}</td>
-                    <td>
+    <div class="apps-list">
+        {{range .Apps}}
+        <div class="app-group" data-key-pubkey="{{$.KeyPubkey}}">
+            <div class="app-header" onclick="toggleAppSessions(this)">
+                <div class="app-info">
+                    {{if .AppImage}}
+                    <img src="{{.AppImage}}" alt="" class="app-icon" onerror="this.style.display='none'">
+                    {{end}}
+                    <div class="app-details">
+                        <span class="app-name">
+                            {{if .AppName}}
+                                {{.AppName}}
+                            {{else}}
+                                <span class="text-muted">Unknown App</span>
+                            {{end}}
+                        </span>
+                        {{if .AppURL}}
+                        <a href="{{.AppURL}}" target="_blank" class="app-url text-muted">{{.AppURL}}</a>
+                        {{end}}
+                    </div>
+                </div>
+                <div class="app-meta">
+                    <span class="session-count">{{.SessionCount}} session{{if ne .SessionCount 1}}s{{end}}</span>
+                    {{if .LastUsedAt}}
+                    <span class="last-used text-muted" title="Last active: {{formatTime .LastUsedAt}}">{{relativeTime .LastUsedAt}}</span>
+                    {{end}}
+                    <button class="btn btn-sm btn-danger revoke-all-btn"
+                            data-key-pubkey="{{$.KeyPubkey}}"
+                            data-app-name="{{.AppName}}"
+                            onclick="event.stopPropagation(); revokeAllSessions(this)">
+                        Revoke All
+                    </button>
+                    <span class="expand-icon">&#9660;</span>
+                </div>
+            </div>
+            <div class="app-sessions" style="display: none;">
+                {{range .Sessions}}
+                <div class="session-row" data-pubkey="{{.UserPubkey}}">
+                    <label class="session-select">
+                        <input type="checkbox" class="session-checkbox"
+                               data-key-pubkey="{{$.KeyPubkey}}"
+                               data-pubkey="{{.UserPubkey}}"
+                               onchange="updateBulkButton()">
+                    </label>
+                    <div class="session-info">
+                        <span class="session-pubkey monospace">{{npubShort .UserPubkey}}</span>
+                        <div class="session-meta">
+                            <span class="text-muted">Created {{relativeTime .CreatedAt}}</span>
+                            {{if .LastUsedAt}}
+                            <span class="text-muted">• Last used {{relativeTime .LastUsedAt}}</span>
+                            {{else}}
+                            <span class="text-muted">• Never used</span>
+                            {{end}}
+                        </div>
+                    </div>
+                    <div class="session-methods">
                         {{range .Methods}}
-                        <span class="badge">{{.}}</span>
+                        <span class="badge badge-sm">{{.}}</span>
                         {{end}}
-                    </td>
-                    <td class="allowed-kinds-cell">
-                        {{if .AllowedKinds}}
-                        {{range .AllowedKinds}}
-                        <span class="kind-tag" title="{{kindName .}}">{{.}}</span>
-                        {{end}}
-                        {{else}}
-                        <span class="text-muted">All kinds</span>
-                        {{end}}
-                    </td>
-                    <td>
-                        {{if .ExpiresAt}}
-                        {{formatTime .ExpiresAt}}
-                        {{else}}
-                        <span class="text-muted">Never</span>
-                        {{end}}
-                    </td>
-                    <td>
+                    </div>
+                    <div class="session-actions">
                         <button class="btn btn-sm edit-btn"
                                 data-key-pubkey="{{$.KeyPubkey}}"
                                 data-pubkey="{{.UserPubkey}}"
                                 data-methods="{{json .Methods}}"
                                 data-kinds="{{json .AllowedKinds}}">Edit</button>
                         <button class="btn btn-sm btn-danger revoke-btn"
-                                data-key-id="{{$.KeyID}}"
+                                data-key-pubkey="{{$.KeyPubkey}}"
                                 data-pubkey="{{.UserPubkey}}">Revoke</button>
-                    </td>
-                </tr>
+                    </div>
+                </div>
                 {{end}}
-            </tbody>
-        </table>
+            </div>
+        </div>
+        {{end}}
     </div>
 </div>
 {{end}}
@@ -161,48 +190,223 @@
     </div>
 </div>
 
+<style>
+.header-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.apps-list {
+    padding: 0;
+}
+
+.app-group {
+    border-bottom: 1px solid var(--border-color);
+}
+
+.app-group:last-child {
+    border-bottom: none;
+}
+
+.app-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.app-header:hover {
+    background-color: var(--bg-secondary);
+}
+
+.app-info {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.app-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+}
+
+.app-details {
+    display: flex;
+    flex-direction: column;
+}
+
+.app-name {
+    font-weight: 600;
+    font-size: 1rem;
+}
+
+.app-url {
+    font-size: 0.8rem;
+    text-decoration: none;
+}
+
+.app-url:hover {
+    text-decoration: underline;
+}
+
+.app-meta {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.session-count {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+
+.last-used {
+    font-size: 0.85rem;
+}
+
+.expand-icon {
+    font-size: 0.75rem;
+    transition: transform 0.2s;
+    color: var(--text-muted);
+}
+
+.app-group.expanded .expand-icon {
+    transform: rotate(180deg);
+}
+
+.app-sessions {
+    background-color: var(--bg-secondary);
+    padding: 0.5rem 1rem;
+}
+
+.session-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.session-row:last-child {
+    border-bottom: none;
+}
+
+.session-select {
+    display: flex;
+    align-items: center;
+}
+
+.session-checkbox {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+}
+
+.session-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.session-pubkey {
+    font-size: 0.85rem;
+    display: block;
+}
+
+.session-meta {
+    font-size: 0.8rem;
+    margin-top: 0.25rem;
+}
+
+.session-methods {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+}
+
+.badge-sm {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.4rem;
+}
+
+.session-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+@media (max-width: 768px) {
+    .app-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+
+    .app-meta {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .session-row {
+        flex-wrap: wrap;
+    }
+
+    .session-methods {
+        width: 100%;
+        margin-top: 0.5rem;
+    }
+
+    .session-actions {
+        width: 100%;
+        margin-top: 0.5rem;
+    }
+}
+</style>
+
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     const messageDiv = document.getElementById('message');
+    const bulkRevokeBtn = document.getElementById('bulk-revoke-btn');
 
-    // Copy buttons
-    document.querySelectorAll('.copy-btn').forEach(btn => {
-        btn.addEventListener('click', function() {
-            navigator.clipboard.writeText(this.dataset.pubkey);
-            this.textContent = 'Copied!';
-            setTimeout(() => this.textContent = 'Copy Pubkey', 1500);
-        });
-    });
+    function showMessage(text, type) {
+        messageDiv.textContent = text;
+        messageDiv.className = 'alert alert-' + type;
+        messageDiv.style.display = 'block';
+        setTimeout(() => messageDiv.style.display = 'none', 3000);
+    }
 
-    // Revoke buttons
+    // Revoke single session
     document.querySelectorAll('.revoke-btn').forEach(btn => {
-        btn.addEventListener('click', async function() {
-            const keyId = this.dataset.keyId;
+        btn.addEventListener('click', async function(e) {
+            e.stopPropagation();
+            const keyPubkey = this.dataset.keyPubkey;
             const pubkey = this.dataset.pubkey;
 
-            if (!confirm('Revoke access for this app? It will need to reconnect.')) return;
+            if (!confirm('Revoke access for this session? The app will need to reconnect.')) return;
 
             ButtonState.setLoading(this, 'Revoking...');
 
             try {
-                const response = await fetch(`/api/v1/keys/${keyId}/permissions/${pubkey}`, {
+                const response = await fetch(`/api/v1/keys/${keyPubkey}/permissions/${pubkey}`, {
                     method: 'DELETE'
                 });
                 if (response.ok) {
-                    this.closest('tr').remove();
-                    showMessage('Access revoked', 'success');
+                    this.closest('.session-row').remove();
+                    showMessage('Session revoked', 'success');
+                    updateSessionCounts();
                 } else {
-                    showMessage('Failed to revoke access', 'error');
+                    showMessage('Failed to revoke session', 'error');
                     ButtonState.reset(this);
                 }
             } catch (err) {
-                showMessage('Failed to revoke access', 'error');
+                showMessage('Failed to revoke session', 'error');
                 ButtonState.reset(this);
             }
         });
     });
 
-    // Connect to App (nostrconnect://) functionality
+    // Connect to App functionality
     const connectAppBtn = document.getElementById('connect-app-btn');
     const nostrconnectModal = document.getElementById('nostrconnect-modal');
     const nostrconnectForm = document.getElementById('nostrconnect-form');
@@ -215,7 +419,6 @@ document.addEventListener('DOMContentLoaded', function() {
         if (e.target === nostrconnectModal) nostrconnectModal.style.display = 'none';
     });
 
-    // Enable Enter key submission for nostrconnect modal
     enableEnterSubmit(nostrconnectModal, nostrconnectForm);
 
     nostrconnectForm.addEventListener('submit', async function(e) {
@@ -258,52 +461,39 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
 
-    function showMessage(text, type) {
-        messageDiv.textContent = text;
-        messageDiv.className = 'alert alert-' + type;
-        messageDiv.style.display = 'block';
-        setTimeout(() => messageDiv.style.display = 'none', 3000);
-    }
-
     // Edit Permission Modal
     const editModal = document.getElementById('edit-permission-modal');
     const editForm = document.getElementById('edit-permission-form');
     const cancelEditBtn = document.getElementById('cancel-edit-permission');
 
     document.querySelectorAll('.edit-btn').forEach(btn => {
-        btn.addEventListener('click', function() {
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
             const keyPubkey = this.dataset.keyPubkey;
             const userPubkey = this.dataset.pubkey;
             const methods = JSON.parse(this.dataset.methods || '[]');
             const kinds = JSON.parse(this.dataset.kinds || '[]');
 
-            // Set hidden fields
             document.getElementById('edit-key-pubkey').value = keyPubkey;
             document.getElementById('edit-user-pubkey').value = userPubkey;
             document.getElementById('edit-client-display').value = userPubkey;
 
-            // Set method checkboxes
             document.querySelectorAll('#methods-checkboxes input[type="checkbox"]').forEach(cb => {
                 cb.checked = methods.includes(cb.value);
             });
 
-            // Set allowed kinds
             document.getElementById('edit-allowed-kinds').value = kinds.join(', ');
-
             editModal.style.display = 'flex';
         });
     });
 
     cancelEditBtn.addEventListener('click', () => editModal.style.display = 'none');
-
     editModal.addEventListener('click', function(e) {
         if (e.target === editModal) editModal.style.display = 'none';
     });
 
-    // Enable Enter key submission for edit permission modal
     enableEnterSubmit(editModal, editForm);
 
-    // Kind preset buttons
     document.querySelectorAll('.preset-btn').forEach(btn => {
         btn.addEventListener('click', function() {
             document.getElementById('edit-allowed-kinds').value = this.dataset.kinds;
@@ -317,7 +507,6 @@ document.addEventListener('DOMContentLoaded', function() {
         const keyPubkey = document.getElementById('edit-key-pubkey').value;
         const userPubkey = document.getElementById('edit-user-pubkey').value;
 
-        // Collect checked methods
         const methods = [];
         document.querySelectorAll('#methods-checkboxes input[type="checkbox"]:checked').forEach(cb => {
             methods.push(cb.value);
@@ -330,7 +519,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
         ButtonState.setLoading(submitBtn, 'Saving...');
 
-        // Parse allowed kinds
         const kindsInput = document.getElementById('edit-allowed-kinds').value.trim();
         let allowedKinds = [];
         if (kindsInput) {
@@ -364,7 +552,120 @@ document.addEventListener('DOMContentLoaded', function() {
             ButtonState.reset(submitBtn);
         }
     });
+
+    // Bulk revoke
+    bulkRevokeBtn.addEventListener('click', async function() {
+        const selected = document.querySelectorAll('.session-checkbox:checked');
+        if (selected.length === 0) return;
+
+        if (!confirm(`Revoke access for ${selected.length} session(s)?`)) return;
+
+        ButtonState.setLoading(this, 'Revoking...');
+
+        let successCount = 0;
+        for (const checkbox of selected) {
+            const keyPubkey = checkbox.dataset.keyPubkey;
+            const pubkey = checkbox.dataset.pubkey;
+            try {
+                const response = await fetch(`/api/v1/keys/${keyPubkey}/permissions/${pubkey}`, {
+                    method: 'DELETE'
+                });
+                if (response.ok) {
+                    checkbox.closest('.session-row').remove();
+                    successCount++;
+                }
+            } catch (err) {
+                console.error('Failed to revoke:', err);
+            }
+        }
+
+        showMessage(`Revoked ${successCount} session(s)`, 'success');
+        updateSessionCounts();
+        updateBulkButton();
+        ButtonState.reset(this);
+    });
 });
+
+function toggleAppSessions(header) {
+    const group = header.closest('.app-group');
+    const sessions = group.querySelector('.app-sessions');
+
+    if (sessions.style.display === 'none') {
+        sessions.style.display = 'block';
+        group.classList.add('expanded');
+    } else {
+        sessions.style.display = 'none';
+        group.classList.remove('expanded');
+    }
+}
+
+async function revokeAllSessions(btn) {
+    const group = btn.closest('.app-group');
+    const keyPubkey = btn.dataset.keyPubkey;
+    const appName = btn.dataset.appName || 'this app';
+    const sessions = group.querySelectorAll('.session-row');
+
+    if (!confirm(`Revoke all ${sessions.length} session(s) for ${appName}?`)) return;
+
+    ButtonState.setLoading(btn, 'Revoking...');
+
+    let successCount = 0;
+    for (const row of sessions) {
+        const pubkey = row.dataset.pubkey;
+        try {
+            const response = await fetch(`/api/v1/keys/${keyPubkey}/permissions/${pubkey}`, {
+                method: 'DELETE'
+            });
+            if (response.ok) {
+                successCount++;
+            }
+        } catch (err) {
+            console.error('Failed to revoke:', err);
+        }
+    }
+
+    if (successCount === sessions.length) {
+        group.remove();
+    }
+
+    const messageDiv = document.getElementById('message');
+    messageDiv.textContent = `Revoked ${successCount} session(s)`;
+    messageDiv.className = 'alert alert-success';
+    messageDiv.style.display = 'block';
+    setTimeout(() => messageDiv.style.display = 'none', 3000);
+
+    updateSessionCounts();
+}
+
+function updateBulkButton() {
+    const selected = document.querySelectorAll('.session-checkbox:checked');
+    const bulkBtn = document.getElementById('bulk-revoke-btn');
+
+    if (selected.length > 0) {
+        bulkBtn.style.display = 'inline-block';
+        bulkBtn.textContent = `Revoke Selected (${selected.length})`;
+    } else {
+        bulkBtn.style.display = 'none';
+    }
+}
+
+function updateSessionCounts() {
+    document.querySelectorAll('.app-group').forEach(group => {
+        const sessions = group.querySelectorAll('.session-row');
+        const countSpan = group.querySelector('.session-count');
+        if (countSpan) {
+            countSpan.textContent = `${sessions.length} session${sessions.length !== 1 ? 's' : ''}`;
+        }
+    });
+
+    document.querySelectorAll('.key-apps-card').forEach(card => {
+        const sessions = card.querySelectorAll('.session-row');
+        const badge = card.querySelector('.card-header .badge');
+        if (badge) {
+            badge.textContent = `${sessions.length} session${sessions.length !== 1 ? 's' : ''}`;
+        }
+    });
+}
 </script>
 {{end}}
 
