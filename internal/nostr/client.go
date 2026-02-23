@@ -407,6 +407,103 @@ func (c *Client) Subscribe(ctx context.Context, filters nostr.Filters, handler f
 	}
 }
 
+// SubscribeWithRelayInfo creates a subscription that includes the source relay URL in callbacks.
+// This enables responding only to the relay the request came from.
+func (c *Client) SubscribeWithRelayInfo(ctx context.Context, filters nostr.Filters, handler func(*nostr.Event, string)) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	for url, relay := range c.relays {
+		go func(url string, relay *nostr.Relay) {
+			sub, err := relay.Subscribe(ctx, filters)
+			if err != nil {
+				slog.Warn("failed to subscribe to relay", "url", url, "error", err)
+				return
+			}
+
+			slog.Info("subscribed to relay", "url", url, "filters", filters)
+
+			for ev := range sub.Events {
+				handler(ev, url)
+			}
+		}(url, relay)
+	}
+}
+
+// SubscribeWithRelayInfoReconnect maintains a subscription with relay info and automatic reconnection
+func (c *Client) SubscribeWithRelayInfoReconnect(ctx context.Context, filters nostr.Filters, handler func(*nostr.Event, string)) {
+	// Store subscription state for reconnection
+	c.subMu.Lock()
+	// We wrap the handler to convert to the old format for storage
+	wrappedHandler := func(ev *nostr.Event) {
+		// This won't be called directly - reconnect uses SubscribeWithRelayInfo
+	}
+	c.subscriptions = append(c.subscriptions, subscription{filters: filters, handler: wrappedHandler})
+	subIndex := len(c.subscriptions) - 1
+	c.subMu.Unlock()
+
+	// Subscribe with relay info
+	c.SubscribeWithRelayInfo(ctx, filters, handler)
+
+	// Only the first subscription starts the reconnect ticker
+	if subIndex == 0 {
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					c.reconnectWithRelayInfoIfNeeded(ctx, filters, handler)
+				}
+			}
+		}()
+	}
+
+	// Block until context is done
+	<-ctx.Done()
+}
+
+func (c *Client) reconnectWithRelayInfoIfNeeded(ctx context.Context, filters nostr.Filters, handler func(*nostr.Event, string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, url := range c.relayURLs {
+		if _, exists := c.relays[url]; !exists {
+			relay, err := nostr.RelayConnect(ctx, url)
+			if err != nil {
+				slog.Debug("reconnect failed", "url", url, "error", err)
+				continue
+			}
+			c.relays[url] = relay
+			metrics.SetRelayConnections(len(c.relays))
+			slog.Info("reconnected to relay", "url", url)
+
+			// Authenticate if we have an auth key
+			if c.authKey != "" {
+				if err := c.authenticateRelay(ctx, relay); err != nil {
+					slog.Warn("reconnect auth failed", "url", url, "error", err)
+				}
+			}
+
+			// Re-establish subscription with relay info
+			go func(url string, relay *nostr.Relay) {
+				sub, err := relay.Subscribe(ctx, filters)
+				if err != nil {
+					slog.Warn("failed to subscribe on reconnected relay", "url", url, "error", err)
+					return
+				}
+				slog.Info("subscribed on reconnected relay", "url", url, "filters", filters)
+				for ev := range sub.Events {
+					handler(ev, url)
+				}
+			}(url, relay)
+		}
+	}
+}
+
 // SubscribeWithReconnect maintains a subscription with automatic reconnection
 func (c *Client) SubscribeWithReconnect(ctx context.Context, filters nostr.Filters, handler func(*nostr.Event)) {
 	// Store subscription state for reconnection (append, don't overwrite)

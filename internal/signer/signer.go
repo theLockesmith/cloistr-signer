@@ -55,6 +55,7 @@ type pendingRequestContext struct {
 	targetPubkey string
 	privateKey   string
 	clientPubkey string
+	sourceRelay  string // The relay the request came from (for targeted responses)
 	request      *NIP46Request
 	perm         *storage.Permission
 	resultChan   chan authResult
@@ -68,29 +69,33 @@ type authResult struct {
 
 // Signer handles NIP-46 remote signing requests
 type Signer struct {
-	config         *config.Config
-	storage        storage.Storage
-	relayClient    *relay.Client
-	encryptor      *crypto.Encryptor
-	proxyClient    *proxy.Client                      // Client for upstream signer connections
-	keys           map[string]string                  // pubkey -> private key (hex)
-	proxyKeys      map[string]string                  // pubkey -> bunker URI (for proxy keys)
-	pendingCtx     map[string]*pendingRequestContext  // requestID -> context
-	pendingCtxLock sync.RWMutex
-	cancel         context.CancelFunc
+	config          *config.Config
+	storage         storage.Storage
+	relayClient     *relay.Client
+	keyRelayManager *relay.KeyRelayManager              // Per-key relay connections for scalability
+	encryptor       *crypto.Encryptor
+	proxyClient     *proxy.Client                       // Client for upstream signer connections
+	keys            map[string]string                   // pubkey -> private key (hex)
+	keyRelays       map[string][]string                 // pubkey -> configured relays (from storage)
+	proxyKeys       map[string]string                   // pubkey -> bunker URI (for proxy keys)
+	pendingCtx      map[string]*pendingRequestContext   // requestID -> context
+	pendingCtxLock  sync.RWMutex
+	cancel          context.CancelFunc
 }
 
 // New creates a new NIP-46 signer
 func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, encryptor *crypto.Encryptor) *Signer {
 	return &Signer{
-		config:      cfg,
-		storage:     store,
-		relayClient: relayClient,
-		encryptor:   encryptor,
-		proxyClient: proxy.NewClient(cfg),
-		keys:        make(map[string]string),
-		proxyKeys:   make(map[string]string),
-		pendingCtx:  make(map[string]*pendingRequestContext),
+		config:          cfg,
+		storage:         store,
+		relayClient:     relayClient,
+		keyRelayManager: relay.NewKeyRelayManager(cfg.Relays),
+		encryptor:       encryptor,
+		proxyClient:     proxy.NewClient(cfg),
+		keys:            make(map[string]string),
+		keyRelays:       make(map[string][]string),
+		proxyKeys:       make(map[string]string),
+		pendingCtx:      make(map[string]*pendingRequestContext),
 	}
 }
 
@@ -125,6 +130,11 @@ func (s *Signer) Start(ctx context.Context) error {
 			s.keys[key.Pubkey] = privateKey
 		}
 
+		// Store per-key relay configuration
+		if len(key.Relays) > 0 {
+			s.keyRelays[key.Pubkey] = key.Relays
+		}
+
 		// Track proxy keys separately for forwarding
 		if key.IsProxy() {
 			s.proxyKeys[key.Pubkey] = key.BunkerURI
@@ -145,13 +155,14 @@ func (s *Signer) Start(ctx context.Context) error {
 
 	// Subscribe to ALL kind:24133 events - we filter by our keys in handleEvent
 	// This allows dynamic key addition via the HTTP API
+	// Using SubscribeWithRelayInfoReconnect to track source relay for targeted responses
 	filters := nostr.Filters{{
 		Kinds: []int{KindNIP46Request},
 	}}
 
 	slog.Info("subscribing to NIP-46 requests")
 
-	go s.relayClient.SubscribeWithReconnect(ctx, filters, s.handleEvent)
+	go s.relayClient.SubscribeWithRelayInfoReconnect(ctx, filters, s.handleEventWithRelay)
 
 	return nil
 }
@@ -175,7 +186,8 @@ func (s *Signer) RegisterProxyKey(pubkey, privateKeyHex, bunkerURI string) {
 	s.proxyKeys[pubkey] = bunkerURI
 }
 
-func (s *Signer) handleEvent(event *nostr.Event) {
+// handleEventWithRelay wraps event handling with source relay tracking for targeted responses
+func (s *Signer) handleEventWithRelay(event *nostr.Event, sourceRelay string) {
 	if event.Kind != KindNIP46Request {
 		return
 	}
@@ -211,7 +223,7 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 		"from", clientPubkey[:16]+"...",
 		"to", targetPubkey[:16]+"...",
 		"event_id", event.ID,
-		"client_pubkey_len", len(clientPubkey),
+		"source_relay", sourceRelay,
 	)
 
 	// Try NIP-44 decryption first (newer standard), fall back to NIP-04
@@ -271,24 +283,24 @@ func (s *Signer) handleEvent(event *nostr.Event) {
 
 	// Handle request in a goroutine to avoid blocking the event loop
 	// This is especially important for authorization callbacks which may take time
-	go s.processRequest(ctx, targetPubkey, privateKey, clientPubkey, &request, perm, err, useNIP44)
+	go s.processRequest(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, &request, perm, err, useNIP44)
 }
 
 // processRequest handles a NIP-46 request, potentially waiting for authorization
-func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey string, request *NIP46Request, perm *storage.Permission, permErr error, useNIP44 bool) {
+func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey, sourceRelay string, request *NIP46Request, perm *storage.Permission, permErr error, useNIP44 bool) {
 	// If we have a valid permission
 	if permErr == nil {
 		// Check if method is allowed
 		if !s.isMethodAllowed(perm, request.Method) {
 			slog.Warn("method not allowed", "method", request.Method, "client", clientPubkey[:16]+"...")
-			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "method not allowed", useNIP44)
+			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, "method not allowed", useNIP44)
 			return
 		}
 
 		// Check if this permission requires approval (hybrid mode)
 		if s.shouldRequireApproval(ctx, targetPubkey, perm) {
 			slog.Info("permission requires approval", "client", clientPubkey[:16]+"...", "method", request.Method)
-			s.handlePendingApproval(ctx, targetPubkey, privateKey, clientPubkey, request, perm, useNIP44)
+			s.handlePendingApproval(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request, perm, useNIP44)
 			return
 		}
 
@@ -296,11 +308,11 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 		result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, perm)
 		if err != nil {
 			slog.Error("request handling failed", "method", request.Method, "error", err)
-			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error(), useNIP44)
+			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, err.Error(), useNIP44)
 			return
 		}
 
-		s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result, useNIP44)
+		s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, result, useNIP44)
 		return
 	}
 
@@ -326,10 +338,10 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 				result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, fullPerm)
 				if err != nil {
 					slog.Error("request handling failed", "method", request.Method, "error", err)
-					s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error(), useNIP44)
+					s.sendError(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, err.Error(), useNIP44)
 					return
 				}
-				s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result, useNIP44)
+				s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, result, useNIP44)
 				return
 			}
 			// Invalid secret - log but continue to normal flow
@@ -350,24 +362,25 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 		result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, tempPerm)
 		if err != nil {
 			slog.Error("request handling failed", "method", request.Method, "error", err)
-			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error(), useNIP44)
+			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, err.Error(), useNIP44)
 			return
 		}
-		s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result, useNIP44)
+		s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, result, useNIP44)
 		return
 	}
 
 	// Approval required - handle pending approval flow
-	s.handlePendingApproval(ctx, targetPubkey, privateKey, clientPubkey, request, nil, useNIP44)
+	s.handlePendingApproval(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request, nil, useNIP44)
 }
 
 // handlePendingApproval handles the approval workflow for requests that need manual authorization
-func (s *Signer) handlePendingApproval(ctx context.Context, targetPubkey, privateKey, clientPubkey string, request *NIP46Request, perm *storage.Permission, useNIP44 bool) {
+func (s *Signer) handlePendingApproval(ctx context.Context, targetPubkey, privateKey, clientPubkey, sourceRelay string, request *NIP46Request, perm *storage.Permission, useNIP44 bool) {
 	// Create pending request context
 	reqCtx := &pendingRequestContext{
 		targetPubkey: targetPubkey,
 		privateKey:   privateKey,
 		clientPubkey: clientPubkey,
+		sourceRelay:  sourceRelay,
 		request:      request,
 		perm:         perm,
 	}
@@ -382,13 +395,13 @@ func (s *Signer) handlePendingApproval(ctx context.Context, targetPubkey, privat
 	approved, approvedPerm, err := s.waitForAuthorization(ctx, reqCtx, timeout)
 	if err != nil {
 		slog.Warn("authorization failed", "client", clientPubkey[:16]+"...", "error", err)
-		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "authorization timeout", useNIP44)
+		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, "authorization timeout", useNIP44)
 		return
 	}
 
 	if !approved {
 		slog.Info("request denied by admin", "client", clientPubkey[:16]+"...", "method", request.Method)
-		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, "request denied", useNIP44)
+		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, "request denied", useNIP44)
 		return
 	}
 
@@ -410,12 +423,12 @@ func (s *Signer) handlePendingApproval(ctx context.Context, targetPubkey, privat
 	result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, permToUse)
 	if err != nil {
 		slog.Error("request handling failed after approval", "method", request.Method, "error", err)
-		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, request.ID, err.Error(), useNIP44)
+		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, err.Error(), useNIP44)
 		return
 	}
 
 	slog.Info("request approved and processed", "method", request.Method, "client", clientPubkey[:16]+"...")
-	s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, request.ID, result, useNIP44)
+	s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, result, useNIP44)
 }
 
 func (s *Signer) isMethodAllowed(perm *storage.Permission, method string) bool {
@@ -790,23 +803,23 @@ func (s *Signer) handleNIP44Decrypt(privateKey string, params []string) (string,
 	return plaintext, nil
 }
 
-func (s *Signer) sendResult(ctx context.Context, signerPubkey, privateKey, clientPubkey, requestID, result string, useNIP44 bool) {
+func (s *Signer) sendResult(ctx context.Context, signerPubkey, privateKey, clientPubkey, sourceRelay, requestID, result string, useNIP44 bool) {
 	response := NIP46Response{
 		ID:     requestID,
 		Result: result,
 	}
-	s.sendResponse(ctx, signerPubkey, privateKey, clientPubkey, response, useNIP44)
+	s.sendResponse(ctx, signerPubkey, privateKey, clientPubkey, sourceRelay, response, useNIP44)
 }
 
-func (s *Signer) sendError(ctx context.Context, signerPubkey, privateKey, clientPubkey, requestID, errMsg string, useNIP44 bool) {
+func (s *Signer) sendError(ctx context.Context, signerPubkey, privateKey, clientPubkey, sourceRelay, requestID, errMsg string, useNIP44 bool) {
 	response := NIP46Response{
 		ID:    requestID,
 		Error: errMsg,
 	}
-	s.sendResponse(ctx, signerPubkey, privateKey, clientPubkey, response, useNIP44)
+	s.sendResponse(ctx, signerPubkey, privateKey, clientPubkey, sourceRelay, response, useNIP44)
 }
 
-func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, clientPubkey string, response NIP46Response, useNIP44 bool) {
+func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, clientPubkey, sourceRelay string, response NIP46Response, useNIP44 bool) {
 	data, err := json.Marshal(response)
 	if err != nil {
 		slog.Error("failed to marshal response", "error", err)
@@ -854,15 +867,25 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 		return
 	}
 
-	// Publish response with adaptive POW (relay client handles POW retry if required)
-	if err := s.relayClient.PublishWithAdaptivePow(ctx, &event, privateKey); err != nil {
-		slog.Error("failed to publish response", "error", err)
+	// Get or create per-key relay client for this signer key
+	// This provides isolated rate limits per key
+	keyRelays := s.keyRelays[signerPubkey]
+	keyClient := s.keyRelayManager.GetClient(ctx, signerPubkey, privateKey, keyRelays)
+
+	// Publish response only to the source relay (relay-aware response)
+	// This minimizes rate limit consumption and ensures the client gets the response
+	if err := keyClient.PublishToRelay(ctx, sourceRelay, &event); err != nil {
+		slog.Error("failed to publish response to source relay",
+			"relay", sourceRelay,
+			"error", err,
+		)
 		return
 	}
 
 	slog.Info("sent response",
 		"request_id", response.ID,
 		"to", clientPubkey[:16]+"...",
+		"relay", sourceRelay,
 		"has_error", response.Error != "",
 		"nip44", useNIP44,
 	)
