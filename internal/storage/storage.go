@@ -48,6 +48,7 @@ type Key struct {
 	UpstreamPubkey  string    `json:"upstream_pubkey,omitempty"` // For proxy keys: pubkey of the upstream signer
 	RequireApproval bool      `json:"require_approval"`  // If true, requests need manual approval
 	Relays          []string  `json:"relays,omitempty"`  // Custom relays for this key (nil = use global config)
+	RelayMode       string    `json:"relay_mode,omitempty"` // Relay selection: "auto", "manual", "discovery"
 	CreatedAt       time.Time `json:"created_at"`
 	CreatedBy       string    `json:"created_by"`
 }

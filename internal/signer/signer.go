@@ -15,6 +15,7 @@ import (
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/bunker"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/discovery"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
 	relay "git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/proxy"
@@ -75,6 +76,7 @@ type Signer struct {
 	keyRelayManager *relay.KeyRelayManager              // Per-key relay connections for scalability
 	encryptor       *crypto.Encryptor
 	proxyClient     *proxy.Client                       // Client for upstream signer connections
+	relaySelector   *discovery.Selector                 // Relay selection with optional discovery
 	keys            map[string]string                   // pubkey -> private key (hex)
 	keysLock        sync.RWMutex                        // Protects keys map for concurrent access
 	keyRelays       map[string][]string                 // pubkey -> configured relays (from storage)
@@ -90,7 +92,7 @@ type Signer struct {
 }
 
 // New creates a new NIP-46 signer
-func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, encryptor *crypto.Encryptor) *Signer {
+func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, encryptor *crypto.Encryptor, relaySelector *discovery.Selector) *Signer {
 	return &Signer{
 		config:          cfg,
 		storage:         store,
@@ -98,6 +100,7 @@ func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, e
 		keyRelayManager: relay.NewKeyRelayManager(cfg.Relays),
 		encryptor:       encryptor,
 		proxyClient:     proxy.NewClient(cfg),
+		relaySelector:   relaySelector,
 		keys:            make(map[string]string),
 		keyRelays:       make(map[string][]string),
 		proxyKeys:       make(map[string]string),
@@ -251,6 +254,27 @@ func (s *Signer) Stop() {
 		s.cancel()
 	}
 	s.relayClient.Disconnect()
+}
+
+// GetRelaysForBunker returns the relays to include in a bunker:// URI for a key.
+// Uses the discovery-aware relay selector if available, otherwise falls back to
+// key-specific relays or global config.
+func (s *Signer) GetRelaysForBunker(ctx context.Context, key *storage.Key) []string {
+	// If we have a relay selector, use it
+	if s.relaySelector != nil {
+		input := discovery.SelectionInput{
+			KeyRelays:     key.Relays,
+			Mode:          discovery.RelayMode(key.RelayMode),
+			DiscoveryHint: key.Pubkey, // Use the signing key's pubkey for discovery
+		}
+		return s.relaySelector.SelectRelays(ctx, input)
+	}
+
+	// Fallback: use key relays if set, otherwise global config
+	if len(key.Relays) > 0 {
+		return key.Relays
+	}
+	return s.config.Relays
 }
 
 // RegisterKey registers a key for signing (runtime, not persisted)

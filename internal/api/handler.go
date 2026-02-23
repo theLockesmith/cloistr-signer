@@ -1878,11 +1878,8 @@ func (h *Handler) handleBunkerConnect(w http.ResponseWriter, r *http.Request) {
 
 	// Build bunker URI
 	// bunker://<pubkey>?relay=<relay>&secret=<secret>
-	// Use key-specific relays if configured, otherwise fall back to global config
-	relays := key.Relays
-	if len(relays) == 0 {
-		relays = h.config.Relays
-	}
+	// Use discovery-aware relay selection
+	relays := h.signer.GetRelaysForBunker(r.Context(), key)
 	params := make([]string, 0, len(relays)+1)
 	for _, relay := range relays {
 		params = append(params, "relay="+relay)

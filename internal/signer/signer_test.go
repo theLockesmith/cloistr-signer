@@ -135,7 +135,7 @@ func TestNew(t *testing.T) {
 	cfg := &config.Config{}
 	store := storage.NewMemoryStorage()
 
-	signer := New(cfg, store, nil, nil)
+	signer := New(cfg, store, nil, nil, nil)
 
 	if signer == nil {
 		t.Fatal("New() returned nil")
@@ -155,7 +155,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestSigner_RegisterKey(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil)
 
 	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	privateKey := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
@@ -168,7 +168,7 @@ func TestSigner_RegisterKey(t *testing.T) {
 }
 
 func TestSigner_isMethodAllowed(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil)
 
 	tests := []struct {
 		name    string
@@ -219,7 +219,7 @@ func TestSigner_isMethodAllowed(t *testing.T) {
 }
 
 func TestSigner_KeysLoaded(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil)
 
 	// Register some keys
 	signer.RegisterKey("pubkey1", "privkey1")
@@ -238,7 +238,7 @@ func TestSigner_KeysLoaded(t *testing.T) {
 }
 
 func TestSigner_storePendingContext(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil)
 
 	ctx := &pendingRequestContext{
 		targetPubkey: "target123",
@@ -261,7 +261,7 @@ func TestSigner_storePendingContext(t *testing.T) {
 }
 
 func TestSigner_removePendingContext(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil)
 
 	ctx := &pendingRequestContext{
 		targetPubkey: "target123",
@@ -282,7 +282,7 @@ func TestSigner_removePendingContext(t *testing.T) {
 
 func TestSigner_checkPolicyUsage(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	signer := New(&config.Config{}, store, nil, nil)
+	signer := New(&config.Config{}, store, nil, nil, nil)
 	ctx := context.Background()
 
 	// Create a policy with usage limits
@@ -347,7 +347,7 @@ func TestSigner_checkPolicyUsage(t *testing.T) {
 
 func TestSigner_handleConnect(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	signer := New(&config.Config{}, store, nil, nil)
+	signer := New(&config.Config{}, store, nil, nil, nil)
 	ctx := context.Background()
 
 	perm := &storage.Permission{
@@ -378,7 +378,7 @@ func TestSigner_handleConnect(t *testing.T) {
 
 func TestSigner_handleSignEvent_AllowedKinds(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	signer := New(&config.Config{}, store, nil, nil)
+	signer := New(&config.Config{}, store, nil, nil, nil)
 	ctx := context.Background()
 
 	// Register a key (using a test key)
@@ -443,7 +443,7 @@ func TestSigner_handleSignEvent_AllowedKinds(t *testing.T) {
 }
 
 func TestSigner_ApproveRequest(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil)
 
 	// Create pending context with result channel
 	resultChan := make(chan authResult, 1)
@@ -474,7 +474,7 @@ func TestSigner_ApproveRequest(t *testing.T) {
 }
 
 func TestSigner_DenyRequest(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil)
 
 	// Create pending context with result channel
 	resultChan := make(chan authResult, 1)
@@ -505,7 +505,7 @@ func TestSigner_DenyRequest(t *testing.T) {
 }
 
 func TestSigner_ApproveRequest_NotFound(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil)
 
 	// Try to approve nonexistent request (should not panic)
 	pendingReq := &storage.PendingRequest{ID: "nonexistent", Method: "sign_event"}
@@ -514,7 +514,7 @@ func TestSigner_ApproveRequest_NotFound(t *testing.T) {
 }
 
 func TestSigner_DenyRequest_NotFound(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil)
 
 	// Try to deny nonexistent request (should not panic)
 	pendingReq := &storage.PendingRequest{ID: "nonexistent", Method: "sign_event"}

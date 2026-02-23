@@ -14,6 +14,7 @@ import (
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/api"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/discovery"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/signer"
@@ -78,8 +79,25 @@ func main() {
 		slog.Warn("no relay auth key available for NIP-42 auth")
 	}
 
+	// Initialize discovery client (optional - nil if URL not configured)
+	var discoveryClient *discovery.Client
+	if cfg.Discovery.URL != "" {
+		discoveryClient = discovery.NewClient(discovery.Config{
+			URL:       cfg.Discovery.URL,
+			Timeout:   time.Duration(cfg.Discovery.Timeout) * time.Second,
+			MaxRelays: cfg.Discovery.MaxRelays,
+		})
+	}
+
+	// Initialize relay selector with discovery and fallback relays
+	relaySelector := discovery.NewSelector(discovery.SelectorConfig{
+		Discovery:      discoveryClient,
+		FallbackRelays: cfg.Relays,
+		MaxRelays:      5, // Default max relays in bunker URI
+	})
+
 	// Initialize NIP-46 signer
-	nip46Signer := signer.New(cfg, store, relayClient, encryptor)
+	nip46Signer := signer.New(cfg, store, relayClient, encryptor, relaySelector)
 
 	// Initialize HTTP API
 	apiHandler := api.NewHandler(cfg, nip46Signer, store, encryptor)
