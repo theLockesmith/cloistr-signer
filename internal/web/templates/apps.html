@@ -24,7 +24,7 @@
     </div>
     <div class="apps-list">
         {{range .Apps}}
-        <div class="app-group" data-key-pubkey="{{$.KeyPubkey}}">
+        <div class="app-group" data-key-id="{{$.KeyID}}">
             <div class="app-header" onclick="toggleAppSessions(this)">
                 <div class="app-info">
                     {{if .AppImage}}
@@ -49,7 +49,7 @@
                     <span class="last-used text-muted" title="Last active: {{formatTime .LastUsedAt}}">{{relativeTime .LastUsedAt}}</span>
                     {{end}}
                     <button class="btn btn-sm btn-danger revoke-all-btn"
-                            data-key-pubkey="{{$.KeyPubkey}}"
+                            data-key-id="{{$.KeyID}}"
                             data-app-name="{{.AppName}}"
                             onclick="event.stopPropagation(); revokeAllSessions(this)">
                         Revoke All
@@ -62,7 +62,7 @@
                 <div class="session-row" data-pubkey="{{.UserPubkey}}">
                     <label class="session-select">
                         <input type="checkbox" class="session-checkbox"
-                               data-key-pubkey="{{$.KeyPubkey}}"
+                               data-key-id="{{$.KeyID}}"
                                data-pubkey="{{.UserPubkey}}"
                                onchange="updateBulkButton()">
                     </label>
@@ -84,12 +84,12 @@
                     </div>
                     <div class="session-actions">
                         <button class="btn btn-sm edit-btn"
-                                data-key-pubkey="{{$.KeyPubkey}}"
+                                data-key-id="{{$.KeyID}}"
                                 data-pubkey="{{.UserPubkey}}"
                                 data-methods="{{json .Methods}}"
                                 data-kinds="{{json .AllowedKinds}}">Edit</button>
                         <button class="btn btn-sm btn-danger revoke-btn"
-                                data-key-pubkey="{{$.KeyPubkey}}"
+                                data-key-id="{{$.KeyID}}"
                                 data-pubkey="{{.UserPubkey}}">Revoke</button>
                     </div>
                 </div>
@@ -148,7 +148,7 @@
         <p class="text-muted" style="margin-bottom: 1rem;">Configure what this app can do with your key.</p>
 
         <form id="edit-permission-form">
-            <input type="hidden" id="edit-key-pubkey" name="key_pubkey">
+            <input type="hidden" id="edit-key-id" name="key_id">
             <input type="hidden" id="edit-user-pubkey" name="user_pubkey">
 
             <div class="form-group">
@@ -385,7 +385,7 @@ document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('.revoke-btn').forEach(btn => {
         btn.addEventListener('click', async function(e) {
             e.stopPropagation();
-            const keyPubkey = this.dataset.keyPubkey;
+            const keyId = this.dataset.keyId;
             const pubkey = this.dataset.pubkey;
 
             if (!confirm('Revoke access for this session? The app will need to reconnect.')) return;
@@ -393,7 +393,7 @@ document.addEventListener('DOMContentLoaded', function() {
             ButtonState.setLoading(this, 'Revoking...');
 
             try {
-                const response = await fetch(`/api/v1/keys/${keyPubkey}/permissions/${pubkey}`, {
+                const response = await fetch(`/api/v1/keys/${keyId}/permissions/${pubkey}`, {
                     method: 'DELETE'
                 });
                 if (response.ok) {
@@ -474,12 +474,12 @@ document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('.edit-btn').forEach(btn => {
         btn.addEventListener('click', function(e) {
             e.stopPropagation();
-            const keyPubkey = this.dataset.keyPubkey;
+            const keyId = this.dataset.keyId;
             const userPubkey = this.dataset.pubkey;
             const methods = JSON.parse(this.dataset.methods || '[]');
             const kinds = JSON.parse(this.dataset.kinds || '[]');
 
-            document.getElementById('edit-key-pubkey').value = keyPubkey;
+            document.getElementById('edit-key-id').value = keyId;
             document.getElementById('edit-user-pubkey').value = userPubkey;
             document.getElementById('edit-client-display').value = userPubkey;
 
@@ -509,7 +509,7 @@ document.addEventListener('DOMContentLoaded', function() {
         e.preventDefault();
         const submitBtn = editForm.querySelector('button[type="submit"]');
 
-        const keyPubkey = document.getElementById('edit-key-pubkey').value;
+        const keyId = document.getElementById('edit-key-id').value;
         const userPubkey = document.getElementById('edit-user-pubkey').value;
 
         const methods = [];
@@ -533,7 +533,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         try {
-            const response = await fetch(`/api/v1/keys/${keyPubkey}/permissions`, {
+            const response = await fetch(`/api/v1/keys/${keyId}/permissions`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
@@ -572,7 +572,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     // This is an unknown app group
                     group.querySelectorAll('.session-row').forEach(row => {
                         unknownSessions.push({
-                            keyPubkey: group.dataset.keyPubkey,
+                            keyId: group.dataset.keyId,
                             pubkey: row.dataset.pubkey,
                             element: row,
                             group: group
@@ -595,7 +595,7 @@ document.addEventListener('DOMContentLoaded', function() {
             let successCount = 0;
             for (const session of unknownSessions) {
                 try {
-                    const response = await fetch(`/api/v1/keys/${session.keyPubkey}/permissions/${session.pubkey}`, {
+                    const response = await fetch(`/api/v1/keys/${session.keyId}/permissions/${session.pubkey}`, {
                         method: 'DELETE'
                     });
                     if (response.ok) {
@@ -641,10 +641,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
         let successCount = 0;
         for (const checkbox of selected) {
-            const keyPubkey = checkbox.dataset.keyPubkey;
+            const keyId = checkbox.dataset.keyId;
             const pubkey = checkbox.dataset.pubkey;
             try {
-                const response = await fetch(`/api/v1/keys/${keyPubkey}/permissions/${pubkey}`, {
+                const response = await fetch(`/api/v1/keys/${keyId}/permissions/${pubkey}`, {
                     method: 'DELETE'
                 });
                 if (response.ok) {
@@ -678,7 +678,7 @@ function toggleAppSessions(header) {
 
 async function revokeAllSessions(btn) {
     const group = btn.closest('.app-group');
-    const keyPubkey = btn.dataset.keyPubkey;
+    const keyId = btn.dataset.keyId;
     const appName = btn.dataset.appName || 'this app';
     const sessions = group.querySelectorAll('.session-row');
 
@@ -690,7 +690,7 @@ async function revokeAllSessions(btn) {
     for (const row of sessions) {
         const pubkey = row.dataset.pubkey;
         try {
-            const response = await fetch(`/api/v1/keys/${keyPubkey}/permissions/${pubkey}`, {
+            const response = await fetch(`/api/v1/keys/${keyId}/permissions/${pubkey}`, {
                 method: 'DELETE'
             });
             if (response.ok) {
