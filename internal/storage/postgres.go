@@ -186,9 +186,15 @@ func (ps *PostgresStorage) migrate() error {
 		token_hash TEXT,
 		user_agent TEXT,
 		ip_address TEXT,
+		remember_device BOOLEAN NOT NULL DEFAULT FALSE,
+		last_activity TIMESTAMPTZ,
 		expires_at TIMESTAMPTZ NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
+
+	-- Add remember_device and last_activity columns if they don't exist (migration)
+	ALTER TABLE signer_web_sessions ADD COLUMN IF NOT EXISTS remember_device BOOLEAN NOT NULL DEFAULT FALSE;
+	ALTER TABLE signer_web_sessions ADD COLUMN IF NOT EXISTS last_activity TIMESTAMPTZ;
 
 	CREATE INDEX IF NOT EXISTS idx_signer_web_sessions_user ON signer_web_sessions(user_id);
 	CREATE INDEX IF NOT EXISTS idx_signer_web_sessions_expires ON signer_web_sessions(expires_at);
@@ -1195,20 +1201,21 @@ func (ps *PostgresStorage) UnlockUser(ctx context.Context, userID string) error 
 
 func (ps *PostgresStorage) CreateUserSession(ctx context.Context, session *UserSession) error {
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO signer_web_sessions (id, user_id, token_hash, user_agent, ip_address, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		INSERT INTO signer_web_sessions (id, user_id, token_hash, user_agent, ip_address, remember_device, last_activity, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		session.ID, session.UserID, nullString(session.Token), nullString(session.UserAgent),
-		nullString(session.IPAddress), session.ExpiresAt, session.CreatedAt)
+		nullString(session.IPAddress), session.RememberDevice, session.LastActivity, session.ExpiresAt, session.CreatedAt)
 	return err
 }
 
 func (ps *PostgresStorage) GetUserSession(ctx context.Context, id string) (*UserSession, error) {
 	session := &UserSession{}
 	var tokenHash, userAgent, ipAddress sql.NullString
+	var lastActivity sql.NullTime
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, user_id, token_hash, user_agent, ip_address, expires_at, created_at
+		SELECT id, user_id, token_hash, user_agent, ip_address, remember_device, last_activity, expires_at, created_at
 		FROM signer_web_sessions WHERE id = $1 AND expires_at > NOW()`, id).
-		Scan(&session.ID, &session.UserID, &tokenHash, &userAgent, &ipAddress, &session.ExpiresAt, &session.CreatedAt)
+		Scan(&session.ID, &session.UserID, &tokenHash, &userAgent, &ipAddress, &session.RememberDevice, &lastActivity, &session.ExpiresAt, &session.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
 	}
@@ -1225,12 +1232,15 @@ func (ps *PostgresStorage) GetUserSession(ctx context.Context, id string) (*User
 	if ipAddress.Valid {
 		session.IPAddress = ipAddress.String
 	}
+	if lastActivity.Valid {
+		session.LastActivity = &lastActivity.Time
+	}
 	return session, nil
 }
 
 func (ps *PostgresStorage) ListUserSessions(ctx context.Context, userID string) ([]*UserSession, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, user_id, token_hash, user_agent, ip_address, expires_at, created_at
+		SELECT id, user_id, token_hash, user_agent, ip_address, remember_device, last_activity, expires_at, created_at
 		FROM signer_web_sessions WHERE user_id = $1 AND expires_at > NOW()
 		ORDER BY created_at DESC`, userID)
 	if err != nil {
@@ -1242,7 +1252,8 @@ func (ps *PostgresStorage) ListUserSessions(ctx context.Context, userID string) 
 	for rows.Next() {
 		session := &UserSession{}
 		var tokenHash, userAgent, ipAddress sql.NullString
-		if err := rows.Scan(&session.ID, &session.UserID, &tokenHash, &userAgent, &ipAddress, &session.ExpiresAt, &session.CreatedAt); err != nil {
+		var lastActivity sql.NullTime
+		if err := rows.Scan(&session.ID, &session.UserID, &tokenHash, &userAgent, &ipAddress, &session.RememberDevice, &lastActivity, &session.ExpiresAt, &session.CreatedAt); err != nil {
 			return nil, err
 		}
 		if tokenHash.Valid {
@@ -1254,9 +1265,28 @@ func (ps *PostgresStorage) ListUserSessions(ctx context.Context, userID string) 
 		if ipAddress.Valid {
 			session.IPAddress = ipAddress.String
 		}
+		if lastActivity.Valid {
+			session.LastActivity = &lastActivity.Time
+		}
 		sessions = append(sessions, session)
 	}
 	return sessions, rows.Err()
+}
+
+func (ps *PostgresStorage) UpdateUserSessionActivity(ctx context.Context, id string) error {
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE signer_web_sessions SET last_activity = NOW() WHERE id = $1 AND expires_at > NOW()`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrSessionNotFound
+	}
+	return nil
 }
 
 func (ps *PostgresStorage) DeleteUserSession(ctx context.Context, id string) error {

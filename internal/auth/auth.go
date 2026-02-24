@@ -81,21 +81,28 @@ func VerifyPassword(password, hash string) bool {
 
 // JWTClaims represents the claims in a JWT token
 type JWTClaims struct {
-	UserID   string `json:"user_id"`
-	Username string `json:"username"`
+	UserID    string `json:"user_id"`
+	Username  string `json:"username"`
+	SessionID string `json:"session_id,omitempty"` // Database session ID for activity tracking
 	jwt.RegisteredClaims
 }
 
 // GenerateJWT generates a new JWT token for a user
 func GenerateJWT(cfg *Config, userID, username string) (string, time.Time, error) {
+	return GenerateJWTWithSession(cfg, userID, username, "")
+}
+
+// GenerateJWTWithSession generates a new JWT token for a user with session tracking
+func GenerateJWTWithSession(cfg *Config, userID, username, sessionID string) (string, time.Time, error) {
 	if cfg.JWTSecret == "" {
 		return "", time.Time{}, errors.New("JWT secret not configured")
 	}
 
 	expiresAt := time.Now().Add(cfg.TokenExpiry)
 	claims := JWTClaims{
-		UserID:   userID,
-		Username: username,
+		UserID:    userID,
+		Username:  username,
+		SessionID: sessionID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

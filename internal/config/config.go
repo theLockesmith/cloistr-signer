@@ -53,15 +53,17 @@ type StorageConfig struct {
 
 // AuthConfig holds authentication configuration
 type AuthConfig struct {
-	AdminPubkeys         []string `yaml:"admin_pubkeys"`
-	RequireApproval      bool     `yaml:"require_approval"`       // Require manual approval for unknown clients (default: false, opt-in for security)
-	AuthorizationTimeout int      `yaml:"authorization_timeout"`  // Timeout in seconds for authorization requests (default: 60)
-	NotifyAdmins         bool     `yaml:"notify_admins"`          // Send DM to admins for pending requests (default: true)
-	JWTSecret            string   `yaml:"jwt_secret"`             // Secret for JWT signing (required for user auth)
-	JWTExpiry            int      `yaml:"jwt_expiry"`             // JWT expiry in hours (default: 24)
-	MFAIssuer            string   `yaml:"mfa_issuer"`             // Issuer name for TOTP (default: Cloistr)
-	MaxFailedLogins      int      `yaml:"max_failed_logins"`      // Max failed logins before lockout (default: 5)
-	LockoutMinutes       int      `yaml:"lockout_minutes"`        // Lockout duration in minutes (default: 15)
+	AdminPubkeys             []string `yaml:"admin_pubkeys"`
+	RequireApproval          bool     `yaml:"require_approval"`           // Require manual approval for unknown clients (default: false, opt-in for security)
+	AuthorizationTimeout     int      `yaml:"authorization_timeout"`      // Timeout in seconds for authorization requests (default: 60)
+	NotifyAdmins             bool     `yaml:"notify_admins"`              // Send DM to admins for pending requests (default: true)
+	JWTSecret                string   `yaml:"jwt_secret"`                 // Secret for JWT signing (required for user auth)
+	JWTExpiry                int      `yaml:"jwt_expiry"`                 // JWT expiry in hours (default: 24) - max session length
+	SessionInactivityMinutes int      `yaml:"session_inactivity_minutes"` // Session expires after inactivity (default: 1440 = 24h)
+	RememberDeviceDays       int      `yaml:"remember_device_days"`       // "Remember this device" session length (default: 30)
+	MFAIssuer                string   `yaml:"mfa_issuer"`                 // Issuer name for TOTP (default: Cloistr)
+	MaxFailedLogins          int      `yaml:"max_failed_logins"`          // Max failed logins before lockout (default: 5)
+	LockoutMinutes           int      `yaml:"lockout_minutes"`            // Lockout duration in minutes (default: 15)
 }
 
 // VaultConfig holds HashiCorp Vault configuration
@@ -102,15 +104,17 @@ func Load() (*Config, error) {
 			Type: "memory",
 		},
 		Auth: AuthConfig{
-			AdminPubkeys:         []string{},
-			RequireApproval:      false, // Default to auto-approve for simpler UX
-			AuthorizationTimeout: 60,
-			NotifyAdmins:         true,
-			JWTSecret:            "",
-			JWTExpiry:            24,
-			MFAIssuer:            "Cloistr",
-			MaxFailedLogins:      5,
-			LockoutMinutes:       15,
+			AdminPubkeys:             []string{},
+			RequireApproval:          false, // Default to auto-approve for simpler UX
+			AuthorizationTimeout:     60,
+			NotifyAdmins:             true,
+			JWTSecret:                "",
+			JWTExpiry:                24,
+			SessionInactivityMinutes: 1440, // 24 hours - session expires if inactive
+			RememberDeviceDays:       30,   // 30 days for "remember this device"
+			MFAIssuer:                "Cloistr",
+			MaxFailedLogins:          5,
+			LockoutMinutes:           15,
 		},
 		Vault: VaultConfig{
 			Enabled:   false,
@@ -221,6 +225,14 @@ func Load() (*Config, error) {
 
 	if lockout := os.Getenv("LOCKOUT_MINUTES"); lockout != "" {
 		cfg.Auth.LockoutMinutes = getEnvInt("LOCKOUT_MINUTES", 15)
+	}
+
+	if sessionInactivity := os.Getenv("SESSION_INACTIVITY_MINUTES"); sessionInactivity != "" {
+		cfg.Auth.SessionInactivityMinutes = getEnvInt("SESSION_INACTIVITY_MINUTES", 1440)
+	}
+
+	if rememberDays := os.Getenv("REMEMBER_DEVICE_DAYS"); rememberDays != "" {
+		cfg.Auth.RememberDeviceDays = getEnvInt("REMEMBER_DEVICE_DAYS", 30)
 	}
 
 	// Vault configuration

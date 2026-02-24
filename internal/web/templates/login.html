@@ -41,6 +41,13 @@
             <input type="text" id="mfa_code" name="mfa_code" placeholder="6-digit code" autocomplete="one-time-code">
         </div>
 
+        <div class="form-group remember-group">
+            <label class="checkbox-label">
+                <input type="checkbox" id="remember" name="remember">
+                <span>Remember this device for 30 days</span>
+            </label>
+        </div>
+
         <button type="submit" class="btn btn-primary btn-block">Login</button>
     </form>
 
@@ -75,6 +82,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
             const pubkey = await window.nostr.getPublicKey();
             const challenge = 'cloistr-login-' + Date.now();
+            const remember = document.getElementById('remember').checked;
 
             // Create a kind:1 event as challenge
             const event = {
@@ -93,7 +101,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 body: JSON.stringify({
                     pubkey: pubkey,
                     signature: signedEvent.sig,
-                    challenge: challenge
+                    challenge: challenge,
+                    remember: remember
                 })
             });
 
@@ -119,6 +128,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const username = document.getElementById('username').value;
         const password = document.getElementById('password').value;
         const mfaCode = document.getElementById('mfa_code').value;
+        const remember = document.getElementById('remember').checked;
 
         try {
             const response = await fetch('/web/api/login', {
@@ -127,7 +137,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 body: JSON.stringify({
                     username: username,
                     password: password,
-                    mfa_code: mfaCode
+                    mfa_code: mfaCode,
+                    remember: remember
                 })
             });
 
@@ -200,6 +211,22 @@ document.addEventListener('DOMContentLoaded', function() {
 }
 .password-toggle:hover {
     color: var(--text-primary);
+}
+.remember-group {
+    margin-bottom: 1rem;
+}
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+.checkbox-label input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+    cursor: pointer;
 }
 </style>
 {{end}}

@@ -715,6 +715,7 @@ func (h *Handler) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 		MFACode  string `json:"mfa_code"`
+		Remember bool   `json:"remember"` // "Remember this device" checkbox
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -759,9 +760,43 @@ func (h *Handler) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Reset failed logins and generate token
+	// Reset failed logins
 	h.storage.ResetFailedLogins(r.Context(), user.ID)
-	token, expiresAt, err := auth.GenerateJWT(h.authConfig, user.ID, user.Username)
+
+	// Create database session for activity tracking
+	sessionID, err := auth.GenerateSessionID()
+	if err != nil {
+		h.jsonError(w, http.StatusInternalServerError, "Failed to create session")
+		return
+	}
+
+	now := time.Now()
+	var expiresAt time.Time
+	if req.Remember {
+		// "Remember this device" - use extended expiry
+		expiresAt = now.Add(time.Duration(h.config.Auth.RememberDeviceDays) * 24 * time.Hour)
+	} else {
+		// Standard session - use JWT expiry as max lifetime
+		expiresAt = now.Add(time.Duration(h.config.Auth.JWTExpiry) * time.Hour)
+	}
+
+	session := &storage.UserSession{
+		ID:             sessionID,
+		UserID:         user.ID,
+		UserAgent:      r.UserAgent(),
+		IPAddress:      r.RemoteAddr,
+		RememberDevice: req.Remember,
+		LastActivity:   &now,
+		ExpiresAt:      expiresAt,
+		CreatedAt:      now,
+	}
+	if err := h.storage.CreateUserSession(r.Context(), session); err != nil {
+		slog.Warn("failed to create user session", "error", err)
+		// Continue anyway - session tracking is not critical
+	}
+
+	// Generate token with session ID
+	token, _, err := auth.GenerateJWTWithSession(h.authConfig, user.ID, user.Username, sessionID)
 	if err != nil {
 		h.jsonError(w, http.StatusInternalServerError, "Failed to generate token")
 		return
@@ -777,6 +812,8 @@ func (h *Handler) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
+
+	slog.Info("user logged in", "username", user.Username, "remember", req.Remember)
 
 	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":  true,
@@ -795,6 +832,7 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 		Pubkey    string `json:"pubkey"`
 		Signature string `json:"signature"`
 		Challenge string `json:"challenge"`
+		Remember  bool   `json:"remember"` // "Remember this device" checkbox
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -821,7 +859,7 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 			h.jsonError(w, http.StatusForbidden, "No account linked to this pubkey")
 			return
 		}
-		// Config-based admin login
+		// Config-based admin login (no session tracking for these legacy logins)
 		token, expiresAt, err := auth.GenerateJWT(h.authConfig, req.Pubkey, "admin:"+req.Pubkey[:8])
 		if err != nil {
 			h.jsonError(w, http.StatusInternalServerError, "Failed to generate token")
@@ -844,8 +882,40 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// User found by pubkey - generate session token
-	token, expiresAt, err := auth.GenerateJWT(h.authConfig, user.ID, user.Username)
+	// Create database session for activity tracking
+	sessionID, err := auth.GenerateSessionID()
+	if err != nil {
+		h.jsonError(w, http.StatusInternalServerError, "Failed to create session")
+		return
+	}
+
+	now := time.Now()
+	var expiresAt time.Time
+	if req.Remember {
+		// "Remember this device" - use extended expiry
+		expiresAt = now.Add(time.Duration(h.config.Auth.RememberDeviceDays) * 24 * time.Hour)
+	} else {
+		// Standard session - use JWT expiry as max lifetime
+		expiresAt = now.Add(time.Duration(h.config.Auth.JWTExpiry) * time.Hour)
+	}
+
+	session := &storage.UserSession{
+		ID:             sessionID,
+		UserID:         user.ID,
+		UserAgent:      r.UserAgent(),
+		IPAddress:      r.RemoteAddr,
+		RememberDevice: req.Remember,
+		LastActivity:   &now,
+		ExpiresAt:      expiresAt,
+		CreatedAt:      now,
+	}
+	if err := h.storage.CreateUserSession(r.Context(), session); err != nil {
+		slog.Warn("failed to create user session", "error", err)
+		// Continue anyway - session tracking is not critical
+	}
+
+	// Generate token with session ID
+	token, _, err := auth.GenerateJWTWithSession(h.authConfig, user.ID, user.Username, sessionID)
 	if err != nil {
 		h.jsonError(w, http.StatusInternalServerError, "Failed to generate token")
 		return
@@ -861,7 +931,7 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
-	slog.Info("user logged in via NIP-07", "username", user.Username, "pubkey", req.Pubkey[:16]+"...")
+	slog.Info("user logged in via NIP-07", "username", user.Username, "pubkey", req.Pubkey[:16]+"...", "remember", req.Remember)
 
 	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":  true,
@@ -971,6 +1041,13 @@ func (h *Handler) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 
 // handleLogout clears the auth cookie and redirects to login
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Delete the session from the database if it exists
+	if cookie, err := r.Cookie("auth_token"); err == nil {
+		if claims, err := auth.ValidateJWT(h.authConfig, cookie.Value); err == nil && claims.SessionID != "" {
+			h.storage.DeleteUserSession(r.Context(), claims.SessionID)
+		}
+	}
+
 	// Clear the auth cookie by setting it to expire in the past
 	http.SetCookie(w, &http.Cookie{
 		Name:     "auth_token",
@@ -1121,6 +1198,28 @@ func (h *Handler) getCurrentUser(r *http.Request) *storage.User {
 			Username: claims.Username,
 			Role:     "admin",
 		}
+	}
+
+	// If we have a session ID, verify the session is still valid
+	if claims.SessionID != "" {
+		session, err := h.storage.GetUserSession(r.Context(), claims.SessionID)
+		if err != nil {
+			// Session not found or expired
+			return nil
+		}
+
+		// Check inactivity timeout for non-remembered sessions
+		if !session.RememberDevice && session.LastActivity != nil {
+			inactivityTimeout := time.Duration(h.config.Auth.SessionInactivityMinutes) * time.Minute
+			if time.Since(*session.LastActivity) > inactivityTimeout {
+				// Session inactive too long - delete it
+				h.storage.DeleteUserSession(r.Context(), claims.SessionID)
+				return nil
+			}
+		}
+
+		// Update last activity (fire and forget - don't block on this)
+		go h.storage.UpdateUserSessionActivity(r.Context(), claims.SessionID)
 	}
 
 	user, err := h.storage.GetUser(r.Context(), claims.UserID)

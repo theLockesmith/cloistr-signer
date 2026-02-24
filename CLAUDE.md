@@ -188,7 +188,9 @@ The approval page can be shared via link for async authorization.
 | `AUTHORIZATION_TIMEOUT` | Timeout for authorization in seconds | `60` |
 | `NOTIFY_ADMINS` | Send DMs to admins for pending requests | `true` |
 | `JWT_SECRET` | Secret for JWT signing (required for user auth) | (none) |
-| `JWT_EXPIRY` | JWT expiry in hours | `24` |
+| `JWT_EXPIRY` | JWT expiry in hours (max session length) | `24` |
+| `SESSION_INACTIVITY_MINUTES` | Session expires after inactivity | `1440` (24h) |
+| `REMEMBER_DEVICE_DAYS` | "Remember this device" session length | `30` |
 | `MFA_ISSUER` | Issuer name for TOTP | `Coldforge` |
 | `MAX_FAILED_LOGINS` | Max failed logins before lockout | `5` |
 | `LOCKOUT_MINUTES` | Lockout duration in minutes | `15` |

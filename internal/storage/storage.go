@@ -159,13 +159,15 @@ func (u *User) IsAdmin() bool {
 
 // UserSession represents an authenticated user session (JWT-based)
 type UserSession struct {
-	ID        string    `json:"id"`
-	UserID    string    `json:"user_id"`
-	Token     string    `json:"-"` // JWT token hash for revocation check
-	UserAgent string    `json:"user_agent,omitempty"`
-	IPAddress string    `json:"ip_address,omitempty"`
-	ExpiresAt time.Time `json:"expires_at"`
-	CreatedAt time.Time `json:"created_at"`
+	ID             string     `json:"id"`
+	UserID         string     `json:"user_id"`
+	Token          string     `json:"-"` // JWT token hash for revocation check
+	UserAgent      string     `json:"user_agent,omitempty"`
+	IPAddress      string     `json:"ip_address,omitempty"`
+	RememberDevice bool       `json:"remember_device"`            // If true, use extended expiry instead of inactivity timeout
+	LastActivity   *time.Time `json:"last_activity,omitempty"`    // Last request time for inactivity tracking
+	ExpiresAt      time.Time  `json:"expires_at"`                 // Absolute expiry (30 days for remember, or max session length)
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 // BunkerSecret represents a secret for bunker:// URI validation
@@ -242,6 +244,7 @@ type Storage interface {
 	CreateUserSession(ctx context.Context, session *UserSession) error
 	GetUserSession(ctx context.Context, id string) (*UserSession, error)
 	ListUserSessions(ctx context.Context, userID string) ([]*UserSession, error)
+	UpdateUserSessionActivity(ctx context.Context, id string) error
 	DeleteUserSession(ctx context.Context, id string) error
 	DeleteUserSessions(ctx context.Context, userID string) error
 	CleanExpiredUserSessions(ctx context.Context) error
@@ -1032,6 +1035,20 @@ func (m *MemoryStorage) ListUserSessions(ctx context.Context, userID string) ([]
 		}
 	}
 	return sessions, nil
+}
+
+func (m *MemoryStorage) UpdateUserSessionActivity(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	session, exists := m.userSessions[id]
+	if !exists {
+		return ErrSessionNotFound
+	}
+
+	now := time.Now()
+	session.LastActivity = &now
+	return nil
 }
 
 func (m *MemoryStorage) DeleteUserSession(ctx context.Context, id string) error {
