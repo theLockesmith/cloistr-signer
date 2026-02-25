@@ -76,7 +76,7 @@
                             <button class="btn-icon rename-btn" title="Rename session"
                                     data-key-id="{{$keyID}}"
                                     data-pubkey="{{.UserPubkey}}"
-                                    data-current-name="{{.CustomName}}">&#9998;</button>
+                                    data-current-name="{{.CustomName}}">Rename</button>
                         </div>
                         <div class="session-meta">
                             <span class="text-muted">Created {{relativeTime .CreatedAt}}</span>
@@ -367,18 +367,20 @@
 }
 
 .btn-icon {
-    background: none;
-    border: none;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
     cursor: pointer;
-    padding: 0.2rem;
-    font-size: 0.9rem;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.75rem;
     color: var(--text-muted);
-    opacity: 0.6;
-    transition: opacity 0.2s;
+    transition: all 0.2s;
 }
 
 .btn-icon:hover {
-    opacity: 1;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border-color: var(--text-muted);
 }
 
 .session-meta {
