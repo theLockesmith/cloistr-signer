@@ -68,7 +68,16 @@
                                onchange="updateBulkButton()">
                     </label>
                     <div class="session-info">
-                        <span class="session-pubkey monospace">{{npubShort .UserPubkey}}</span>
+                        <div class="session-name-row">
+                            {{if .CustomName}}
+                            <span class="session-custom-name">{{.CustomName}}</span>
+                            {{end}}
+                            <span class="session-pubkey monospace{{if .CustomName}} text-muted{{end}}">{{npubShort .UserPubkey}}</span>
+                            <button class="btn-icon rename-btn" title="Rename session"
+                                    data-key-id="{{$keyID}}"
+                                    data-pubkey="{{.UserPubkey}}"
+                                    data-current-name="{{.CustomName}}">&#9998;</button>
+                        </div>
                         <div class="session-meta">
                             <span class="text-muted">Created {{relativeTime .CreatedAt}}</span>
                             {{if .LastUsedAt}}
@@ -196,6 +205,32 @@
     </div>
 </div>
 
+<!-- Rename Session Modal -->
+<div id="rename-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+        <h2>Rename Session</h2>
+        <p class="text-muted" style="margin-bottom: 1rem;">Give this session a friendly name to help identify it.</p>
+
+        <form id="rename-form">
+            <input type="hidden" id="rename-key-id" name="key_id">
+            <input type="hidden" id="rename-pubkey" name="pubkey">
+
+            <div class="form-group">
+                <label for="rename-custom-name">Session Name</label>
+                <input type="text" id="rename-custom-name" name="custom_name"
+                    placeholder="e.g., iPhone, Work Laptop, Testing"
+                    maxlength="50">
+                <small>Leave empty to remove the custom name</small>
+            </div>
+
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="cancel-rename">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <style>
 .header-actions {
     display: flex;
@@ -316,9 +351,34 @@
     min-width: 0;
 }
 
+.session-name-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.session-custom-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
 .session-pubkey {
     font-size: 0.85rem;
-    display: block;
+}
+
+.btn-icon {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.2rem;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    opacity: 0.6;
+    transition: opacity 0.2s;
+}
+
+.btn-icon:hover {
+    opacity: 1;
 }
 
 .session-meta {
@@ -555,6 +615,65 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         } catch (err) {
             showMessage('Failed to update permission: ' + err.message, 'error');
+            ButtonState.reset(submitBtn);
+        }
+    });
+
+    // Rename Session Modal
+    const renameModal = document.getElementById('rename-modal');
+    const renameForm = document.getElementById('rename-form');
+    const cancelRenameBtn = document.getElementById('cancel-rename');
+
+    document.querySelectorAll('.rename-btn').forEach(btn => {
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            const keyId = this.dataset.keyId;
+            const pubkey = this.dataset.pubkey;
+            const currentName = this.dataset.currentName || '';
+
+            document.getElementById('rename-key-id').value = keyId;
+            document.getElementById('rename-pubkey').value = pubkey;
+            document.getElementById('rename-custom-name').value = currentName;
+            renameModal.style.display = 'flex';
+            document.getElementById('rename-custom-name').focus();
+        });
+    });
+
+    cancelRenameBtn.addEventListener('click', () => renameModal.style.display = 'none');
+    renameModal.addEventListener('click', function(e) {
+        if (e.target === renameModal) renameModal.style.display = 'none';
+    });
+
+    enableEnterSubmit(renameModal, renameForm);
+
+    renameForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const submitBtn = renameForm.querySelector('button[type="submit"]');
+
+        const keyId = document.getElementById('rename-key-id').value;
+        const pubkey = document.getElementById('rename-pubkey').value;
+        const customName = document.getElementById('rename-custom-name').value.trim();
+
+        ButtonState.setLoading(submitBtn, 'Saving...');
+
+        try {
+            const response = await fetch(`/api/v1/keys/${keyId}/permissions/${pubkey}`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ custom_name: customName })
+            });
+
+            if (response.ok) {
+                showMessage(customName ? 'Session renamed' : 'Name removed', 'success');
+                renameModal.style.display = 'none';
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                const data = await response.json();
+                showMessage(data.error || 'Failed to rename session', 'error');
+                ButtonState.reset(submitBtn);
+            }
+        } catch (err) {
+            showMessage('Failed to rename session: ' + err.message, 'error');
             ButtonState.reset(submitBtn);
         }
     });

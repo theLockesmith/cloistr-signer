@@ -221,6 +221,8 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
 			// /api/v1/keys/{id}/permissions/{pubkey}
 			pubkey := parts[2]
 			switch r.Method {
+			case http.MethodPatch:
+				h.handleUpdatePermissionName(w, r, keyID, pubkey)
 			case http.MethodDelete:
 				h.handleDeletePermission(w, r, keyID, pubkey)
 			default:
@@ -633,6 +635,41 @@ func (h *Handler) handleDeletePermission(w http.ResponseWriter, r *http.Request,
 
 	slog.Info("deleted permission", "key", keyID, "user", pubkey[:16]+"...")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type UpdatePermissionNameRequest struct {
+	CustomName string `json:"custom_name"`
+}
+
+func (h *Handler) handleUpdatePermissionName(w http.ResponseWriter, r *http.Request, keyID, pubkey string) {
+	var req UpdatePermissionNameRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Get key to verify it exists and get full pubkey
+	key, err := h.storage.GetKey(r.Context(), keyID)
+	if err != nil {
+		if err == storage.ErrKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	if err := h.storage.UpdatePermissionName(r.Context(), key.Pubkey, pubkey, req.CustomName); err != nil {
+		if err == storage.ErrKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "permission not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to update permission name")
+		return
+	}
+
+	slog.Info("updated permission name", "key", keyID, "user", pubkey[:16]+"...", "name", req.CustomName)
+	h.jsonResponse(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
 // Policy management endpoints

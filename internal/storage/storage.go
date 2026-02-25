@@ -72,6 +72,7 @@ type Permission struct {
 	AppName    string     `json:"app_name,omitempty"`
 	AppURL     string     `json:"app_url,omitempty"`
 	AppImage   string     `json:"app_image,omitempty"`
+	CustomName string     `json:"custom_name,omitempty"` // User-defined label (overrides AppName in display)
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
@@ -197,6 +198,7 @@ type Storage interface {
 	ListPermissions(ctx context.Context, keyID string) ([]*Permission, error)
 	DeletePermission(ctx context.Context, keyID, userPubkey string) error
 	UpdatePermissionLastUsed(ctx context.Context, keyID, userPubkey string) error
+	UpdatePermissionName(ctx context.Context, keyID, userPubkey, customName string) error
 
 	// Session management
 	CreateSession(ctx context.Context, session *Session) error
@@ -519,6 +521,24 @@ func (m *MemoryStorage) UpdatePermissionLastUsed(ctx context.Context, keyID, use
 
 	now := time.Now()
 	perm.LastUsedAt = &now
+	return nil
+}
+
+func (m *MemoryStorage) UpdatePermissionName(ctx context.Context, keyID, userPubkey, customName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	perms, exists := m.permissions[keyID]
+	if !exists {
+		return ErrKeyNotFound
+	}
+
+	perm, exists := perms[userPubkey]
+	if !exists {
+		return ErrKeyNotFound
+	}
+
+	perm.CustomName = customName
 	return nil
 }
 
