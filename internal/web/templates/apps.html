@@ -16,6 +16,7 @@
 
 {{if .KeyApps}}
 {{range .KeyApps}}
+{{$keyID := .KeyID}}
 <div class="card key-apps-card" style="margin-bottom: 1.5rem;">
     <div class="card-header">
         <strong>{{.KeyName}}</strong>
@@ -24,7 +25,7 @@
     </div>
     <div class="apps-list">
         {{range .Apps}}
-        <div class="app-group" data-key-id="{{$.KeyID}}">
+        <div class="app-group" data-key-id="{{$keyID}}">
             <div class="app-header" onclick="toggleAppSessions(this)">
                 <div class="app-info">
                     {{if .AppImage}}
@@ -49,7 +50,7 @@
                     <span class="last-used text-muted" title="Last active: {{formatTime .LastUsedAt}}">{{relativeTime .LastUsedAt}}</span>
                     {{end}}
                     <button class="btn btn-sm btn-danger revoke-all-btn"
-                            data-key-id="{{$.KeyID}}"
+                            data-key-id="{{$keyID}}"
                             data-app-name="{{.AppName}}"
                             onclick="event.stopPropagation(); revokeAllSessions(this)">
                         Revoke All
@@ -62,7 +63,7 @@
                 <div class="session-row" data-pubkey="{{.UserPubkey}}">
                     <label class="session-select">
                         <input type="checkbox" class="session-checkbox"
-                               data-key-id="{{$.KeyID}}"
+                               data-key-id="{{$keyID}}"
                                data-pubkey="{{.UserPubkey}}"
                                onchange="updateBulkButton()">
                     </label>
@@ -84,12 +85,12 @@
                     </div>
                     <div class="session-actions">
                         <button class="btn btn-sm edit-btn"
-                                data-key-id="{{$.KeyID}}"
+                                data-key-id="{{$keyID}}"
                                 data-pubkey="{{.UserPubkey}}"
                                 data-methods="{{json .Methods}}"
                                 data-kinds="{{json .AllowedKinds}}">Edit</button>
                         <button class="btn btn-sm btn-danger revoke-btn"
-                                data-key-id="{{$.KeyID}}"
+                                data-key-id="{{$keyID}}"
                                 data-pubkey="{{.UserPubkey}}">Revoke</button>
                     </div>
                 </div>
