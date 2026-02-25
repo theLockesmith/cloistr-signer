@@ -538,7 +538,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const keyId = this.dataset.keyId;
             const userPubkey = this.dataset.pubkey;
             const methods = JSON.parse(this.dataset.methods || '[]');
-            const kinds = JSON.parse(this.dataset.kinds || '[]');
+            const kinds = JSON.parse(this.dataset.kinds || '[]') || [];
 
             document.getElementById('edit-key-id').value = keyId;
             document.getElementById('edit-user-pubkey').value = userPubkey;
