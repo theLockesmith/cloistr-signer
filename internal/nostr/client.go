@@ -61,14 +61,9 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.relays[url] = relay
 		metrics.SetRelayConnections(len(c.relays))
 		slog.Info("connected to relay", "url", url)
-
-		// Try to authenticate if we have an auth key
-		if c.authKey != "" {
-			if err := c.authenticateRelay(ctx, relay); err != nil {
-				slog.Warn("initial auth failed", "url", url, "error", err)
-				// Continue anyway - auth might not be required for reading
-			}
-		}
+		// Don't proactively authenticate - NIP-42 requires the relay to send
+		// an AUTH challenge first. We'll auth reactively when operations fail
+		// with auth-required errors or when the relay sends a challenge.
 	}
 
 	if len(c.relays) == 0 {
@@ -518,13 +513,7 @@ func (c *Client) reconnectWithRelayInfoIfNeeded(ctx context.Context, filters nos
 			c.relays[url] = relay
 			metrics.SetRelayConnections(len(c.relays))
 			slog.Info("reconnected to relay", "url", url)
-
-			// Authenticate if we have an auth key
-			if c.authKey != "" {
-				if err := c.authenticateRelay(ctx, relay); err != nil {
-					slog.Warn("reconnect auth failed", "url", url, "error", err)
-				}
-			}
+			// Don't proactively auth - wait for relay challenge or auth-required errors
 
 			// Re-establish subscription with relay info
 			go func(url string, relay *nostr.Relay) {

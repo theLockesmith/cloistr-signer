@@ -120,11 +120,7 @@ func (c *KeyRelayClient) Connect(ctx context.Context) {
 		}
 		c.relays[url] = relay
 		slog.Debug("per-key relay connected", "pubkey", c.pubkey[:16]+"...", "url", url)
-
-		// Authenticate as the signing key
-		if err := c.authenticateRelay(ctx, relay); err != nil {
-			slog.Debug("per-key auth failed (may not be required)", "pubkey", c.pubkey[:16]+"...", "url", url, "error", err)
-		}
+		// Don't proactively auth - will auth reactively when publish fails with auth-required
 	}
 
 	metrics.SetRelayConnections(len(c.relays))
@@ -176,11 +172,7 @@ func (c *KeyRelayClient) PublishToRelay(ctx context.Context, relayURL string, ev
 		}
 		c.relays[relayURL] = relay
 		c.mu.Unlock()
-
-		// Authenticate
-		if authErr := c.authenticateRelay(ctx, relay); authErr != nil {
-			slog.Debug("on-demand relay auth failed", "url", relayURL, "error", authErr)
-		}
+		// Don't proactively auth - publishWithRetry handles auth-required errors
 	}
 
 	// Publish with rate-limit retry and adaptive POW
@@ -237,11 +229,8 @@ func (c *KeyRelayClient) publishWithRetry(ctx context.Context, relay *nostr.Rela
 				c.relays[url] = newRelay
 				c.mu.Unlock()
 				currentRelay = newRelay
-				// Try auth on new connection
-				if authErr := c.authenticateRelay(ctx, newRelay); authErr != nil {
-					slog.Debug("auth failed on reconnected relay", "url", url, "error", authErr)
-				}
-				// Retry immediately after reconnect (no backoff for first post-reconnect attempt)
+				// Don't proactively auth - if auth is needed, publish will fail
+				// with auth-required and we'll handle it below
 				continue
 			}
 		}
