@@ -23,7 +23,7 @@
             {{if .User.IsAdmin}}<a href="/users">Users</a>{{end}}
         </div>
         <div class="nav-user">
-            <span>{{.User.Username}}</span>
+            <a href="/settings" class="nav-username">{{.User.Username}}</a>
             {{if .User.IsAdmin}}<span class="badge badge-admin">admin</span>{{end}}
             <a href="/logout" class="btn btn-sm">Logout</a>
         </div>

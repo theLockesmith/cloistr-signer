@@ -94,6 +94,17 @@ a:hover {
     color: var(--text-secondary);
 }
 
+.nav-username {
+    color: var(--text-primary);
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.nav-username:hover {
+    color: var(--primary);
+    text-decoration: underline;
+}
+
 /* Buttons */
 .btn {
     display: inline-block;

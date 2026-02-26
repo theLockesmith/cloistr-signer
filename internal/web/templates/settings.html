@@ -1,0 +1,278 @@
+{{define "content"}}
+<div class="page-header">
+    <h1>Account Settings</h1>
+</div>
+
+<div id="message" class="alert" style="display: none;"></div>
+
+<div class="settings-grid">
+    <div class="card">
+        <div class="card-header">
+            <strong>Account Information</strong>
+        </div>
+        <div class="card-body">
+            <div class="info-row">
+                <span class="info-label">Username</span>
+                <span class="info-value">{{.Account.Username}}</span>
+            </div>
+            {{if .Account.Email}}
+            <div class="info-row">
+                <span class="info-label">Email</span>
+                <span class="info-value">{{.Account.Email}}</span>
+            </div>
+            {{end}}
+            <div class="info-row">
+                <span class="info-label">Role</span>
+                <span class="info-value">
+                    {{if eq .Account.Role "admin"}}
+                    <span class="badge badge-admin">Admin</span>
+                    {{else}}
+                    <span class="badge">User</span>
+                    {{end}}
+                </span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Account Created</span>
+                <span class="info-value">{{formatTime .Account.CreatedAt}}</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <strong>Nostr Extension Login</strong>
+        </div>
+        <div class="card-body">
+            <p class="text-muted" style="margin-bottom: 1rem;">
+                Link your Nostr public key to login with a browser extension (NIP-07) instead of password.
+            </p>
+
+            {{if .Account.Pubkey}}
+            <div class="linked-pubkey">
+                <div class="info-row">
+                    <span class="info-label">Linked Pubkey</span>
+                    <span class="info-value monospace">{{npubShort .Account.Pubkey}}</span>
+                </div>
+                <button id="unlink-pubkey-btn" class="btn btn-danger" style="margin-top: 1rem;">
+                    Unlink Pubkey
+                </button>
+            </div>
+            {{else}}
+            <div class="link-pubkey">
+                <div id="nip07-status" class="text-muted" style="margin-bottom: 1rem;">
+                    Checking for Nostr extension...
+                </div>
+                <button id="link-extension-btn" class="btn btn-primary" style="display: none;">
+                    Link with Extension
+                </button>
+                <div class="divider" style="margin: 1rem 0;">or enter manually</div>
+                <form id="link-pubkey-form">
+                    <div class="form-group">
+                        <input type="text" id="manual-pubkey" name="pubkey"
+                            placeholder="npub1... or hex pubkey" class="monospace">
+                    </div>
+                    <button type="submit" class="btn btn-secondary">Link Pubkey</button>
+                </form>
+            </div>
+            {{end}}
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <strong>Security</strong>
+        </div>
+        <div class="card-body">
+            <div class="info-row">
+                <span class="info-label">Two-Factor Auth</span>
+                <span class="info-value">
+                    {{if .Account.MFAEnabled}}
+                    <span class="badge badge-success">Enabled</span>
+                    {{else}}
+                    <span class="badge badge-muted">Disabled</span>
+                    {{end}}
+                </span>
+            </div>
+            {{if .Account.LastLoginAt}}
+            <div class="info-row">
+                <span class="info-label">Last Login</span>
+                <span class="info-value">{{formatTime .Account.LastLoginAt}}</span>
+            </div>
+            {{end}}
+        </div>
+    </div>
+</div>
+
+<style>
+.settings-grid {
+    display: grid;
+    gap: 1.5rem;
+    max-width: 600px;
+}
+
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.info-row:last-child {
+    border-bottom: none;
+}
+
+.info-label {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+}
+
+.info-value {
+    font-weight: 500;
+}
+
+.badge-success {
+    background-color: var(--success);
+    color: white;
+}
+
+.badge-muted {
+    background-color: var(--bg-secondary);
+    color: var(--text-muted);
+}
+
+.divider {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.linked-pubkey {
+    padding: 1rem;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+}
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const messageDiv = document.getElementById('message');
+
+    function showMessage(text, type) {
+        messageDiv.textContent = text;
+        messageDiv.className = 'alert alert-' + type;
+        messageDiv.style.display = 'block';
+        if (type === 'success') {
+            setTimeout(() => location.reload(), 1500);
+        }
+    }
+
+    // Check for NIP-07 extension
+    const linkExtensionBtn = document.getElementById('link-extension-btn');
+    const nip07Status = document.getElementById('nip07-status');
+
+    if (linkExtensionBtn) {
+        setTimeout(function() {
+            if (window.nostr) {
+                linkExtensionBtn.style.display = 'inline-block';
+                nip07Status.textContent = 'Nostr extension detected';
+            } else {
+                nip07Status.textContent = 'No Nostr extension found. Enter your pubkey manually below.';
+            }
+        }, 500);
+
+        // Link via extension
+        linkExtensionBtn.addEventListener('click', async function() {
+            try {
+                ButtonState.setLoading(this, 'Getting pubkey...');
+                const pubkey = await window.nostr.getPublicKey();
+
+                const response = await fetch('/web/api/settings/pubkey', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ pubkey: pubkey })
+                });
+
+                const data = await response.json();
+                if (response.ok) {
+                    showMessage('Pubkey linked successfully! You can now login with your extension.', 'success');
+                } else {
+                    showMessage(data.error || 'Failed to link pubkey', 'error');
+                    ButtonState.reset(this);
+                }
+            } catch (err) {
+                showMessage(err.message || 'Failed to get pubkey from extension', 'error');
+                ButtonState.reset(this);
+            }
+        });
+    }
+
+    // Link via manual entry
+    const linkForm = document.getElementById('link-pubkey-form');
+    if (linkForm) {
+        linkForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const submitBtn = this.querySelector('button[type="submit"]');
+            const pubkey = document.getElementById('manual-pubkey').value.trim();
+
+            if (!pubkey) {
+                showMessage('Please enter a pubkey', 'error');
+                return;
+            }
+
+            ButtonState.setLoading(submitBtn, 'Linking...');
+
+            try {
+                const response = await fetch('/web/api/settings/pubkey', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ pubkey: pubkey })
+                });
+
+                const data = await response.json();
+                if (response.ok) {
+                    showMessage('Pubkey linked successfully! You can now login with your extension.', 'success');
+                } else {
+                    showMessage(data.error || 'Failed to link pubkey', 'error');
+                    ButtonState.reset(submitBtn);
+                }
+            } catch (err) {
+                showMessage('Failed to link pubkey: ' + err.message, 'error');
+                ButtonState.reset(submitBtn);
+            }
+        });
+    }
+
+    // Unlink pubkey
+    const unlinkBtn = document.getElementById('unlink-pubkey-btn');
+    if (unlinkBtn) {
+        unlinkBtn.addEventListener('click', async function() {
+            if (!confirm('Unlink your Nostr pubkey? You will no longer be able to login with your extension.')) {
+                return;
+            }
+
+            ButtonState.setLoading(this, 'Unlinking...');
+
+            try {
+                const response = await fetch('/web/api/settings/pubkey', {
+                    method: 'DELETE'
+                });
+
+                const data = await response.json();
+                if (response.ok) {
+                    showMessage('Pubkey unlinked', 'success');
+                } else {
+                    showMessage(data.error || 'Failed to unlink pubkey', 'error');
+                    ButtonState.reset(this);
+                }
+            } catch (err) {
+                showMessage('Failed to unlink pubkey: ' + err.message, 'error');
+                ButtonState.reset(this);
+            }
+        });
+    }
+});
+</script>
+{{end}}
+
+{{template "base" .}}

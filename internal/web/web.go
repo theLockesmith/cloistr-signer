@@ -361,6 +361,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/apps", h.requireAuth(h.handleApps))
 	mux.HandleFunc("/requests", h.requireAuth(h.handleRequests))
 	mux.HandleFunc("/users", h.requireAuth(h.handleUsers))
+	mux.HandleFunc("/settings", h.requireAuth(h.handleSettings))
 
 	// Logout (GET - simple redirect)
 	mux.HandleFunc("/logout", h.handleLogout)
@@ -371,6 +372,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/web/api/register", h.handleAPIRegister)
 	mux.HandleFunc("/web/api/approve", h.handleAPIApprove)
 	mux.HandleFunc("/web/api/deny", h.handleAPIDeny)
+	mux.HandleFunc("/web/api/settings/pubkey", h.requireAuth(h.handleAPISettingsPubkey))
 }
 
 // handleStatic serves static files
@@ -699,6 +701,27 @@ func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request) {
 		"Title": "Users - Cloistr Signer",
 		"User":  user,
 		"Users": users,
+	})
+}
+
+func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
+	user := h.getCurrentUser(r)
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+
+	// Get full user account info
+	account, err := h.storage.GetUser(r.Context(), user.ID)
+	if err != nil {
+		http.Error(w, "Failed to load account", http.StatusInternalServerError)
+		return
+	}
+
+	h.render(w, "settings.html", map[string]interface{}{
+		"Title":   "Settings - Cloistr Signer",
+		"User":    user,
+		"Account": account,
 	})
 }
 
@@ -1152,6 +1175,93 @@ func (h *Handler) handleAPIDeny(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "Request denied",
 	})
+}
+
+// handleAPISettingsPubkey handles linking/unlinking pubkey for extension login
+func (h *Handler) handleAPISettingsPubkey(w http.ResponseWriter, r *http.Request) {
+	user := h.getCurrentUser(r)
+	if user == nil {
+		h.jsonError(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+
+	// Get full user account
+	account, err := h.storage.GetUser(r.Context(), user.ID)
+	if err != nil {
+		h.jsonError(w, http.StatusInternalServerError, "Failed to load account")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPost:
+		// Link pubkey
+		var req struct {
+			Pubkey string `json:"pubkey"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			h.jsonError(w, http.StatusBadRequest, "Invalid request")
+			return
+		}
+
+		pubkey := req.Pubkey
+		if pubkey == "" {
+			h.jsonError(w, http.StatusBadRequest, "Pubkey is required")
+			return
+		}
+
+		// Parse pubkey (npub bech32 or hex)
+		if strings.HasPrefix(pubkey, "npub") {
+			_, val, err := nip19.Decode(pubkey)
+			if err != nil {
+				h.jsonError(w, http.StatusBadRequest, "Invalid npub format")
+				return
+			}
+			pubkey = val.(string)
+		}
+
+		// Validate hex format
+		if len(pubkey) != 64 {
+			h.jsonError(w, http.StatusBadRequest, "Invalid pubkey length")
+			return
+		}
+
+		// Check if pubkey is already linked to another account
+		existingUser, _ := h.storage.GetUserByPubkey(r.Context(), pubkey)
+		if existingUser != nil && existingUser.ID != account.ID {
+			h.jsonError(w, http.StatusConflict, "This pubkey is already linked to another account")
+			return
+		}
+
+		// Update user
+		account.Pubkey = pubkey
+		if err := h.storage.UpdateUser(r.Context(), account); err != nil {
+			h.jsonError(w, http.StatusInternalServerError, "Failed to update account")
+			return
+		}
+
+		slog.Info("pubkey linked to account", "user", account.Username, "pubkey", pubkey[:16]+"...")
+		h.jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"message": "Pubkey linked successfully",
+		})
+
+	case http.MethodDelete:
+		// Unlink pubkey
+		account.Pubkey = ""
+		if err := h.storage.UpdateUser(r.Context(), account); err != nil {
+			h.jsonError(w, http.StatusInternalServerError, "Failed to update account")
+			return
+		}
+
+		slog.Info("pubkey unlinked from account", "user", account.Username)
+		h.jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"message": "Pubkey unlinked",
+		})
+
+	default:
+		h.jsonError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
 }
 
 // Helper methods
