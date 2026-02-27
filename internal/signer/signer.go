@@ -364,12 +364,15 @@ func (s *Signer) handleEventWithRelay(event *nostr.Event, sourceRelay string) {
 	s.keysLock.RUnlock()
 
 	clientPubkey := event.PubKey
+	requestStart := time.Now()
 
 	slog.Info("received NIP-46 request",
 		"from", clientPubkey[:16]+"...",
 		"to", targetPubkey[:16]+"...",
 		"event_id", event.ID,
 		"source_relay", sourceRelay,
+		"event_created", time.Unix(int64(event.CreatedAt), 0).Format(time.RFC3339),
+		"latency_ms", time.Since(time.Unix(int64(event.CreatedAt), 0)).Milliseconds(),
 	)
 
 	// Try NIP-44 decryption first (newer standard), fall back to NIP-04
@@ -417,11 +420,17 @@ func (s *Signer) handleEventWithRelay(event *nostr.Event, sourceRelay string) {
 
 	var request NIP46Request
 	if err := json.Unmarshal([]byte(decrypted), &request); err != nil {
-		slog.Error("failed to parse request", "error", err)
+		slog.Error("failed to parse request", "error", err, "event_id", event.ID)
 		return
 	}
 
-	slog.Info("processing request", "method", request.Method, "request_id", request.ID)
+	decryptDuration := time.Since(requestStart)
+	slog.Info("processing request",
+		"method", request.Method,
+		"request_id", request.ID,
+		"event_id", event.ID,
+		"decrypt_ms", decryptDuration.Milliseconds(),
+	)
 
 	// Check permissions
 	ctx := context.Background()
@@ -429,11 +438,20 @@ func (s *Signer) handleEventWithRelay(event *nostr.Event, sourceRelay string) {
 
 	// Handle request in a goroutine to avoid blocking the event loop
 	// This is especially important for authorization callbacks which may take time
-	go s.processRequest(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, &request, perm, err, useNIP44)
+	go s.processRequest(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, &request, perm, err, useNIP44, requestStart)
 }
 
 // processRequest handles a NIP-46 request, potentially waiting for authorization
-func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey, sourceRelay string, request *NIP46Request, perm *storage.Permission, permErr error, useNIP44 bool) {
+func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey, sourceRelay string, request *NIP46Request, perm *storage.Permission, permErr error, useNIP44 bool, requestStart time.Time) {
+	// Log timing at the end
+	defer func() {
+		slog.Info("request completed",
+			"request_id", request.ID,
+			"method", request.Method,
+			"total_ms", time.Since(requestStart).Milliseconds(),
+		)
+	}()
+
 	// If we have a valid permission
 	if permErr == nil {
 		// Check if method is allowed
@@ -979,9 +997,11 @@ func (s *Signer) sendError(ctx context.Context, signerPubkey, privateKey, client
 }
 
 func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, clientPubkey, sourceRelay string, response NIP46Response, useNIP44 bool) {
+	sendStart := time.Now()
+
 	data, err := json.Marshal(response)
 	if err != nil {
-		slog.Error("failed to marshal response", "error", err)
+		slog.Error("failed to marshal response", "error", err, "request_id", response.ID)
 		return
 	}
 
@@ -1033,10 +1053,13 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 
 	// Publish response only to the source relay (relay-aware response)
 	// This minimizes rate limit consumption and ensures the client gets the response
+	publishStart := time.Now()
 	if err := keyClient.PublishToRelay(ctx, sourceRelay, &event); err != nil {
 		slog.Error("failed to publish response to source relay",
+			"request_id", response.ID,
 			"relay", sourceRelay,
 			"error", err,
+			"publish_ms", time.Since(publishStart).Milliseconds(),
 		)
 		return
 	}
@@ -1045,8 +1068,11 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 		"request_id", response.ID,
 		"to", clientPubkey[:16]+"...",
 		"relay", sourceRelay,
+		"event_id", event.ID,
 		"has_error", response.Error != "",
 		"nip44", useNIP44,
+		"encrypt_ms", publishStart.Sub(sendStart).Milliseconds(),
+		"publish_ms", time.Since(publishStart).Milliseconds(),
 	)
 }
 

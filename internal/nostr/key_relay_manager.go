@@ -200,19 +200,30 @@ func (c *KeyRelayClient) publishWithRetry(ctx context.Context, relay *nostr.Rela
 	currentRelay := relay        // May be replaced on reconnection
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		publishStart := time.Now()
 		err = currentRelay.Publish(ctx, *event)
 		if err == nil {
+			if attempt > 0 {
+				slog.Info("publish succeeded after retry",
+					"url", url,
+					"attempt", attempt+1,
+					"publish_ms", time.Since(publishStart).Milliseconds(),
+					"event_kind", event.Kind,
+				)
+			}
 			return nil
 		}
 
 		// Log the actual error for debugging rate limit issues
-		slog.Debug("publish failed",
+		slog.Info("publish attempt failed",
 			"url", url,
-			"attempt", attempt,
+			"attempt", attempt+1,
+			"max_attempts", maxRetries+1,
 			"error", err.Error(),
 			"is_rate_limited", isRateLimited(err),
 			"is_auth_required", isAuthRequired(err),
 			"is_connection_error", isConnectionError(err),
+			"event_kind", event.Kind,
 		)
 
 		// Handle connection errors by reconnecting
@@ -276,7 +287,7 @@ func (c *KeyRelayClient) publishWithRetry(ctx context.Context, relay *nostr.Rela
 			return err
 		}
 
-		slog.Debug("retryable error, waiting before retry", "url", url, "backoff", backoff, "attempt", attempt+1, "error", err.Error())
+		slog.Info("retrying after backoff", "url", url, "backoff_ms", backoff.Milliseconds(), "next_attempt", attempt+2, "error", err.Error())
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
