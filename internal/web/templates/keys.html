@@ -272,6 +272,10 @@
                 <textarea id="edit-relays" name="relays" rows="3"
                     placeholder="wss://relay1.example.com&#10;wss://relay2.example.com" class="monospace"></textarea>
                 <small>One relay per line. Leave empty to use default relays from config.</small>
+                <div id="relay-warning" class="alert alert-warning" style="display: none; margin-top: 0.5rem;">
+                    <strong>Rate Limit Warning:</strong> External relays may rate limit NIP-46 signing traffic,
+                    causing delays of 30+ seconds. <code>relay.cloistr.xyz</code> is optimized for NIP-46 with no rate limits.
+                </div>
             </div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-secondary" id="cancel-edit">Cancel</button>
@@ -785,6 +789,21 @@ document.addEventListener('DOMContentLoaded', function() {
     const editKeyId = document.getElementById('edit-key-id');
     const editName = document.getElementById('edit-name');
     const editRelays = document.getElementById('edit-relays');
+    const relayWarning = document.getElementById('relay-warning');
+
+    // Check for external relays and show warning
+    function checkRelayWarning() {
+        const relaysText = editRelays.value.trim();
+        if (!relaysText) {
+            relayWarning.style.display = 'none';
+            return;
+        }
+        const relays = relaysText.split('\n').map(r => r.trim()).filter(r => r);
+        const hasExternalRelay = relays.some(r => !r.includes('relay.cloistr.xyz'));
+        relayWarning.style.display = hasExternalRelay ? 'block' : 'none';
+    }
+
+    editRelays.addEventListener('input', checkRelayWarning);
 
     document.querySelectorAll('.edit-btn').forEach(btn => {
         btn.addEventListener('click', function() {
@@ -796,6 +815,7 @@ document.addEventListener('DOMContentLoaded', function() {
             editKeyName.textContent = name;
             editName.value = name;
             editRelays.value = relays ? relays.split(',').join('\n') : '';
+            checkRelayWarning();
             editModal.style.display = 'flex';
         });
     });
