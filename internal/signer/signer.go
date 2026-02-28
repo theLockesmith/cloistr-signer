@@ -1051,14 +1051,44 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 	keyRelays := s.keyRelays[signerPubkey]
 	keyClient := s.keyRelayManager.GetClient(ctx, signerPubkey, privateKey, keyRelays)
 
-	// Publish response only to the source relay (relay-aware response)
-	// This minimizes rate limit consumption and ensures the client gets the response
+	// Build list of relays to try, preferring our own relay (no rate limiting for kind:24133)
+	// Order: our configured relays first (especially relay.cloistr.xyz), then source relay as fallback
+	relaysToTry := make([]string, 0, len(s.config.Relays)+1)
+	sourceInConfig := false
+	for _, r := range s.config.Relays {
+		relaysToTry = append(relaysToTry, r)
+		if r == sourceRelay {
+			sourceInConfig = true
+		}
+	}
+	// Add source relay as fallback if not already in config
+	if !sourceInConfig {
+		relaysToTry = append(relaysToTry, sourceRelay)
+	}
+
+	// Try each relay until one succeeds
 	publishStart := time.Now()
-	if err := keyClient.PublishToRelay(ctx, sourceRelay, &event); err != nil {
-		slog.Error("failed to publish response to source relay",
+	var lastErr error
+	var successRelay string
+	for _, relay := range relaysToTry {
+		if err := keyClient.PublishToRelay(ctx, relay, &event); err != nil {
+			slog.Debug("publish attempt to relay failed",
+				"request_id", response.ID,
+				"relay", relay,
+				"error", err,
+			)
+			lastErr = err
+			continue
+		}
+		successRelay = relay
+		break
+	}
+
+	if successRelay == "" {
+		slog.Error("failed to publish response to any relay",
 			"request_id", response.ID,
-			"relay", sourceRelay,
-			"error", err,
+			"relays_tried", relaysToTry,
+			"last_error", lastErr,
 			"publish_ms", time.Since(publishStart).Milliseconds(),
 		)
 		return
@@ -1067,7 +1097,7 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 	slog.Info("sent response",
 		"request_id", response.ID,
 		"to", clientPubkey[:16]+"...",
-		"relay", sourceRelay,
+		"relay", successRelay,
 		"event_id", event.ID,
 		"has_error", response.Error != "",
 		"nip44", useNIP44,

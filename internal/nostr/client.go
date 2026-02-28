@@ -376,9 +376,10 @@ func isRateLimited(err error) bool {
 	}
 	errStr := strings.ToLower(err.Error())
 	// NIP-01 defines standard prefixes for OK messages
-	// Primary check: standard "rate-limited:" prefix
+	// go-nostr may prefix with "msg: " so we check for both prefix and contains
 	return strings.HasPrefix(errStr, "rate-limited:") ||
-		strings.HasPrefix(errStr, "rate-limited")
+		strings.HasPrefix(errStr, "rate-limited") ||
+		strings.Contains(errStr, "rate-limited:")
 }
 
 // isRetryableError checks if an error should trigger a retry
