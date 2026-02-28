@@ -373,6 +373,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/web/api/approve", h.handleAPIApprove)
 	mux.HandleFunc("/web/api/deny", h.handleAPIDeny)
 	mux.HandleFunc("/web/api/settings/pubkey", h.requireAuth(h.handleAPISettingsPubkey))
+	mux.HandleFunc("/web/api/relay/check", h.requireAuth(h.handleAPIRelayCheck))
 }
 
 // handleStatic serves static files
@@ -1349,4 +1350,113 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// RelayCheckResponse contains the result of checking a relay
+type RelayCheckResponse struct {
+	URL            string `json:"url"`
+	Valid          bool   `json:"valid"`
+	Warning        bool   `json:"warning"`
+	WarningMessage string `json:"warning_message,omitempty"`
+	Name           string `json:"name,omitempty"`
+	Description    string `json:"description,omitempty"`
+}
+
+// NIP11Info represents the NIP-11 relay information document
+type NIP11Info struct {
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	Pubkey      string `json:"pubkey,omitempty"`
+	Contact     string `json:"contact,omitempty"`
+}
+
+// handleAPIRelayCheck checks a relay URL and returns warning info
+func (h *Handler) handleAPIRelayCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	relayURL := strings.TrimSpace(req.URL)
+	if relayURL == "" {
+		json.NewEncoder(w).Encode(RelayCheckResponse{Valid: false})
+		return
+	}
+
+	// Validate URL format
+	if !strings.HasPrefix(relayURL, "wss://") && !strings.HasPrefix(relayURL, "ws://") {
+		json.NewEncoder(w).Encode(RelayCheckResponse{
+			URL:   relayURL,
+			Valid: false,
+		})
+		return
+	}
+
+	resp := RelayCheckResponse{
+		URL:   relayURL,
+		Valid: true,
+	}
+
+	// Check if it's our relay (no warning needed)
+	if strings.Contains(relayURL, "relay.cloistr.xyz") {
+		resp.Name = "Cloistr Relay"
+		resp.Description = "Optimized for NIP-46 signing"
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	// Try to fetch NIP-11 info from the relay
+	nip11 := h.fetchNIP11(relayURL)
+	if nip11 != nil {
+		resp.Name = nip11.Name
+		resp.Description = nip11.Description
+	}
+
+	// External relay - show warning
+	resp.Warning = true
+	resp.WarningMessage = "External relays may rate limit NIP-46 signing traffic"
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// fetchNIP11 fetches the NIP-11 relay information document
+func (h *Handler) fetchNIP11(relayURL string) *NIP11Info {
+	// Convert wss:// to https:// for NIP-11 fetch
+	httpURL := strings.Replace(relayURL, "wss://", "https://", 1)
+	httpURL = strings.Replace(httpURL, "ws://", "http://", 1)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest("GET", httpURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Accept", "application/nostr+json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Debug("NIP-11 fetch failed", "url", relayURL, "error", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	var info NIP11Info
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil
+	}
+
+	return &info
 }

@@ -273,8 +273,7 @@
                     placeholder="wss://relay1.example.com&#10;wss://relay2.example.com" class="monospace"></textarea>
                 <small>One relay per line. Leave empty to use default relays from config.</small>
                 <div id="relay-warning" class="alert alert-warning" style="display: none; margin-top: 0.5rem;">
-                    <strong>Rate Limit Warning:</strong> External relays may rate limit NIP-46 signing traffic,
-                    causing delays of 30+ seconds. <code>relay.cloistr.xyz</code> is optimized for NIP-46 with no rate limits.
+                    <strong>Rate Limit Warning:</strong> External relays may rate limit NIP-46 signing traffic
                 </div>
             </div>
             <div class="modal-actions">
@@ -791,19 +790,62 @@ document.addEventListener('DOMContentLoaded', function() {
     const editRelays = document.getElementById('edit-relays');
     const relayWarning = document.getElementById('relay-warning');
 
-    // Check for external relays and show warning
-    function checkRelayWarning() {
+    // Debounce helper
+    function debounce(func, wait) {
+        let timeout;
+        return function(...args) {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func.apply(this, args), wait);
+        };
+    }
+
+    // Check relays via API and show warnings
+    async function checkRelayWarning() {
         const relaysText = editRelays.value.trim();
         if (!relaysText) {
             relayWarning.style.display = 'none';
             return;
         }
+
         const relays = relaysText.split('\n').map(r => r.trim()).filter(r => r);
-        const hasExternalRelay = relays.some(r => !r.includes('relay.cloistr.xyz'));
-        relayWarning.style.display = hasExternalRelay ? 'block' : 'none';
+        if (relays.length === 0) {
+            relayWarning.style.display = 'none';
+            return;
+        }
+
+        // Check each relay via API
+        const warnings = [];
+        for (const url of relays) {
+            try {
+                const resp = await fetch('/web/api/relay/check', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({url})
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data.warning) {
+                        const name = data.name || url;
+                        warnings.push(name);
+                    }
+                }
+            } catch (e) {
+                // If API fails, assume external relay
+                warnings.push(url);
+            }
+        }
+
+        if (warnings.length > 0) {
+            relayWarning.innerHTML = '<strong>Rate Limit Warning:</strong> External relays may rate limit NIP-46 signing traffic';
+            relayWarning.style.display = 'block';
+        } else {
+            relayWarning.style.display = 'none';
+        }
     }
 
-    editRelays.addEventListener('input', checkRelayWarning);
+    // Debounce the check to avoid too many API calls while typing
+    const debouncedCheck = debounce(checkRelayWarning, 500);
+    editRelays.addEventListener('input', debouncedCheck);
 
     document.querySelectorAll('.edit-btn').forEach(btn => {
         btn.addEventListener('click', function() {
@@ -815,7 +857,8 @@ document.addEventListener('DOMContentLoaded', function() {
             editKeyName.textContent = name;
             editName.value = name;
             editRelays.value = relays ? relays.split(',').join('\n') : '';
-            checkRelayWarning();
+            relayWarning.style.display = 'none'; // Hide while checking
+            checkRelayWarning(); // Async check
             editModal.style.display = 'flex';
         });
     });
