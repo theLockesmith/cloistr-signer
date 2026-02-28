@@ -1051,18 +1051,28 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 	keyRelays := s.keyRelays[signerPubkey]
 	keyClient := s.keyRelayManager.GetClient(ctx, signerPubkey, privateKey, keyRelays)
 
-	// Build list of relays to try, preferring our own relay (no rate limiting for kind:24133)
-	// Order: our configured relays first (especially relay.cloistr.xyz), then source relay as fallback
-	relaysToTry := make([]string, 0, len(s.config.Relays)+1)
-	sourceInConfig := false
-	for _, r := range s.config.Relays {
+	// Build list of relays to try for response
+	// Respect user choice: if key has custom relays, use those; otherwise use config defaults
+	var preferredRelays []string
+	if len(keyRelays) > 0 {
+		// User configured custom relays for this key - respect their choice
+		preferredRelays = keyRelays
+	} else {
+		// Key uses defaults - we can prefer our relay (no rate limiting for kind:24133)
+		preferredRelays = s.config.Relays
+	}
+
+	// Build final list: preferred relays first, source relay as fallback
+	relaysToTry := make([]string, 0, len(preferredRelays)+1)
+	sourceInPreferred := false
+	for _, r := range preferredRelays {
 		relaysToTry = append(relaysToTry, r)
 		if r == sourceRelay {
-			sourceInConfig = true
+			sourceInPreferred = true
 		}
 	}
-	// Add source relay as fallback if not already in config
-	if !sourceInConfig {
+	// Add source relay as fallback if not already in preferred list
+	if !sourceInPreferred {
 		relaysToTry = append(relaysToTry, sourceRelay)
 	}
 
