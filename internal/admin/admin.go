@@ -9,6 +9,7 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip04"
+	"git.coldforge.xyz/coldforge/cloistr-common/relayprefs"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 	relay "git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
@@ -35,6 +36,7 @@ type Handler struct {
 	config       *config.Config
 	storage      storage.Storage
 	relayClient  *relay.Client
+	relayPrefs   *relayprefs.Client // Relay preferences for admin DM delivery
 	keyCreator   KeyCreator
 	reqHandler   RequestHandler
 	signerPubkey string // The pubkey to use for sending DMs
@@ -42,11 +44,12 @@ type Handler struct {
 }
 
 // New creates a new admin handler
-func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, keyCreator KeyCreator, reqHandler RequestHandler) *Handler {
+func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, relayPrefs *relayprefs.Client, keyCreator KeyCreator, reqHandler RequestHandler) *Handler {
 	return &Handler{
 		config:      cfg,
 		storage:     store,
 		relayClient: relayClient,
+		relayPrefs:  relayPrefs,
 		keyCreator:  keyCreator,
 		reqHandler:  reqHandler,
 	}
@@ -604,13 +607,49 @@ func (h *Handler) sendDM(ctx context.Context, signerPubkey, privateKey, recipien
 		return
 	}
 
-	// Use adaptive POW in case relay requires it
-	if err := h.relayClient.PublishWithAdaptivePow(ctx, &event, privateKey); err != nil {
-		slog.Error("failed to publish DM", "error", err)
-		return
+	// Get recipient's relay preferences for DM delivery
+	var relaysToPublish []string
+	if h.relayPrefs != nil {
+		prefs, err := h.relayPrefs.GetRelayPrefs(ctx, recipientPubkey)
+		if err == nil && prefs.HasRelays() {
+			// For DMs, publish to recipient's all relays (both read and write)
+			relaysToPublish = prefs.AllRelays()
+			slog.Debug("using recipient relay preferences",
+				"recipient", recipientPubkey[:16]+"...",
+				"relays", relaysToPublish,
+				"source", prefs.Source,
+			)
+		}
 	}
 
-	slog.Debug("sent admin DM response", "to", recipientPubkey[:16]+"...")
+	// Publish to recipient's preferred relays if available
+	var published bool
+	if len(relaysToPublish) > 0 {
+		for _, relayURL := range relaysToPublish {
+			if err := h.relayClient.PublishToRelay(ctx, relayURL, &event); err != nil {
+				slog.Debug("failed to publish DM to recipient relay",
+					"recipient", recipientPubkey[:16]+"...",
+					"relay", relayURL,
+					"error", err,
+				)
+				continue
+			}
+			published = true
+		}
+	}
+
+	// Fall back to configured relays with adaptive POW
+	if !published {
+		if err := h.relayClient.PublishWithAdaptivePow(ctx, &event, privateKey); err != nil {
+			slog.Error("failed to publish DM", "error", err)
+			return
+		}
+	}
+
+	slog.Debug("sent admin DM response",
+		"to", recipientPubkey[:16]+"...",
+		"used_prefs", len(relaysToPublish) > 0 && published,
+	)
 }
 
 // broadcastToAdmins sends a message to all admin pubkeys

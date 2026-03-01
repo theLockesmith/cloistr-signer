@@ -33,7 +33,7 @@ func testHandler(t *testing.T) (*Handler, *storage.MemoryStorage) {
 
 	// Create signer with nil relay client and nil encryptor - tests that need
 	// signer methods should handle nil checks appropriately
-	s := signer.New(cfg, store, nil, nil, nil)
+	s := signer.New(cfg, store, nil, nil, nil, nil)
 
 	h := NewHandler(cfg, s, store, nil)
 	return h, store
@@ -51,7 +51,7 @@ func TestNewHandler(t *testing.T) {
 		},
 	}
 	store := storage.NewMemoryStorage()
-	s := signer.New(cfg, store, nil, nil, nil)
+	s := signer.New(cfg, store, nil, nil, nil, nil)
 
 	h := NewHandler(cfg, s, store, nil)
 

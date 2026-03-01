@@ -10,6 +10,7 @@ import (
 	"time"
 
 	gonostr "github.com/nbd-wtf/go-nostr"
+	"git.coldforge.xyz/coldforge/cloistr-common/relayprefs"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/admin"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/api"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
@@ -96,8 +97,15 @@ func main() {
 		MaxRelays:      5, // Default max relays in bunker URI
 	})
 
+	// Initialize relay preferences client for user relay discovery
+	// Used to deliver DMs to admins' preferred relays
+	relayPrefsClient := relayprefs.NewClientFromEnv()
+	if err := relayPrefsClient.Validate(); err != nil {
+		slog.Warn("relay preferences client has no sources configured, using defaults", "error", err)
+	}
+
 	// Initialize NIP-46 signer
-	nip46Signer := signer.New(cfg, store, relayClient, encryptor, relaySelector)
+	nip46Signer := signer.New(cfg, store, relayClient, encryptor, relaySelector, relayPrefsClient)
 
 	// Initialize HTTP API
 	apiHandler := api.NewHandler(cfg, nip46Signer, store, encryptor)
@@ -138,7 +146,7 @@ func main() {
 	}
 
 	// Initialize admin handler for DM-based management
-	adminHandler := admin.New(cfg, store, relayClient, nip46Signer, nip46Signer)
+	adminHandler := admin.New(cfg, store, relayClient, relayPrefsClient, nip46Signer, nip46Signer)
 
 	// Set the admin communication key using signer identity
 	if cfg.RelayAuthKey != "" {

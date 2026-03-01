@@ -12,6 +12,7 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip04"
 	"github.com/nbd-wtf/go-nostr/nip44"
+	"git.coldforge.xyz/coldforge/cloistr-common/relayprefs"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/bunker"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
@@ -77,6 +78,7 @@ type Signer struct {
 	encryptor       *crypto.Encryptor
 	proxyClient     *proxy.Client                       // Client for upstream signer connections
 	relaySelector   *discovery.Selector                 // Relay selection with optional discovery
+	relayPrefs      *relayprefs.Client                  // Relay preferences for user data delivery
 	keys            map[string]string                   // pubkey -> private key (hex)
 	keysLock        sync.RWMutex                        // Protects keys map for concurrent access
 	keyRelays       map[string][]string                 // pubkey -> configured relays (from storage)
@@ -92,7 +94,7 @@ type Signer struct {
 }
 
 // New creates a new NIP-46 signer
-func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, encryptor *crypto.Encryptor, relaySelector *discovery.Selector) *Signer {
+func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, encryptor *crypto.Encryptor, relaySelector *discovery.Selector, relayPrefs *relayprefs.Client) *Signer {
 	return &Signer{
 		config:          cfg,
 		storage:         store,
@@ -101,6 +103,7 @@ func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, e
 		encryptor:       encryptor,
 		proxyClient:     proxy.NewClient(cfg),
 		relaySelector:   relaySelector,
+		relayPrefs:      relayPrefs,
 		keys:            make(map[string]string),
 		keyRelays:       make(map[string][]string),
 		proxyKeys:       make(map[string]string),
@@ -1262,19 +1265,54 @@ POST /api/v1/requests/{id}/deny`,
 			continue
 		}
 
-		// Publish the DM
-		if err := s.relayClient.Publish(ctx, &event); err != nil {
-			slog.Error("failed to publish admin notification",
-				"admin", adminPubkey[:16]+"...",
-				"error", err,
-			)
-			continue
+		// Get admin's relay preferences for DM delivery
+		var relaysToPublish []string
+		if s.relayPrefs != nil {
+			prefs, err := s.relayPrefs.GetRelayPrefs(ctx, adminPubkey)
+			if err == nil && prefs.HasRelays() {
+				// For DMs, publish to admin's all relays (both read and write)
+				// This ensures the DM reaches their inbox regardless of read/write split
+				relaysToPublish = prefs.AllRelays()
+				slog.Debug("using admin relay preferences",
+					"admin", adminPubkey[:16]+"...",
+					"relays", relaysToPublish,
+					"source", prefs.Source,
+				)
+			}
+		}
+
+		// Publish the DM to admin's preferred relays, or fall back to configured relays
+		var published bool
+		if len(relaysToPublish) > 0 {
+			for _, relayURL := range relaysToPublish {
+				if err := s.relayClient.PublishToRelay(ctx, relayURL, &event); err != nil {
+					slog.Debug("failed to publish to admin relay",
+						"admin", adminPubkey[:16]+"...",
+						"relay", relayURL,
+						"error", err,
+					)
+					continue
+				}
+				published = true
+			}
+		}
+
+		// Fall back to configured relays if admin relay prefs failed or weren't available
+		if !published {
+			if err := s.relayClient.Publish(ctx, &event); err != nil {
+				slog.Error("failed to publish admin notification",
+					"admin", adminPubkey[:16]+"...",
+					"error", err,
+				)
+				continue
+			}
 		}
 
 		slog.Info("sent authorization notification to admin",
 			"admin", adminPubkey[:16]+"...",
 			"method", request.Method,
 			"client", clientPubkey[:16]+"...",
+			"used_prefs", len(relaysToPublish) > 0 && published,
 		)
 	}
 }

@@ -61,7 +61,7 @@ func TestNew(t *testing.T) {
 	keyCreator := newMockKeyCreator()
 	reqHandler := newMockRequestHandler()
 
-	handler := New(cfg, store, nil, keyCreator, reqHandler)
+	handler := New(cfg, store, nil, nil, keyCreator, reqHandler)
 
 	if handler == nil {
 		t.Fatal("New() returned nil")
@@ -75,7 +75,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestHandler_SetSignerKey(t *testing.T) {
-	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, newMockKeyCreator(), newMockRequestHandler())
 	handler.SetSignerKey("pubkey123", "privkey456")
 
 	if handler.signerPubkey != "pubkey123" {
@@ -92,7 +92,7 @@ func TestHandler_isAdmin(t *testing.T) {
 			AdminPubkeys: []string{"admin1", "admin2"},
 		},
 	}
-	handler := New(cfg, storage.NewMemoryStorage(), nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(cfg, storage.NewMemoryStorage(), nil, nil, newMockKeyCreator(), newMockRequestHandler())
 
 	tests := []struct {
 		pubkey string
@@ -113,7 +113,7 @@ func TestHandler_isAdmin(t *testing.T) {
 }
 
 func TestHandler_helpMessage(t *testing.T) {
-	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, newMockKeyCreator(), newMockRequestHandler())
 	msg := handler.helpMessage()
 
 	if !strings.Contains(msg, "Admin Commands") {
@@ -131,7 +131,7 @@ func TestHandler_helpMessage(t *testing.T) {
 }
 
 func TestHandler_processCommand_Help(t *testing.T) {
-	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, newMockKeyCreator(), newMockRequestHandler())
 	ctx := context.Background()
 
 	tests := []string{"help", "?", "HELP", "Help"}
@@ -147,7 +147,7 @@ func TestHandler_processCommand_Status(t *testing.T) {
 	cfg := &config.Config{}
 	store := storage.NewMemoryStorage()
 	reqHandler := newMockRequestHandler()
-	handler := New(cfg, store, nil, newMockKeyCreator(), reqHandler)
+	handler := New(cfg, store, nil, nil, newMockKeyCreator(), reqHandler)
 
 	ctx := context.Background()
 	response := handler.processCommand(ctx, "status")
@@ -162,7 +162,7 @@ func TestHandler_processCommand_Status(t *testing.T) {
 
 func TestHandler_processCommand_GetKeys(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	handler := New(&config.Config{}, store, nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, store, nil, nil, newMockKeyCreator(), newMockRequestHandler())
 
 	ctx := context.Background()
 
@@ -191,7 +191,7 @@ func TestHandler_processCommand_GetKeys(t *testing.T) {
 
 func TestHandler_processCommand_GetKey(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	handler := New(&config.Config{}, store, nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, store, nil, nil, newMockKeyCreator(), newMockRequestHandler())
 
 	ctx := context.Background()
 
@@ -227,7 +227,7 @@ func TestHandler_processCommand_GetKey(t *testing.T) {
 func TestHandler_processCommand_CreateKey(t *testing.T) {
 	store := storage.NewMemoryStorage()
 	keyCreator := newMockKeyCreator()
-	handler := New(&config.Config{}, store, nil, keyCreator, newMockRequestHandler())
+	handler := New(&config.Config{}, store, nil, nil, keyCreator, newMockRequestHandler())
 
 	ctx := context.Background()
 
@@ -253,7 +253,7 @@ func TestHandler_processCommand_CreateKey(t *testing.T) {
 
 func TestHandler_processCommand_DeleteKey(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	handler := New(&config.Config{}, store, nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, store, nil, nil, newMockKeyCreator(), newMockRequestHandler())
 
 	ctx := context.Background()
 
@@ -285,7 +285,7 @@ func TestHandler_processCommand_DeleteKey(t *testing.T) {
 
 func TestHandler_processCommand_ListPending(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	handler := New(&config.Config{}, store, nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, store, nil, nil, newMockKeyCreator(), newMockRequestHandler())
 
 	ctx := context.Background()
 
@@ -319,7 +319,7 @@ func TestHandler_processCommand_ListPending(t *testing.T) {
 func TestHandler_processCommand_Approve(t *testing.T) {
 	store := storage.NewMemoryStorage()
 	reqHandler := newMockRequestHandler()
-	handler := New(&config.Config{}, store, nil, newMockKeyCreator(), reqHandler)
+	handler := New(&config.Config{}, store, nil, nil, newMockKeyCreator(), reqHandler)
 
 	ctx := context.Background()
 
@@ -359,7 +359,7 @@ func TestHandler_processCommand_Approve(t *testing.T) {
 func TestHandler_processCommand_Deny(t *testing.T) {
 	store := storage.NewMemoryStorage()
 	reqHandler := newMockRequestHandler()
-	handler := New(&config.Config{}, store, nil, newMockKeyCreator(), reqHandler)
+	handler := New(&config.Config{}, store, nil, nil, newMockKeyCreator(), reqHandler)
 
 	ctx := context.Background()
 
@@ -392,7 +392,7 @@ func TestHandler_processCommand_Deny(t *testing.T) {
 
 func TestHandler_processCommand_ListUsers(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	handler := New(&config.Config{}, store, nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, store, nil, nil, newMockKeyCreator(), newMockRequestHandler())
 
 	ctx := context.Background()
 
@@ -422,7 +422,7 @@ func TestHandler_processCommand_ListUsers(t *testing.T) {
 
 func TestHandler_processCommand_ListPolicies(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	handler := New(&config.Config{}, store, nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, store, nil, nil, newMockKeyCreator(), newMockRequestHandler())
 
 	ctx := context.Background()
 
@@ -450,7 +450,7 @@ func TestHandler_processCommand_ListPolicies(t *testing.T) {
 }
 
 func TestHandler_processCommand_Unknown(t *testing.T) {
-	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, newMockKeyCreator(), newMockRequestHandler())
 	ctx := context.Background()
 
 	response := handler.processCommand(ctx, "unknowncommand")
@@ -463,7 +463,7 @@ func TestHandler_processCommand_Unknown(t *testing.T) {
 }
 
 func TestHandler_processCommand_Empty(t *testing.T) {
-	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, newMockKeyCreator(), newMockRequestHandler())
 	ctx := context.Background()
 
 	response := handler.processCommand(ctx, "")
@@ -478,7 +478,7 @@ func TestHandler_processCommand_Empty(t *testing.T) {
 }
 
 func TestHandler_ProcessCommandHTTP(t *testing.T) {
-	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, newMockKeyCreator(), newMockRequestHandler())
+	handler := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, newMockKeyCreator(), newMockRequestHandler())
 	ctx := context.Background()
 
 	t.Run("successful command", func(t *testing.T) {
@@ -518,7 +518,7 @@ func TestHandler_GetAdminStats(t *testing.T) {
 	}
 	store := storage.NewMemoryStorage()
 	reqHandler := newMockRequestHandler()
-	handler := New(cfg, store, nil, newMockKeyCreator(), reqHandler)
+	handler := New(cfg, store, nil, nil, newMockKeyCreator(), reqHandler)
 
 	ctx := context.Background()
 

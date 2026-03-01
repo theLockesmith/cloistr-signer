@@ -219,6 +219,12 @@ The approval page can be shared via link for async authorization.
 | `DISCOVERY_TIMEOUT` | Discovery query timeout in seconds | `5` |
 | `DISCOVERY_MAX_RELAYS` | Maximum relays to include from discovery | `3` |
 | `DISCOVERY_INCLUDE_IN_BUNKER` | Include discovered relays in bunker:// URI | `true` |
+| **Relay Preferences** (via cloistr-common) | | |
+| `DISCOVERY_INTERNAL` | Self-hosted discovery URL for relay prefs | (none) |
+| `RELAY_LIST` | Comma-separated relays to query for user relay prefs | (none) |
+| `DISCOVERY_EXTERNAL` | Third-party discovery URL for relay prefs | (none) |
+| `USE_CLOISTR_FALLBACK` | Use Cloistr services as fallback for relay prefs | `true` |
+| `RELAY_PREFS_CACHE_TTL` | Cache duration for relay prefs (e.g., "1h", "30m") | `1h` |
 
 ### REQUIRE_APPROVAL Behavior
 
@@ -439,6 +445,84 @@ Team Member's Client ◄── Personal Signer ◄────────┘
 - `internal/nostr/client.go` - `isRetryableError()` NIP-01 detection
 - `internal/signer/signer.go` - Deduplication, #p filter subscription
 
+### Completed (Phase 12.6 - Relay Optimization & UX - 2026-02-28)
+
+**The Problem:** Even with per-key relay connections, requests arriving from damus.io caused 31-second delays due to aggressive rate limiting on responses. Users had no visibility into why delays occurred.
+
+**Root Cause Analysis:**
+- Requests arrived from damus.io (client's chosen relay)
+- Responses sent back to damus.io (source relay)
+- damus.io rate limits after 2-3 kind:24133 messages
+- Exponential backoff (1s+2s+4s+8s+16s = 31s) before success
+
+**Solution - Smart Relay Response Routing:**
+- [x] Prefer relay.cloistr.xyz for responses (no rate limits for kind:24133)
+- [x] Respect user choice: if key has custom relays, use those
+- [x] Fall back to source relay if preferred relays fail
+- [x] Fixed `isRateLimited()` detection for `msg: rate-limited:` errors
+
+**Solution - Detailed Request Logging:**
+- [x] Log event latency (`latency_ms` - time since event.created_at)
+- [x] Log decryption timing (`decrypt_ms`)
+- [x] Log total request duration (`total_ms`)
+- [x] Log response encryption and publish timing
+- [x] Upgrade publish retry logging from Debug to Info level
+
+**Solution - Relay Warning UI:**
+- [x] `/web/api/relay/check` endpoint validates relay URLs
+- [x] Fetches NIP-11 relay info for name/description
+- [x] Returns warning flag for external relays
+- [x] Frontend shows real-time warning as user types relay URLs
+- [x] Concise warning: "External relays may rate limit NIP-46 signing traffic"
+
+**Solution - Settings Page:**
+- [x] `/settings` page for account management
+- [x] Link/unlink Nostr pubkey for NIP-07 extension login
+- [x] Support both NIP-07 extension and manual npub entry
+- [x] Username in nav links to settings
+
+**Pending - Discovery Service Integration:**
+- [ ] Query discovery service for relay metadata (rate limit status)
+- [ ] Use discovery data as first check before NIP-11 fallback
+- [ ] Richer warnings based on relay reliability data
+
+**Key Files:**
+- `internal/signer/signer.go` - Smart relay response routing
+- `internal/nostr/client.go` - Fixed rate limit detection
+- `internal/nostr/key_relay_manager.go` - Enhanced publish logging
+- `internal/web/web.go` - Settings page, relay check API
+- `internal/web/templates/keys.html` - Relay warning UI
+- `internal/web/templates/settings.html` - Account settings page
+
+### Completed (Phase 12.7 - Relay Preferences Integration - 2026-03-01)
+
+**Purpose:** Integrate `cloistr-common/relayprefs` library for discovering user relay preferences when delivering DMs (admin notifications).
+
+**What it does:**
+- Admin DM notifications (authorization requests, boot notifications) now query the admin's relay preferences
+- DMs are delivered to the admin's preferred relays (from their `cloistr-relays` or NIP-65 event)
+- Falls back to configured relays if preferences aren't found
+- Uses Cloistr discovery service by default (no configuration needed for hosted services)
+
+**Why:**
+- Admins may use custom relays that aren't in our default list
+- Better DM deliverability - notifications reach admins on their preferred relays
+- Consistent with Cloistr's philosophy: user data goes where users want it
+
+**Note:** NIP-46 protocol traffic (signing requests/responses) is NOT affected - that's operational protocol and uses relay.cloistr.xyz for rate-limit-free delivery. Only admin DM delivery uses relay preferences.
+
+**Implementation:**
+- [x] Add `cloistr-common` library to go.mod
+- [x] Create `relayprefs.Client` at startup
+- [x] Integrate relay prefs for admin DM delivery in `signer.go`
+- [x] Integrate relay prefs for admin DM delivery in `admin.go`
+- [x] Document new environment variables
+
+**Key Files:**
+- `cmd/signer/main.go` - Creates relayprefs client from env
+- `internal/signer/signer.go` - Uses relay prefs for admin notifications
+- `internal/admin/admin.go` - Uses relay prefs for admin DM responses
+
 ### Phase 13 - FROST Threshold Signing (Distributed Key Custody)
 
 **The Problem:** Signer chaining solves team delegation but introduces a single point of failure - the upstream business signer holds the complete private key. If compromised, the business identity is lost.
@@ -602,4 +686,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-02-23 (Phase 12: Proxy upstream reconnection - detect disconnect, fail pending requests, auto-reconnect)
+**Last Updated:** 2026-03-01 (Phase 12.7: Relay preferences integration via cloistr-common)
