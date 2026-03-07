@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -11,25 +12,51 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/audit"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/auth"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/bunker"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/frost"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/signer"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 // Handler manages HTTP API endpoints
 type Handler struct {
-	config     *config.Config
-	signer     *signer.Signer
-	storage    storage.Storage
-	authConfig *auth.Config
-	encryptor  *crypto.Encryptor
+	config           *config.Config
+	signer           *signer.Signer
+	storage          storage.Storage
+	authConfig       *auth.Config
+	encryptor        *crypto.Encryptor
+	frostCoordinator *frost.Coordinator
+	frostKeyGen      *frost.KeyGenerator
+}
+
+// frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
+type frostEncryptorAdapter struct {
+	enc *crypto.Encryptor
+}
+
+func (a *frostEncryptorAdapter) Encrypt(plaintext []byte) ([]byte, error) {
+	return a.enc.EncryptBytes(plaintext)
+}
+
+func (a *frostEncryptorAdapter) Decrypt(ciphertext []byte) ([]byte, error) {
+	return a.enc.DecryptBytes(ciphertext)
 }
 
 // NewHandler creates a new API handler
 func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage, encryptor *crypto.Encryptor) *Handler {
+	// Create FROST components if encryptor is available
+	var frostCoord *frost.Coordinator
+	var frostKG *frost.KeyGenerator
+	if encryptor != nil {
+		adapter := &frostEncryptorAdapter{enc: encryptor}
+		frostCoord = frost.NewCoordinator(store, adapter)
+		frostKG = frost.NewKeyGenerator(adapter)
+	}
+
 	return &Handler{
 		config:  cfg,
 		signer:  signer,
@@ -43,7 +70,9 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 			MaxFailedAttempts: cfg.Auth.MaxFailedLogins,
 			MFAIssuer:         cfg.Auth.MFAIssuer,
 		},
-		encryptor: encryptor,
+		encryptor:        encryptor,
+		frostCoordinator: frostCoord,
+		frostKeyGen:      frostKG,
 	}
 }
 
@@ -94,6 +123,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 	// Audit logs
 	mux.HandleFunc("/api/v1/audit", h.handleAuditLogs)
+
+	// FROST threshold signing
+	mux.HandleFunc("/api/v1/frost/keys", h.handleFrostKeys)
+	mux.HandleFunc("/api/v1/frost/keys/", h.handleFrostKeyByID)
+	mux.HandleFunc("/api/v1/frost/shares/", h.handleFrostShares)
 }
 
 // Health check response
@@ -2167,8 +2201,405 @@ func (h *Handler) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For now, return empty list - audit logs will be added when audit logger is integrated
-	h.jsonResponse(w, http.StatusOK, []AuditLogEntry{})
+	// Get audit logger from signer
+	logger := h.signer.AuditLogger()
+	if logger == nil {
+		h.jsonResponse(w, http.StatusOK, []AuditLogEntry{})
+		return
+	}
+
+	// Parse query parameters for filtering
+	query := r.URL.Query()
+	filter := &audit.Filter{
+		Limit: 100, // Default limit
+	}
+
+	if actor := query.Get("actor"); actor != "" {
+		filter.Actor = actor
+	}
+	if target := query.Get("target"); target != "" {
+		filter.Target = target
+	}
+	if eventType := query.Get("type"); eventType != "" {
+		filter.Types = []audit.EventType{audit.EventType(eventType)}
+	}
+
+	// Query audit logs
+	events, err := logger.Query(r.Context(), filter)
+	if err != nil {
+		slog.Error("failed to query audit logs", "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to query audit logs")
+		return
+	}
+
+	// Convert to response format
+	entries := make([]AuditLogEntry, 0, len(events))
+	for _, event := range events {
+		entries = append(entries, AuditLogEntry{
+			ID:        event.ID,
+			Timestamp: event.Timestamp.Format(time.RFC3339),
+			Type:      string(event.Type),
+			Actor:     event.Actor,
+			Target:    event.Target,
+			Action:    event.Action,
+			Success:   event.Success,
+			Details:   event.Details,
+		})
+	}
+
+	h.jsonResponse(w, http.StatusOK, entries)
+}
+
+// FROST threshold signing handlers
+
+type CreateFrostKeyRequest struct {
+	Name        string `json:"name"`
+	Threshold   int    `json:"threshold"`   // t in t-of-n
+	TotalShares int    `json:"total_shares"` // n in t-of-n
+}
+
+type FrostKeyResponse struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name,omitempty"`
+	Pubkey      string    `json:"pubkey"`
+	Threshold   int       `json:"threshold"`
+	TotalShares int       `json:"total_shares"`
+	CreatedAt   time.Time `json:"created_at"`
+	CreatedBy   string    `json:"created_by,omitempty"`
+}
+
+type FrostShareResponse struct {
+	ID              string    `json:"id"`
+	FrostKeyID      string    `json:"frost_key_id"`
+	ShareIndex      int       `json:"share_index"`
+	HolderPubkey    string    `json:"holder_pubkey,omitempty"`
+	HolderBunkerURI string    `json:"holder_bunker_uri,omitempty"`
+	IsLocal         bool      `json:"is_local"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type FrostKeyDetailResponse struct {
+	FrostKeyResponse
+	Shares   []FrostShareResponse `json:"shares"`
+	CanSign  bool                 `json:"can_sign"`
+	LocalShares int              `json:"local_shares"`
+}
+
+func (h *Handler) handleFrostKeys(w http.ResponseWriter, r *http.Request) {
+	if h.frostKeyGen == nil || h.frostCoordinator == nil {
+		h.errorResponse(w, http.StatusServiceUnavailable, "FROST not enabled (encryption key required)")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListFrostKeys(w, r)
+	case http.MethodPost:
+		h.handleCreateFrostKey(w, r)
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) handleListFrostKeys(w http.ResponseWriter, r *http.Request) {
+	keys, err := h.storage.ListFrostKeys(r.Context())
+	if err != nil {
+		slog.Error("failed to list FROST keys", "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to list FROST keys")
+		return
+	}
+
+	response := make([]FrostKeyResponse, len(keys))
+	for i, key := range keys {
+		response[i] = FrostKeyResponse{
+			ID:          key.ID,
+			Name:        key.Name,
+			Pubkey:      key.Pubkey,
+			Threshold:   key.Threshold,
+			TotalShares: key.TotalShares,
+			CreatedAt:   key.CreatedAt,
+			CreatedBy:   key.CreatedBy,
+		}
+	}
+	h.jsonResponse(w, http.StatusOK, response)
+}
+
+func (h *Handler) handleCreateFrostKey(w http.ResponseWriter, r *http.Request) {
+	var input CreateFrostKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if input.Threshold < 1 {
+		h.errorResponse(w, http.StatusBadRequest, "threshold must be at least 1")
+		return
+	}
+	if input.TotalShares < input.Threshold {
+		h.errorResponse(w, http.StatusBadRequest, "total_shares must be >= threshold")
+		return
+	}
+
+	// Generate FROST key and shares
+	config := &frost.KeyGenConfig{
+		Name:        input.Name,
+		Threshold:   input.Threshold,
+		TotalShares: input.TotalShares,
+	}
+
+	result, err := h.frostKeyGen.GenerateKey(config)
+	if err != nil {
+		slog.Error("failed to generate FROST key", "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to generate FROST key")
+		return
+	}
+
+	// Store the key
+	if err := h.storage.CreateFrostKey(r.Context(), result.FrostKey); err != nil {
+		slog.Error("failed to store FROST key", "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to store FROST key")
+		return
+	}
+
+	// Store all shares
+	for _, share := range result.Shares {
+		if err := h.storage.CreateFrostShare(r.Context(), share); err != nil {
+			slog.Error("failed to store FROST share", "error", err, "share_index", share.ShareIndex)
+			// Continue storing other shares
+		}
+	}
+
+	slog.Info("created FROST key",
+		"id", result.FrostKey.ID,
+		"name", result.FrostKey.Name,
+		"pubkey", result.FrostKey.Pubkey,
+		"threshold", result.FrostKey.Threshold,
+		"total_shares", result.FrostKey.TotalShares,
+	)
+
+	h.jsonResponse(w, http.StatusCreated, FrostKeyResponse{
+		ID:          result.FrostKey.ID,
+		Name:        result.FrostKey.Name,
+		Pubkey:      result.FrostKey.Pubkey,
+		Threshold:   result.FrostKey.Threshold,
+		TotalShares: result.FrostKey.TotalShares,
+		CreatedAt:   result.FrostKey.CreatedAt,
+		CreatedBy:   result.FrostKey.CreatedBy,
+	})
+}
+
+func (h *Handler) handleFrostKeyByID(w http.ResponseWriter, r *http.Request) {
+	if h.frostKeyGen == nil || h.frostCoordinator == nil {
+		h.errorResponse(w, http.StatusServiceUnavailable, "FROST not enabled (encryption key required)")
+		return
+	}
+
+	// Parse key ID from URL
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/frost/keys/")
+	parts := strings.Split(path, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		h.errorResponse(w, http.StatusBadRequest, "key ID required")
+		return
+	}
+	keyID := parts[0]
+
+	// Check for sub-resources (shares, export)
+	if len(parts) > 1 {
+		switch parts[1] {
+		case "shares":
+			h.handleFrostKeyShares(w, r, keyID)
+			return
+		case "export":
+			if len(parts) > 2 {
+				shareIndex := parts[2]
+				h.handleExportFrostShare(w, r, keyID, shareIndex)
+				return
+			}
+		case "sign":
+			h.handleFrostSign(w, r, keyID)
+			return
+		}
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetFrostKey(w, r, keyID)
+	case http.MethodDelete:
+		h.handleDeleteFrostKey(w, r, keyID)
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) handleGetFrostKey(w http.ResponseWriter, r *http.Request, id string) {
+	key, err := h.storage.GetFrostKey(r.Context(), id)
+	if err != nil {
+		if err == storage.ErrFrostKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "FROST key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get FROST key")
+		return
+	}
+
+	// Get shares
+	shares, err := h.storage.ListFrostShares(r.Context(), id)
+	if err != nil {
+		slog.Error("failed to list FROST shares", "error", err)
+		shares = []*storage.FrostShare{}
+	}
+
+	// Check if we can sign
+	canSign, _ := h.frostCoordinator.CanSign(r.Context(), id)
+	localShareCount, _ := h.frostCoordinator.GetAvailableShareCount(r.Context(), id)
+
+	shareResponses := make([]FrostShareResponse, len(shares))
+	for i, share := range shares {
+		shareResponses[i] = FrostShareResponse{
+			ID:              share.ID,
+			FrostKeyID:      share.FrostKeyID,
+			ShareIndex:      share.ShareIndex,
+			HolderPubkey:    share.HolderPubkey,
+			HolderBunkerURI: share.HolderBunkerURI,
+			IsLocal:         share.IsLocal,
+			CreatedAt:       share.CreatedAt,
+		}
+	}
+
+	h.jsonResponse(w, http.StatusOK, FrostKeyDetailResponse{
+		FrostKeyResponse: FrostKeyResponse{
+			ID:          key.ID,
+			Name:        key.Name,
+			Pubkey:      key.Pubkey,
+			Threshold:   key.Threshold,
+			TotalShares: key.TotalShares,
+			CreatedAt:   key.CreatedAt,
+			CreatedBy:   key.CreatedBy,
+		},
+		Shares:      shareResponses,
+		CanSign:     canSign,
+		LocalShares: localShareCount,
+	})
+}
+
+func (h *Handler) handleDeleteFrostKey(w http.ResponseWriter, r *http.Request, id string) {
+	err := h.storage.DeleteFrostKey(r.Context(), id)
+	if err != nil {
+		if err == storage.ErrFrostKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "FROST key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to delete FROST key")
+		return
+	}
+
+	slog.Info("deleted FROST key", "id", id)
+	h.jsonResponse(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *Handler) handleFrostKeyShares(w http.ResponseWriter, r *http.Request, keyID string) {
+	shares, err := h.storage.ListFrostShares(r.Context(), keyID)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to list shares")
+		return
+	}
+
+	response := make([]FrostShareResponse, len(shares))
+	for i, share := range shares {
+		response[i] = FrostShareResponse{
+			ID:              share.ID,
+			FrostKeyID:      share.FrostKeyID,
+			ShareIndex:      share.ShareIndex,
+			HolderPubkey:    share.HolderPubkey,
+			HolderBunkerURI: share.HolderBunkerURI,
+			IsLocal:         share.IsLocal,
+			CreatedAt:       share.CreatedAt,
+		}
+	}
+	h.jsonResponse(w, http.StatusOK, response)
+}
+
+func (h *Handler) handleExportFrostShare(w http.ResponseWriter, r *http.Request, keyID string, shareIndexStr string) {
+	// This would export a share bundle for distribution to another signer
+	// For now, just return not implemented
+	h.errorResponse(w, http.StatusNotImplemented, "share export not yet implemented")
+}
+
+type FrostSignRequest struct {
+	Message string `json:"message"` // Hex-encoded message to sign (32 bytes)
+}
+
+type FrostSignResponse struct {
+	Signature string `json:"signature"` // Hex-encoded signature
+	Pubkey    string `json:"pubkey"`    // The FROST key's public key
+}
+
+func (h *Handler) handleFrostSign(w http.ResponseWriter, r *http.Request, keyID string) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var input FrostSignRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Decode hex message
+	message, err := hex.DecodeString(input.Message)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid message: must be hex encoded")
+		return
+	}
+
+	if len(message) != 32 {
+		h.errorResponse(w, http.StatusBadRequest, "message must be 32 bytes (event hash)")
+		return
+	}
+
+	// Sign using FROST
+	signature, err := h.frostCoordinator.SignEvent(r.Context(), keyID, message)
+	if err != nil {
+		slog.Error("FROST signing failed", "error", err, "key_id", keyID)
+		if err == frost.ErrInsufficientShares {
+			h.errorResponse(w, http.StatusPreconditionFailed, "insufficient shares for signing")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "signing failed")
+		return
+	}
+
+	// Get the key to return the pubkey
+	key, err := h.storage.GetFrostKey(r.Context(), keyID)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	h.jsonResponse(w, http.StatusOK, FrostSignResponse{
+		Signature: signature,
+		Pubkey:    key.Pubkey,
+	})
+}
+
+func (h *Handler) handleFrostShares(w http.ResponseWriter, r *http.Request) {
+	// Handle share import
+	if r.Method == http.MethodPost {
+		h.handleImportFrostShare(w, r)
+		return
+	}
+	h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+}
+
+func (h *Handler) handleImportFrostShare(w http.ResponseWriter, r *http.Request) {
+	// This would import a share bundle from another signer
+	h.errorResponse(w, http.StatusNotImplemented, "share import not yet implemented")
+}
+
+// Helper function for hex decoding
+func hex_DecodeString(s string) ([]byte, error) {
+	return hex.DecodeString(s)
 }
 
 // Helper methods

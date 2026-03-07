@@ -68,6 +68,7 @@ type Permission struct {
 	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 	PolicyID        string     `json:"policy_id,omitempty"`        // Source policy for usage tracking
 	RequireApproval *bool      `json:"require_approval,omitempty"` // Override key's default (nil = use key default)
+	DelegatePubkey  string     `json:"delegate_pubkey,omitempty"`  // Original requester in proxy chain (for audit)
 	// App metadata - populated from nostrconnect:// URI or connect request
 	AppName    string     `json:"app_name,omitempty"`
 	AppURL     string     `json:"app_url,omitempty"`
@@ -181,6 +182,34 @@ type BunkerSecret struct {
 	UsedAt    *time.Time `json:"used_at,omitempty"` // When the secret was used (one-time use)
 }
 
+// FrostKey represents a FROST threshold signing key
+// The group public key is what gets used as the Nostr identity (npub)
+type FrostKey struct {
+	ID                 string    `json:"id"`
+	Name               string    `json:"name,omitempty"`
+	Pubkey             string    `json:"pubkey"`               // Group public key (hex) - the Nostr identity
+	Threshold          int       `json:"threshold"`            // t in t-of-n
+	TotalShares        int       `json:"total_shares"`         // n in t-of-n
+	GroupPublicKey     []byte    `json:"-"`                    // Encoded group public key (for FROST operations)
+	VerificationShares []byte    `json:"-"`                    // Encoded verification shares (for verifying partial sigs)
+	CreatedAt          time.Time `json:"created_at"`
+	CreatedBy          string    `json:"created_by,omitempty"`
+}
+
+// FrostShare represents a single share of a FROST key
+// Shares can be local (stored encrypted) or remote (held by another signer)
+type FrostShare struct {
+	ID              string    `json:"id"`
+	FrostKeyID      string    `json:"frost_key_id"`
+	ShareIndex      int       `json:"share_index"`              // 1 to n
+	EncryptedShare  []byte    `json:"-"`                        // Local share (encrypted with AES-256-GCM)
+	HolderPubkey    string    `json:"holder_pubkey,omitempty"`  // Remote holder's Nostr pubkey
+	HolderBunkerURI string    `json:"holder_bunker_uri,omitempty"` // Remote holder's bunker:// URI
+	IsLocal         bool      `json:"is_local"`
+	PublicShare     []byte    `json:"-"`                        // Public key share for this participant
+	CreatedAt       time.Time `json:"created_at"`
+}
+
 // Storage interface for key and session management
 type Storage interface {
 	// Key management
@@ -261,6 +290,21 @@ type Storage interface {
 	GetSetting(ctx context.Context, key string) (string, error)
 	SetSetting(ctx context.Context, key, value string) error
 
+	// FROST key management
+	CreateFrostKey(ctx context.Context, key *FrostKey) error
+	GetFrostKey(ctx context.Context, id string) (*FrostKey, error)
+	GetFrostKeyByPubkey(ctx context.Context, pubkey string) (*FrostKey, error)
+	ListFrostKeys(ctx context.Context) ([]*FrostKey, error)
+	DeleteFrostKey(ctx context.Context, id string) error
+
+	// FROST share management
+	CreateFrostShare(ctx context.Context, share *FrostShare) error
+	GetFrostShare(ctx context.Context, id string) (*FrostShare, error)
+	GetFrostShareByKeyAndIndex(ctx context.Context, keyID string, index int) (*FrostShare, error)
+	ListFrostShares(ctx context.Context, keyID string) ([]*FrostShare, error)
+	ListLocalFrostShares(ctx context.Context, keyID string) ([]*FrostShare, error)
+	DeleteFrostShare(ctx context.Context, id string) error
+
 	// Lifecycle
 	Close() error
 }
@@ -304,6 +348,11 @@ type MemoryStorage struct {
 	userSessionsByUser map[string]map[string]*UserSession // userID -> sessionID -> UserSession
 	bunkerSecrets      map[string]*BunkerSecret           // secret value -> BunkerSecret
 	settings           map[string]string                  // key -> value
+	// FROST threshold signing
+	frostKeys          map[string]*FrostKey             // id -> FrostKey
+	frostKeysByPubkey  map[string]*FrostKey             // pubkey -> FrostKey
+	frostShares        map[string]*FrostShare           // id -> FrostShare
+	frostSharesByKey   map[string]map[int]*FrostShare   // keyID -> index -> FrostShare
 }
 
 // NewMemoryStorage creates a new in-memory storage
@@ -326,6 +375,10 @@ func NewMemoryStorage() *MemoryStorage {
 		userSessionsByUser: make(map[string]map[string]*UserSession),
 		bunkerSecrets:      make(map[string]*BunkerSecret),
 		settings:           make(map[string]string),
+		frostKeys:          make(map[string]*FrostKey),
+		frostKeysByPubkey:  make(map[string]*FrostKey),
+		frostShares:        make(map[string]*FrostShare),
+		frostSharesByKey:   make(map[string]map[int]*FrostShare),
 	}
 }
 
@@ -1201,6 +1254,177 @@ func (m *MemoryStorage) SetSetting(ctx context.Context, key, value string) error
 	defer m.mu.Unlock()
 
 	m.settings[key] = value
+	return nil
+}
+
+// FROST key management
+
+var ErrFrostKeyNotFound = errors.New("frost key not found")
+var ErrFrostShareNotFound = errors.New("frost share not found")
+
+func (m *MemoryStorage) CreateFrostKey(ctx context.Context, key *FrostKey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.frostKeys[key.ID]; exists {
+		return errors.New("frost key already exists")
+	}
+	if _, exists := m.frostKeysByPubkey[key.Pubkey]; exists {
+		return errors.New("frost key with this pubkey already exists")
+	}
+
+	m.frostKeys[key.ID] = key
+	m.frostKeysByPubkey[key.Pubkey] = key
+	return nil
+}
+
+func (m *MemoryStorage) GetFrostKey(ctx context.Context, id string) (*FrostKey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	key, exists := m.frostKeys[id]
+	if !exists {
+		return nil, ErrFrostKeyNotFound
+	}
+	return key, nil
+}
+
+func (m *MemoryStorage) GetFrostKeyByPubkey(ctx context.Context, pubkey string) (*FrostKey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	key, exists := m.frostKeysByPubkey[pubkey]
+	if !exists {
+		return nil, ErrFrostKeyNotFound
+	}
+	return key, nil
+}
+
+func (m *MemoryStorage) ListFrostKeys(ctx context.Context) ([]*FrostKey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	keys := make([]*FrostKey, 0, len(m.frostKeys))
+	for _, key := range m.frostKeys {
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+func (m *MemoryStorage) DeleteFrostKey(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key, exists := m.frostKeys[id]
+	if !exists {
+		return ErrFrostKeyNotFound
+	}
+
+	delete(m.frostKeys, id)
+	delete(m.frostKeysByPubkey, key.Pubkey)
+	delete(m.frostSharesByKey, id)
+	return nil
+}
+
+// FROST share management
+
+func (m *MemoryStorage) CreateFrostShare(ctx context.Context, share *FrostShare) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.frostShares[share.ID]; exists {
+		return errors.New("frost share already exists")
+	}
+
+	// Check if a share with this index already exists for this key
+	if shares, exists := m.frostSharesByKey[share.FrostKeyID]; exists {
+		if _, exists := shares[share.ShareIndex]; exists {
+			return errors.New("frost share with this index already exists for this key")
+		}
+	}
+
+	m.frostShares[share.ID] = share
+	if m.frostSharesByKey[share.FrostKeyID] == nil {
+		m.frostSharesByKey[share.FrostKeyID] = make(map[int]*FrostShare)
+	}
+	m.frostSharesByKey[share.FrostKeyID][share.ShareIndex] = share
+	return nil
+}
+
+func (m *MemoryStorage) GetFrostShare(ctx context.Context, id string) (*FrostShare, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	share, exists := m.frostShares[id]
+	if !exists {
+		return nil, ErrFrostShareNotFound
+	}
+	return share, nil
+}
+
+func (m *MemoryStorage) GetFrostShareByKeyAndIndex(ctx context.Context, keyID string, index int) (*FrostShare, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	shares, exists := m.frostSharesByKey[keyID]
+	if !exists {
+		return nil, ErrFrostShareNotFound
+	}
+
+	share, exists := shares[index]
+	if !exists {
+		return nil, ErrFrostShareNotFound
+	}
+	return share, nil
+}
+
+func (m *MemoryStorage) ListFrostShares(ctx context.Context, keyID string) ([]*FrostShare, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	shares, exists := m.frostSharesByKey[keyID]
+	if !exists {
+		return []*FrostShare{}, nil
+	}
+
+	result := make([]*FrostShare, 0, len(shares))
+	for _, share := range shares {
+		result = append(result, share)
+	}
+	return result, nil
+}
+
+func (m *MemoryStorage) ListLocalFrostShares(ctx context.Context, keyID string) ([]*FrostShare, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	shares, exists := m.frostSharesByKey[keyID]
+	if !exists {
+		return []*FrostShare{}, nil
+	}
+
+	result := make([]*FrostShare, 0)
+	for _, share := range shares {
+		if share.IsLocal {
+			result = append(result, share)
+		}
+	}
+	return result, nil
+}
+
+func (m *MemoryStorage) DeleteFrostShare(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	share, exists := m.frostShares[id]
+	if !exists {
+		return ErrFrostShareNotFound
+	}
+
+	delete(m.frostShares, id)
+	if shares, exists := m.frostSharesByKey[share.FrostKeyID]; exists {
+		delete(shares, share.ShareIndex)
+	}
 	return nil
 }
 

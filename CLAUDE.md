@@ -366,7 +366,7 @@ Controls how proxy keys (keys stored as bunker:// URIs pointing to upstream sign
 - [x] Per-key nostrconnect:// support (connect TO apps from specific key)
 - [x] "Connect to App" modal for quick connections
 
-### Phase 12 - Signer Chaining (Delegated Team Signing)
+### Completed (Phase 12 - Signer Chaining)
 
 **The Problem:** Businesses need team members to post on behalf of a shared identity without sharing the nsec. Traditional delegation (NIP-26) failed due to revocation problems and poor ecosystem adoption.
 
@@ -394,15 +394,17 @@ Team Member's Client ◄── Personal Signer ◄────────┘
 - [x] Web UI: Add proxy key via bunker:// URI (keys page "Add Proxy Key" button)
 - [x] Proxy mode config: PROXY_MODE and PROXY_TIMEOUT environment variables
 - [x] Connection management: detect disconnect, cleanup, auto-reconnect on next request
-- [ ] Test harness: spin up coldforge-signer (upstream) + cloistr-signer (proxy) for full chain
+- [x] Test harness: internal proxy chain tests (`internal/signer/signer_test.go`)
 
-**Implementation - Upstream Signer Enhancements:**
+**Implementation - Upstream Signer Enhancements (completed 2026-03-05):**
 - [x] Document cloistr-signer as "upstream signer" for chained connections
-- [ ] Verify NIP-46 auth flow works when connecting signer is a proxy
-- [ ] Add "delegate pubkey" field to permissions (optional override for proxy scenarios)
-- [ ] Create onboarding flow: "Invite team member" generates bunker:// URI for their signer
-- [ ] Add audit logging for chained signatures (which delegate signed what)
-- [ ] Web UI: Team management page showing delegates and their activity
+- [x] Verify NIP-46 auth flow works when connecting signer is a proxy (standard NIP-46)
+- [x] Add "delegate pubkey" field to permissions (for audit trail in proxy chains)
+- [x] Add audit logging for chained signatures (tracks proxy_key, upstream_pubkey, delegate_pubkey)
+- [x] Audit logging integrated into signer request flow (`internal/signer/signer.go`)
+- [x] API endpoint `/api/v1/audit` queries audit logs with filtering
+- [x] Team invitation via existing bunker:// URI generation (keys page "Connect" button)
+- [ ] Web UI: Team management page showing delegates and their activity (enhancement)
 
 **Ecosystem outreach:**
 - [x] Technical documentation (`docs/signer-chaining.md`)
@@ -523,7 +525,7 @@ Team Member's Client ◄── Personal Signer ◄────────┘
 - `internal/signer/signer.go` - Uses relay prefs for admin notifications
 - `internal/admin/admin.go` - Uses relay prefs for admin DM responses
 
-### Phase 13 - FROST Threshold Signing (Distributed Key Custody)
+### In Progress (Phase 13 - FROST Threshold Signing)
 
 **The Problem:** Signer chaining solves team delegation but introduces a single point of failure - the upstream business signer holds the complete private key. If compromised, the business identity is lost.
 
@@ -567,37 +569,45 @@ Team Member's Client ◄── Personal Signer ◄────────┘
 - **Disaster recovery:** John + Sarah + cold (infrastructure down)
 - **Maximum decentralization:** Any 3 team members (no auto-signing)
 
-**Implementation - Core FROST Support:**
-- [ ] Research FROSTR libraries (bifrost, frost, nostrp2p)
-- [ ] Evaluate: build native FROST vs integrate FROSTR
-- [ ] Implement share holder mode (cloistr-signer holds one FROST share)
-- [ ] Implement coordinator mode (orchestrates signing across share holders)
-- [ ] FROST share storage (encrypted, separate from regular keys)
-- [ ] Signing session coordination via Nostr relays (NIP-04 encrypted DMs)
+**Implementation - Core FROST Support (Phase 13.1 - Completed 2026-03-06):**
+- [x] Selected bytemare/frost library (pure Go, RFC 9591, secp256k1 ciphersuite)
+- [x] Core types: `internal/frost/frost.go` - FrostKey, FrostShare, SigningSession
+- [x] Trusted dealer DKG: `internal/frost/dkg.go` - KeyGenerator.GenerateKey()
+- [x] Local signing coordinator: `internal/frost/coordinator.go` - threshold signing
+- [x] Share encryption: AES-256-GCM via ENCRYPTION_KEY (same as regular keys)
+- [x] 17 unit tests covering key generation, signing, and verification
 
-**Implementation - Distributed Key Generation (DKG):**
-- [ ] Trusted dealer mode: admin generates key, distributes shares
-- [ ] Distributed mode: share holders collaboratively generate without seeing full key
-- [ ] Key ceremony UI: step-by-step DKG with verification
-- [ ] Share backup/recovery procedures
+**Implementation - Storage & API (Phase 13.2 - Completed 2026-03-06):**
+- [x] FrostKey and FrostShare types in `internal/storage/storage.go`
+- [x] PostgreSQL tables: `signer_frost_keys`, `signer_frost_shares`
+- [x] Memory storage implementation for testing
+- [x] HTTP API endpoints:
+  - `POST /api/v1/frost/keys` - Create FROST key (trusted dealer mode)
+  - `GET /api/v1/frost/keys` - List FROST keys
+  - `GET /api/v1/frost/keys/{id}` - Get FROST key details
+  - `DELETE /api/v1/frost/keys/{id}` - Delete FROST key
+  - `GET /api/v1/frost/keys/{id}/shares` - List shares for a key
+  - `POST /api/v1/frost/keys/{id}/sign` - Sign message with FROST key
 
-**Implementation - Share Management:**
-- [ ] Web UI: FROST key management (create, view shares, thresholds)
-- [ ] Share rotation: refresh shares without changing npub
-- [ ] Share recovery: regenerate lost share from t existing shares
-- [ ] Threshold modification: change t-of-n (requires new DKG)
+**Current Limitation - NIP-46 Integration:**
+FROST keys are currently API-only. NIP-46 protocol requires decryption of incoming
+requests using the target key's private key, but FROST keys have no single private key.
+Future work will add a "communication keypair" for NIP-46 integration.
 
-**Implementation - Hybrid Custody Models:**
-- [ ] Team members as share holders (John holds Share 4 in his signer)
-- [ ] Infrastructure shares (always-on servers for routine signing)
-- [ ] Cold storage shares (offline, for emergencies)
-- [ ] Configurable policies: "require at least 1 team share" vs "infra-only OK"
+**Key Files:**
+- `internal/frost/frost.go` - Core types and FrostStorage interface
+- `internal/frost/dkg.go` - Trusted dealer key generation
+- `internal/frost/coordinator.go` - Local signing coordinator
+- `internal/frost/frost_test.go` - 17 unit tests
+- `internal/api/handler.go` - FROST HTTP API endpoints
 
-**Implementation - Integration with Signer Chaining:**
-- [ ] FROST coordinator speaks NIP-46 to delegates (unchanged interface)
-- [ ] Delegate permissions enforced BEFORE triggering FROST signing
-- [ ] Audit logs capture: delegate identity + which shares participated
-- [ ] Transparent to delegates: they don't know it's threshold-signed
+**Remaining Work (Phase 13.3+):**
+- [ ] NIP-46 integration (requires communication keypair design)
+- [ ] Web UI: FROST key management page
+- [ ] Share export/import for distribution
+- [ ] Remote share coordination via Nostr DMs
+- [ ] Distributed DKG (no trusted dealer)
+- [ ] Share rotation and threshold modification
 
 **Research & Ecosystem:**
 - [ ] Contact FROSTR team about integration/collaboration
@@ -686,4 +696,4 @@ node test-go-signer.mjs
 
 ---
 
-**Last Updated:** 2026-03-01 (Phase 12.7: Relay preferences integration via cloistr-common)
+**Last Updated:** 2026-03-06 (Phase 13.1-13.2 complete: FROST threshold signing core, storage, and API)

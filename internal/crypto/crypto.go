@@ -89,6 +89,36 @@ func (e *Encryptor) Decrypt(ciphertext string) (string, error) {
 	return string(plaintext), nil
 }
 
+// EncryptBytes encrypts plaintext bytes using AES-256-GCM.
+// Returns raw ciphertext with nonce prepended (suitable for binary storage).
+func (e *Encryptor) EncryptBytes(plaintext []byte) ([]byte, error) {
+	// Generate random nonce
+	nonce := make([]byte, e.gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
+	// Encrypt and append nonce to ciphertext
+	ciphertext := e.gcm.Seal(nonce, nonce, plaintext, nil)
+	return ciphertext, nil
+}
+
+// DecryptBytes decrypts ciphertext that was encrypted with EncryptBytes.
+func (e *Encryptor) DecryptBytes(ciphertext []byte) ([]byte, error) {
+	nonceSize := e.gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, fmt.Errorf("%w: data too short", ErrInvalidCiphertext)
+	}
+
+	nonce, ciphertextBytes := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := e.gcm.Open(nil, nonce, ciphertextBytes, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDecryptionFailed, err)
+	}
+
+	return plaintext, nil
+}
+
 // IsEncrypted checks if a value has the encryption prefix
 func IsEncrypted(value string) bool {
 	return strings.HasPrefix(value, "enc:")

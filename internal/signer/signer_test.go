@@ -135,7 +135,7 @@ func TestNew(t *testing.T) {
 	cfg := &config.Config{}
 	store := storage.NewMemoryStorage()
 
-	signer := New(cfg, store, nil, nil, nil, nil)
+	signer := New(cfg, store, nil, nil, nil, nil, nil)
 
 	if signer == nil {
 		t.Fatal("New() returned nil")
@@ -155,7 +155,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestSigner_RegisterKey(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
 
 	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	privateKey := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
@@ -168,7 +168,7 @@ func TestSigner_RegisterKey(t *testing.T) {
 }
 
 func TestSigner_isMethodAllowed(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
 
 	tests := []struct {
 		name    string
@@ -219,7 +219,7 @@ func TestSigner_isMethodAllowed(t *testing.T) {
 }
 
 func TestSigner_KeysLoaded(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
 
 	// Register some keys
 	signer.RegisterKey("pubkey1", "privkey1")
@@ -238,7 +238,7 @@ func TestSigner_KeysLoaded(t *testing.T) {
 }
 
 func TestSigner_storePendingContext(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
 
 	ctx := &pendingRequestContext{
 		targetPubkey: "target123",
@@ -261,7 +261,7 @@ func TestSigner_storePendingContext(t *testing.T) {
 }
 
 func TestSigner_removePendingContext(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
 
 	ctx := &pendingRequestContext{
 		targetPubkey: "target123",
@@ -282,7 +282,7 @@ func TestSigner_removePendingContext(t *testing.T) {
 
 func TestSigner_checkPolicyUsage(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	signer := New(&config.Config{}, store, nil, nil, nil, nil)
+	signer := New(&config.Config{}, store, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	// Create a policy with usage limits
@@ -347,7 +347,7 @@ func TestSigner_checkPolicyUsage(t *testing.T) {
 
 func TestSigner_handleConnect(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	signer := New(&config.Config{}, store, nil, nil, nil, nil)
+	signer := New(&config.Config{}, store, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	perm := &storage.Permission{
@@ -378,7 +378,7 @@ func TestSigner_handleConnect(t *testing.T) {
 
 func TestSigner_handleSignEvent_AllowedKinds(t *testing.T) {
 	store := storage.NewMemoryStorage()
-	signer := New(&config.Config{}, store, nil, nil, nil, nil)
+	signer := New(&config.Config{}, store, nil, nil, nil, nil, nil)
 	ctx := context.Background()
 
 	// Register a key (using a test key)
@@ -443,7 +443,7 @@ func TestSigner_handleSignEvent_AllowedKinds(t *testing.T) {
 }
 
 func TestSigner_ApproveRequest(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
 
 	// Create pending context with result channel
 	resultChan := make(chan authResult, 1)
@@ -474,7 +474,7 @@ func TestSigner_ApproveRequest(t *testing.T) {
 }
 
 func TestSigner_DenyRequest(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
 
 	// Create pending context with result channel
 	resultChan := make(chan authResult, 1)
@@ -505,7 +505,7 @@ func TestSigner_DenyRequest(t *testing.T) {
 }
 
 func TestSigner_ApproveRequest_NotFound(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
 
 	// Try to approve nonexistent request (should not panic)
 	pendingReq := &storage.PendingRequest{ID: "nonexistent", Method: "sign_event"}
@@ -514,7 +514,7 @@ func TestSigner_ApproveRequest_NotFound(t *testing.T) {
 }
 
 func TestSigner_DenyRequest_NotFound(t *testing.T) {
-	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil)
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
 
 	// Try to deny nonexistent request (should not panic)
 	pendingReq := &storage.PendingRequest{ID: "nonexistent", Method: "sign_event"}
@@ -528,5 +528,309 @@ func TestKindConstants(t *testing.T) {
 	}
 	if KindNIP46Response != 24133 {
 		t.Errorf("KindNIP46Response = %d, want 24133", KindNIP46Response)
+	}
+}
+
+// ============================================================================
+// Proxy Chain Tests (Phase 12)
+// ============================================================================
+
+func TestSigner_RegisterProxyKey(t *testing.T) {
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
+
+	proxyPubkey := "proxy0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+	proxyPrivkey := "proxypriv123456789abcdef0123456789abcdef0123456789abcdef0123"
+	bunkerURI := "bunker://upstream123456789abcdef0123456789abcdef0123456789ab?relay=wss://relay.test"
+
+	signer.RegisterProxyKey(proxyPubkey, proxyPrivkey, bunkerURI)
+
+	// Check proxy key is registered
+	if uri, ok := signer.proxyKeys[proxyPubkey]; !ok {
+		t.Error("proxy key not registered in proxyKeys map")
+	} else if uri != bunkerURI {
+		t.Errorf("expected bunker URI %q, got %q", bunkerURI, uri)
+	}
+
+	// Check private key is stored (for NIP-46 communication with upstream)
+	if key, ok := signer.keys[proxyPubkey]; !ok {
+		t.Error("proxy private key not stored in keys map")
+	} else if key != proxyPrivkey {
+		t.Errorf("expected private key %q, got %q", proxyPrivkey, key)
+	}
+}
+
+func TestSigner_UnregisterKey_Proxy(t *testing.T) {
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
+
+	proxyPubkey := "proxy0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+	proxyPrivkey := "proxypriv123456789abcdef0123456789abcdef0123456789abcdef0123"
+	bunkerURI := "bunker://upstream123456789abcdef0123456789abcdef0123456789ab?relay=wss://relay.test"
+
+	signer.RegisterProxyKey(proxyPubkey, proxyPrivkey, bunkerURI)
+	signer.UnregisterKey(proxyPubkey)
+
+	// Check proxy key is removed
+	if _, ok := signer.proxyKeys[proxyPubkey]; ok {
+		t.Error("proxy key should be removed from proxyKeys map")
+	}
+
+	if _, ok := signer.keys[proxyPubkey]; ok {
+		t.Error("proxy private key should be removed from keys map")
+	}
+}
+
+func TestSigner_InternalProxy_SignEvent(t *testing.T) {
+	store := storage.NewMemoryStorage()
+	signer := New(&config.Config{}, store, nil, nil, nil, nil, nil)
+
+	// Register upstream key (the actual signing key) - must be 64 hex chars
+	upstreamPubkey := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	upstreamPrivkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	signer.RegisterKey(upstreamPubkey, upstreamPrivkey)
+
+	// Register proxy key that points to the upstream key - must be 64 hex chars
+	proxyPubkey := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	proxyPrivkey := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	bunkerURI := "bunker://" + upstreamPubkey + "?relay=wss://relay.test"
+	signer.RegisterProxyKey(proxyPubkey, proxyPrivkey, bunkerURI)
+
+	// Create the proxy key in storage so we can set permissions
+	proxyKey := &storage.Key{
+		ID:      proxyPubkey,
+		Pubkey:  proxyPubkey,
+		Name:    "proxy-key",
+		KeyType: storage.KeyTypeProxy,
+	}
+	if err := store.CreateKey(context.Background(), proxyKey); err != nil {
+		t.Fatalf("failed to create proxy key in storage: %v", err)
+	}
+
+	// Create permission for the proxy key - must be 64 hex chars
+	clientPubkey := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	perm := &storage.Permission{
+		KeyID:      proxyPubkey,
+		UserPubkey: clientPubkey,
+		Methods:    []string{"sign_event"},
+	}
+	if err := store.SetPermission(context.Background(), perm); err != nil {
+		t.Fatalf("failed to set permission: %v", err)
+	}
+
+	// Create a test event to sign
+	event := map[string]interface{}{
+		"kind":       1,
+		"content":    "test content",
+		"created_at": time.Now().Unix(),
+		"tags":       [][]string{},
+	}
+	eventJSON, _ := json.Marshal(event)
+
+	req := &NIP46Request{
+		ID:     "test-123",
+		Method: "sign_event",
+		Params: []string{string(eventJSON)},
+	}
+
+	// Handle the request through the proxy
+	result, err := signer.handleRequest(context.Background(), proxyPubkey, proxyPrivkey, clientPubkey, req, perm)
+	if err != nil {
+		t.Fatalf("handleRequest failed: %v", err)
+	}
+
+	// Verify we got a signed event back
+	if result == "" {
+		t.Error("expected non-empty result")
+	}
+
+	// Parse the result to verify it's a valid signed event
+	var signedEvent map[string]interface{}
+	if err := json.Unmarshal([]byte(result), &signedEvent); err != nil {
+		t.Errorf("failed to parse signed event: %v", err)
+	}
+
+	// The signed event should have a pubkey (derived from the upstream private key)
+	pubkey, ok := signedEvent["pubkey"].(string)
+	if !ok || pubkey == "" {
+		t.Error("signed event missing pubkey")
+	}
+
+	// The pubkey should NOT be the proxy pubkey (it should be derived from upstream privkey)
+	if pubkey == proxyPubkey {
+		t.Error("signed event should not have proxy pubkey")
+	}
+
+	// Should have a signature
+	if sig, ok := signedEvent["sig"].(string); !ok || sig == "" {
+		t.Error("signed event missing or empty signature")
+	}
+
+	// Should have an ID
+	if id, ok := signedEvent["id"].(string); !ok || id == "" {
+		t.Error("signed event missing or empty id")
+	}
+
+	// Verify the signing went through internal proxy path (check logs showed this)
+	t.Logf("Successfully signed event via internal proxy, pubkey: %s", pubkey)
+}
+
+func TestSigner_InternalProxy_GetPublicKey(t *testing.T) {
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
+
+	// Register upstream key - must be 64 hex chars
+	upstreamPubkey := "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	upstreamPrivkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	signer.RegisterKey(upstreamPubkey, upstreamPrivkey)
+
+	// Register proxy key - must be 64 hex chars
+	proxyPubkey := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	proxyPrivkey := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	bunkerURI := "bunker://" + upstreamPubkey + "?relay=wss://relay.test"
+	signer.RegisterProxyKey(proxyPubkey, proxyPrivkey, bunkerURI)
+
+	clientPubkey := "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	perm := &storage.Permission{
+		KeyID:      proxyPubkey,
+		UserPubkey: clientPubkey,
+		Methods:    []string{"get_public_key"},
+	}
+
+	req := &NIP46Request{
+		ID:     "test-pubkey",
+		Method: "get_public_key",
+		Params: []string{},
+	}
+
+	// get_public_key on a proxy should return the UPSTREAM pubkey
+	result, err := signer.handleRequest(context.Background(), proxyPubkey, proxyPrivkey, clientPubkey, req, perm)
+	if err != nil {
+		t.Fatalf("handleRequest failed: %v", err)
+	}
+
+	if result != upstreamPubkey {
+		t.Errorf("expected upstream pubkey %q, got %q", upstreamPubkey, result)
+	}
+}
+
+func TestSigner_ShouldProxyMethod(t *testing.T) {
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
+
+	tests := []struct {
+		method string
+		want   bool
+	}{
+		{"sign_event", true},
+		{"nip04_encrypt", true},
+		{"nip04_decrypt", true},
+		{"nip44_encrypt", true},
+		{"nip44_decrypt", true},
+		{"connect", false},
+		{"ping", false},
+		{"get_public_key", false}, // Handled specially, not proxied
+		{"get_relays", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			got := signer.shouldProxyMethod(tt.method)
+			if got != tt.want {
+				t.Errorf("shouldProxyMethod(%q) = %v, want %v", tt.method, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSigner_ShouldAuditMethod(t *testing.T) {
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
+
+	tests := []struct {
+		method string
+		want   bool
+	}{
+		{"sign_event", true},
+		{"nip04_encrypt", true},
+		{"nip04_decrypt", true},
+		{"nip44_encrypt", true},
+		{"nip44_decrypt", true},
+		{"connect", false},
+		{"ping", false},
+		{"get_public_key", false},
+		{"get_relays", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			got := signer.shouldAuditMethod(tt.method)
+			if got != tt.want {
+				t.Errorf("shouldAuditMethod(%q) = %v, want %v", tt.method, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSigner_ExtractEventKind(t *testing.T) {
+	signer := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, nil)
+
+	tests := []struct {
+		name   string
+		req    *NIP46Request
+		want   int
+	}{
+		{
+			name: "kind 1 note",
+			req: &NIP46Request{
+				Method: "sign_event",
+				Params: []string{`{"kind":1,"content":"hello"}`},
+			},
+			want: 1,
+		},
+		{
+			name: "kind 0 metadata",
+			req: &NIP46Request{
+				Method: "sign_event",
+				Params: []string{`{"kind":0,"content":"{\"name\":\"test\"}"}`},
+			},
+			want: 0,
+		},
+		{
+			name: "kind 30023 long-form",
+			req: &NIP46Request{
+				Method: "sign_event",
+				Params: []string{`{"kind":30023,"content":"article"}`},
+			},
+			want: 30023,
+		},
+		{
+			name: "not sign_event",
+			req: &NIP46Request{
+				Method: "ping",
+				Params: []string{},
+			},
+			want: 0,
+		},
+		{
+			name: "invalid JSON",
+			req: &NIP46Request{
+				Method: "sign_event",
+				Params: []string{`not json`},
+			},
+			want: 0,
+		},
+		{
+			name: "empty params",
+			req: &NIP46Request{
+				Method: "sign_event",
+				Params: []string{},
+			},
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := signer.extractEventKind(tt.req)
+			if got != tt.want {
+				t.Errorf("extractEventKind() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }

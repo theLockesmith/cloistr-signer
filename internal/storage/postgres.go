@@ -97,6 +97,9 @@ func (ps *PostgresStorage) migrate() error {
 	-- Add custom_name column for user-defined session labels
 	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS custom_name TEXT;
 
+	-- Add delegate_pubkey column for tracking original requester in proxy chains (Phase 12)
+	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS delegate_pubkey TEXT;
+
 	CREATE INDEX IF NOT EXISTS idx_signer_permissions_key_id ON signer_permissions(key_id);
 
 	CREATE TABLE IF NOT EXISTS signer_sessions (
@@ -220,6 +223,36 @@ func (ps *PostgresStorage) migrate() error {
 		value TEXT NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
+
+	-- FROST threshold signing tables
+	CREATE TABLE IF NOT EXISTS signer_frost_keys (
+		id TEXT PRIMARY KEY,
+		name TEXT,
+		pubkey TEXT UNIQUE NOT NULL,
+		threshold INTEGER NOT NULL,
+		total_shares INTEGER NOT NULL,
+		group_public_key BYTEA NOT NULL,
+		verification_shares BYTEA NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		created_by TEXT
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_signer_frost_keys_pubkey ON signer_frost_keys(pubkey);
+
+	CREATE TABLE IF NOT EXISTS signer_frost_shares (
+		id TEXT PRIMARY KEY,
+		frost_key_id TEXT NOT NULL REFERENCES signer_frost_keys(id) ON DELETE CASCADE,
+		share_index INTEGER NOT NULL,
+		encrypted_share BYTEA,
+		holder_pubkey TEXT,
+		holder_bunker_uri TEXT,
+		is_local BOOLEAN NOT NULL DEFAULT TRUE,
+		public_share BYTEA,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE(frost_key_id, share_index)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_signer_frost_shares_key ON signer_frost_shares(frost_key_id);
 	`
 
 	_, err := ps.db.Exec(schema)
@@ -1428,6 +1461,247 @@ func (ps *PostgresStorage) SetSetting(ctx context.Context, key, value string) er
 		ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
 		key, value)
 	return err
+}
+
+// FROST key management
+
+func (ps *PostgresStorage) CreateFrostKey(ctx context.Context, key *FrostKey) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO signer_frost_keys (id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		key.ID, nullString(key.Name), key.Pubkey, key.Threshold, key.TotalShares,
+		key.GroupPublicKey, key.VerificationShares, key.CreatedAt, nullString(key.CreatedBy))
+	if err != nil {
+		if isDuplicateError(err) {
+			return ErrKeyExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) GetFrostKey(ctx context.Context, id string) (*FrostKey, error) {
+	key := &FrostKey{}
+	var name, createdBy sql.NullString
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by
+		FROM signer_frost_keys WHERE id = $1`, id).
+		Scan(&key.ID, &name, &key.Pubkey, &key.Threshold, &key.TotalShares,
+			&key.GroupPublicKey, &key.VerificationShares, &key.CreatedAt, &createdBy)
+	if err == sql.ErrNoRows {
+		return nil, ErrFrostKeyNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if name.Valid {
+		key.Name = name.String
+	}
+	if createdBy.Valid {
+		key.CreatedBy = createdBy.String
+	}
+	return key, nil
+}
+
+func (ps *PostgresStorage) GetFrostKeyByPubkey(ctx context.Context, pubkey string) (*FrostKey, error) {
+	key := &FrostKey{}
+	var name, createdBy sql.NullString
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by
+		FROM signer_frost_keys WHERE pubkey = $1`, pubkey).
+		Scan(&key.ID, &name, &key.Pubkey, &key.Threshold, &key.TotalShares,
+			&key.GroupPublicKey, &key.VerificationShares, &key.CreatedAt, &createdBy)
+	if err == sql.ErrNoRows {
+		return nil, ErrFrostKeyNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if name.Valid {
+		key.Name = name.String
+	}
+	if createdBy.Valid {
+		key.CreatedBy = createdBy.String
+	}
+	return key, nil
+}
+
+func (ps *PostgresStorage) ListFrostKeys(ctx context.Context) ([]*FrostKey, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by
+		FROM signer_frost_keys ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []*FrostKey
+	for rows.Next() {
+		key := &FrostKey{}
+		var name, createdBy sql.NullString
+		if err := rows.Scan(&key.ID, &name, &key.Pubkey, &key.Threshold, &key.TotalShares,
+			&key.GroupPublicKey, &key.VerificationShares, &key.CreatedAt, &createdBy); err != nil {
+			return nil, err
+		}
+		if name.Valid {
+			key.Name = name.String
+		}
+		if createdBy.Valid {
+			key.CreatedBy = createdBy.String
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func (ps *PostgresStorage) DeleteFrostKey(ctx context.Context, id string) error {
+	result, err := ps.db.ExecContext(ctx, `DELETE FROM signer_frost_keys WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrFrostKeyNotFound
+	}
+	return nil
+}
+
+// FROST share management
+
+func (ps *PostgresStorage) CreateFrostShare(ctx context.Context, share *FrostShare) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO signer_frost_shares (id, frost_key_id, share_index, encrypted_share, holder_pubkey, holder_bunker_uri, is_local, public_share, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		share.ID, share.FrostKeyID, share.ShareIndex, share.EncryptedShare,
+		nullString(share.HolderPubkey), nullString(share.HolderBunkerURI),
+		share.IsLocal, share.PublicShare, share.CreatedAt)
+	if err != nil {
+		if isDuplicateError(err) {
+			return ErrFrostShareNotFound // Share with this index already exists
+		}
+		return err
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) GetFrostShare(ctx context.Context, id string) (*FrostShare, error) {
+	share := &FrostShare{}
+	var holderPubkey, holderBunkerURI sql.NullString
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, frost_key_id, share_index, encrypted_share, holder_pubkey, holder_bunker_uri, is_local, public_share, created_at
+		FROM signer_frost_shares WHERE id = $1`, id).
+		Scan(&share.ID, &share.FrostKeyID, &share.ShareIndex, &share.EncryptedShare,
+			&holderPubkey, &holderBunkerURI, &share.IsLocal, &share.PublicShare, &share.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrFrostShareNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if holderPubkey.Valid {
+		share.HolderPubkey = holderPubkey.String
+	}
+	if holderBunkerURI.Valid {
+		share.HolderBunkerURI = holderBunkerURI.String
+	}
+	return share, nil
+}
+
+func (ps *PostgresStorage) GetFrostShareByKeyAndIndex(ctx context.Context, keyID string, index int) (*FrostShare, error) {
+	share := &FrostShare{}
+	var holderPubkey, holderBunkerURI sql.NullString
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, frost_key_id, share_index, encrypted_share, holder_pubkey, holder_bunker_uri, is_local, public_share, created_at
+		FROM signer_frost_shares WHERE frost_key_id = $1 AND share_index = $2`, keyID, index).
+		Scan(&share.ID, &share.FrostKeyID, &share.ShareIndex, &share.EncryptedShare,
+			&holderPubkey, &holderBunkerURI, &share.IsLocal, &share.PublicShare, &share.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrFrostShareNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if holderPubkey.Valid {
+		share.HolderPubkey = holderPubkey.String
+	}
+	if holderBunkerURI.Valid {
+		share.HolderBunkerURI = holderBunkerURI.String
+	}
+	return share, nil
+}
+
+func (ps *PostgresStorage) ListFrostShares(ctx context.Context, keyID string) ([]*FrostShare, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, frost_key_id, share_index, encrypted_share, holder_pubkey, holder_bunker_uri, is_local, public_share, created_at
+		FROM signer_frost_shares WHERE frost_key_id = $1 ORDER BY share_index`, keyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var shares []*FrostShare
+	for rows.Next() {
+		share := &FrostShare{}
+		var holderPubkey, holderBunkerURI sql.NullString
+		if err := rows.Scan(&share.ID, &share.FrostKeyID, &share.ShareIndex, &share.EncryptedShare,
+			&holderPubkey, &holderBunkerURI, &share.IsLocal, &share.PublicShare, &share.CreatedAt); err != nil {
+			return nil, err
+		}
+		if holderPubkey.Valid {
+			share.HolderPubkey = holderPubkey.String
+		}
+		if holderBunkerURI.Valid {
+			share.HolderBunkerURI = holderBunkerURI.String
+		}
+		shares = append(shares, share)
+	}
+	return shares, rows.Err()
+}
+
+func (ps *PostgresStorage) ListLocalFrostShares(ctx context.Context, keyID string) ([]*FrostShare, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, frost_key_id, share_index, encrypted_share, holder_pubkey, holder_bunker_uri, is_local, public_share, created_at
+		FROM signer_frost_shares WHERE frost_key_id = $1 AND is_local = TRUE ORDER BY share_index`, keyID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var shares []*FrostShare
+	for rows.Next() {
+		share := &FrostShare{}
+		var holderPubkey, holderBunkerURI sql.NullString
+		if err := rows.Scan(&share.ID, &share.FrostKeyID, &share.ShareIndex, &share.EncryptedShare,
+			&holderPubkey, &holderBunkerURI, &share.IsLocal, &share.PublicShare, &share.CreatedAt); err != nil {
+			return nil, err
+		}
+		if holderPubkey.Valid {
+			share.HolderPubkey = holderPubkey.String
+		}
+		if holderBunkerURI.Valid {
+			share.HolderBunkerURI = holderBunkerURI.String
+		}
+		shares = append(shares, share)
+	}
+	return shares, rows.Err()
+}
+
+func (ps *PostgresStorage) DeleteFrostShare(ctx context.Context, id string) error {
+	result, err := ps.db.ExecContext(ctx, `DELETE FROM signer_frost_shares WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrFrostShareNotFound
+	}
+	return nil
 }
 
 func (ps *PostgresStorage) Close() error {

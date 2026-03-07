@@ -13,6 +13,7 @@ import (
 	"git.coldforge.xyz/coldforge/cloistr-common/relayprefs"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/admin"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/api"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/audit"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/discovery"
@@ -104,8 +105,17 @@ func main() {
 		slog.Warn("relay preferences client has no sources configured, using defaults", "error", err)
 	}
 
+	// Initialize audit logger
+	var auditLogger audit.Logger
+	if cfg.Audit.Enabled {
+		auditLogger = audit.NewMemoryLogger(cfg.Audit.MaxEvents)
+		slog.Info("audit logging enabled", "backend", cfg.Audit.Backend, "max_events", cfg.Audit.MaxEvents)
+	} else {
+		slog.Info("audit logging disabled")
+	}
+
 	// Initialize NIP-46 signer
-	nip46Signer := signer.New(cfg, store, relayClient, encryptor, relaySelector, relayPrefsClient)
+	nip46Signer := signer.New(cfg, store, relayClient, encryptor, relaySelector, relayPrefsClient, auditLogger)
 
 	// Initialize HTTP API
 	apiHandler := api.NewHandler(cfg, nip46Signer, store, encryptor)

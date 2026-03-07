@@ -13,10 +13,12 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip04"
 	"github.com/nbd-wtf/go-nostr/nip44"
 	"git.coldforge.xyz/coldforge/cloistr-common/relayprefs"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/audit"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/bunker"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/discovery"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/frost"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
 	relay "git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/proxy"
@@ -76,13 +78,16 @@ type Signer struct {
 	relayClient     *relay.Client
 	keyRelayManager *relay.KeyRelayManager              // Per-key relay connections for scalability
 	encryptor       *crypto.Encryptor
+	auditLogger     audit.Logger                        // Audit logging for compliance and security
 	proxyClient     *proxy.Client                       // Client for upstream signer connections
 	relaySelector   *discovery.Selector                 // Relay selection with optional discovery
 	relayPrefs      *relayprefs.Client                  // Relay preferences for user data delivery
+	frostCoordinator *frost.Coordinator                 // FROST threshold signing coordinator
 	keys            map[string]string                   // pubkey -> private key (hex)
 	keysLock        sync.RWMutex                        // Protects keys map for concurrent access
 	keyRelays       map[string][]string                 // pubkey -> configured relays (from storage)
 	proxyKeys       map[string]string                   // pubkey -> bunker URI (for proxy keys)
+	frostKeys       map[string]string                   // pubkey -> frost key ID (for FROST keys)
 	pendingCtx      map[string]*pendingRequestContext   // requestID -> context
 	pendingCtxLock  sync.RWMutex
 	seenEvents      map[string]time.Time                // event ID -> first seen time (deduplication)
@@ -93,22 +98,45 @@ type Signer struct {
 	subLock         sync.Mutex                          // Protects subscription refresh
 }
 
+// frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
+type frostEncryptorAdapter struct {
+	enc *crypto.Encryptor
+}
+
+func (a *frostEncryptorAdapter) Encrypt(plaintext []byte) ([]byte, error) {
+	return a.enc.EncryptBytes(plaintext)
+}
+
+func (a *frostEncryptorAdapter) Decrypt(ciphertext []byte) ([]byte, error) {
+	return a.enc.DecryptBytes(ciphertext)
+}
+
 // New creates a new NIP-46 signer
-func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, encryptor *crypto.Encryptor, relaySelector *discovery.Selector, relayPrefs *relayprefs.Client) *Signer {
+func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, encryptor *crypto.Encryptor, relaySelector *discovery.Selector, relayPrefs *relayprefs.Client, auditLogger audit.Logger) *Signer {
+	// Create FROST coordinator if encryptor is available
+	var frostCoord *frost.Coordinator
+	if encryptor != nil {
+		adapter := &frostEncryptorAdapter{enc: encryptor}
+		frostCoord = frost.NewCoordinator(store, adapter)
+	}
+
 	return &Signer{
-		config:          cfg,
-		storage:         store,
-		relayClient:     relayClient,
-		keyRelayManager: relay.NewKeyRelayManager(cfg.Relays),
-		encryptor:       encryptor,
-		proxyClient:     proxy.NewClient(cfg),
-		relaySelector:   relaySelector,
-		relayPrefs:      relayPrefs,
-		keys:            make(map[string]string),
-		keyRelays:       make(map[string][]string),
-		proxyKeys:       make(map[string]string),
-		pendingCtx:      make(map[string]*pendingRequestContext),
-		seenEvents:      make(map[string]time.Time),
+		config:           cfg,
+		storage:          store,
+		relayClient:      relayClient,
+		keyRelayManager:  relay.NewKeyRelayManager(cfg.Relays),
+		encryptor:        encryptor,
+		auditLogger:      auditLogger,
+		proxyClient:      proxy.NewClient(cfg),
+		relaySelector:    relaySelector,
+		relayPrefs:       relayPrefs,
+		frostCoordinator: frostCoord,
+		keys:             make(map[string]string),
+		keyRelays:        make(map[string][]string),
+		proxyKeys:        make(map[string]string),
+		frostKeys:        make(map[string]string),
+		pendingCtx:       make(map[string]*pendingRequestContext),
+		seenEvents:       make(map[string]time.Time),
 	}
 }
 
@@ -168,6 +196,22 @@ func (s *Signer) Start(ctx context.Context) error {
 	}
 	metrics.SetKeysManaged(len(keys))
 
+	// Load FROST keys from storage
+	frostKeys, err := s.storage.ListFrostKeys(s.ctx)
+	if err != nil {
+		slog.Error("failed to load FROST keys", "error", err)
+	} else {
+		s.keysLock.Lock()
+		for _, fk := range frostKeys {
+			s.frostKeys[fk.Pubkey] = fk.ID
+			slog.Info("loaded FROST key", "pubkey", fk.Pubkey[:16]+"...", "threshold", fk.Threshold, "total", fk.TotalShares)
+		}
+		s.keysLock.Unlock()
+		if len(frostKeys) > 0 {
+			slog.Info("loaded FROST keys from storage", "count", len(frostKeys))
+		}
+	}
+
 	// Pre-warm per-key relay clients in background
 	// This establishes connections before the first request, avoiding timeout on first connect
 	go s.prewarmKeyRelayClients()
@@ -216,11 +260,24 @@ func (s *Signer) refreshSubscription() {
 		s.subCancel()
 	}
 
-	// Get current pubkeys
+	// Get current pubkeys (regular keys + FROST keys)
 	s.keysLock.RLock()
-	pubkeys := make([]string, 0, len(s.keys))
+	pubkeys := make([]string, 0, len(s.keys)+len(s.frostKeys))
 	for pubkey := range s.keys {
 		pubkeys = append(pubkeys, pubkey)
+	}
+	for pubkey := range s.frostKeys {
+		// Only add if not already present (shouldn't happen, but be safe)
+		found := false
+		for _, p := range pubkeys {
+			if p == pubkey {
+				found = true
+				break
+			}
+		}
+		if !found {
+			pubkeys = append(pubkeys, pubkey)
+		}
 	}
 	s.keysLock.RUnlock()
 
@@ -257,6 +314,11 @@ func (s *Signer) Stop() {
 		s.cancel()
 	}
 	s.relayClient.Disconnect()
+}
+
+// AuditLogger returns the audit logger for querying audit logs
+func (s *Signer) AuditLogger() audit.Logger {
+	return s.auditLogger
 }
 
 // GetRelaysForBunker returns the relays to include in a bunker:// URI for a key.
@@ -306,8 +368,27 @@ func (s *Signer) UnregisterKey(pubkey string) {
 	delete(s.keys, pubkey)
 	delete(s.proxyKeys, pubkey)
 	delete(s.keyRelays, pubkey)
+	delete(s.frostKeys, pubkey)
 	s.keysLock.Unlock()
 	s.keyRelayManager.RemoveClient(pubkey)
+	s.refreshSubscription()
+}
+
+// RegisterFrostKey registers a FROST threshold signing key (runtime, not persisted).
+// Also refreshes the relay subscription to include the new key.
+func (s *Signer) RegisterFrostKey(pubkey, frostKeyID string) {
+	s.keysLock.Lock()
+	s.frostKeys[pubkey] = frostKeyID
+	s.keysLock.Unlock()
+	s.refreshSubscription()
+}
+
+// UnregisterFrostKey removes a FROST key from the signer (runtime only).
+// Also refreshes the relay subscription to remove the key.
+func (s *Signer) UnregisterFrostKey(pubkey string) {
+	s.keysLock.Lock()
+	delete(s.frostKeys, pubkey)
+	s.keysLock.Unlock()
 	s.refreshSubscription()
 }
 
@@ -676,6 +757,41 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 		metrics.RecordSigningRequest(req.Method, err == nil)
 	}()
 
+	// Audit logging on completion (for methods that warrant it)
+	defer func() {
+		if s.auditLogger != nil && s.shouldAuditMethod(req.Method) {
+			eventKind := s.extractEventKind(req)
+			var eventType audit.EventType
+			var errReason string
+			if err != nil {
+				eventType = audit.EventSignFailed
+				errReason = err.Error()
+			} else {
+				eventType = audit.EventSignCompleted
+			}
+
+			auditEvent := audit.NewSignEvent(eventType, clientPubkey, targetPubkey, req.Method, eventKind, err == nil, errReason)
+
+			// Add proxy/delegate info if this is a proxy key
+			if bunkerURI, isProxy := s.proxyKeys[targetPubkey]; isProxy {
+				if uri, parseErr := bunker.Parse(bunkerURI); parseErr == nil {
+					auditEvent.Details["proxy_key"] = targetPubkey
+					auditEvent.Details["upstream_pubkey"] = uri.SignerPubkey
+					auditEvent.Details["is_chained"] = true
+				}
+			}
+
+			// Add delegate pubkey if set on permission
+			if perm.DelegatePubkey != "" {
+				auditEvent.Details["delegate_pubkey"] = perm.DelegatePubkey
+			}
+
+			if logErr := s.auditLogger.Log(ctx, auditEvent); logErr != nil {
+				slog.Warn("failed to log audit event", "error", logErr)
+			}
+		}
+	}()
+
 	// Check policy usage limits if permission is policy-based
 	if perm.PolicyID != "" {
 		allowed, ruleID, err := s.checkPolicyUsage(ctx, perm.PolicyID, req.Method)
@@ -698,7 +814,7 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 	// Check if this is a proxy key - forward certain methods to upstream
 	bunkerURI, isProxy := s.proxyKeys[targetPubkey]
 	if isProxy && s.shouldProxyMethod(req.Method) {
-		return s.handleProxyRequest(ctx, targetPubkey, privateKey, bunkerURI, req)
+		return s.handleProxyRequest(ctx, targetPubkey, privateKey, bunkerURI, req, clientPubkey)
 	}
 
 	switch req.Method {
@@ -727,6 +843,30 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 	default:
 		return "", fmt.Errorf("unknown method: %s", req.Method)
 	}
+}
+
+// shouldAuditMethod returns true if the method should be audit logged
+func (s *Signer) shouldAuditMethod(method string) bool {
+	switch method {
+	case "sign_event", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt":
+		return true
+	default:
+		return false
+	}
+}
+
+// extractEventKind extracts the event kind from sign_event params
+func (s *Signer) extractEventKind(req *NIP46Request) int {
+	if req.Method != "sign_event" || len(req.Params) < 1 {
+		return 0
+	}
+	var event struct {
+		Kind int `json:"kind"`
+	}
+	if err := json.Unmarshal([]byte(req.Params[0]), &event); err != nil {
+		return 0
+	}
+	return event.Kind
 }
 
 func (s *Signer) handleConnect(ctx context.Context, targetPubkey, clientPubkey string, params []string, perm *storage.Permission) (string, error) {
@@ -767,7 +907,8 @@ func (s *Signer) shouldProxyMethod(method string) bool {
 }
 
 // handleProxyRequest forwards a request to the upstream signer
-func (s *Signer) handleProxyRequest(ctx context.Context, targetPubkey, privateKey, bunkerURI string, req *NIP46Request) (string, error) {
+// clientPubkey is the original client that initiated the request (for audit trail)
+func (s *Signer) handleProxyRequest(ctx context.Context, targetPubkey, privateKey, bunkerURI string, req *NIP46Request, clientPubkey string) (string, error) {
 	// Parse the bunker URI to get the upstream pubkey
 	uri, err := bunker.Parse(bunkerURI)
 	if err != nil {
@@ -781,8 +922,9 @@ func (s *Signer) handleProxyRequest(ctx context.Context, targetPubkey, privateKe
 			"method", req.Method,
 			"proxy", targetPubkey[:16]+"...",
 			"upstream", uri.SignerPubkey[:16]+"...",
+			"original_client", clientPubkey[:16]+"...",
 		)
-		return s.handleInternalProxy(ctx, uri.SignerPubkey, upstreamPrivkey, targetPubkey, req)
+		return s.handleInternalProxy(ctx, uri.SignerPubkey, upstreamPrivkey, targetPubkey, req, clientPubkey)
 	}
 
 	// Get or create connection to upstream using the proxy key's persistent keypair
@@ -796,6 +938,7 @@ func (s *Signer) handleProxyRequest(ctx context.Context, targetPubkey, privateKe
 	slog.Info("forwarding request to upstream",
 		"method", req.Method,
 		"upstream", conn.URI.SignerPubkey[:16]+"...",
+		"original_client", clientPubkey[:16]+"...",
 	)
 
 	response, err := conn.SendRequest(ctx, req.Method, req.Params)
@@ -808,13 +951,16 @@ func (s *Signer) handleProxyRequest(ctx context.Context, targetPubkey, privateKe
 
 // handleInternalProxy handles proxy requests when the upstream key is on the same signer instance.
 // This avoids the relay round-trip and handles requests directly.
-func (s *Signer) handleInternalProxy(ctx context.Context, upstreamPubkey, upstreamPrivkey, proxyPubkey string, req *NIP46Request) (string, error) {
+// originalClient is the original requester (for audit trail through the proxy chain)
+func (s *Signer) handleInternalProxy(ctx context.Context, upstreamPubkey, upstreamPrivkey, proxyPubkey string, req *NIP46Request, originalClient string) (string, error) {
 	// Create a "virtual" permission for the proxy key accessing the upstream key
 	// The proxy key is pre-authorized with full access to the upstream
+	// DelegatePubkey tracks the original client through the proxy chain
 	perm := &storage.Permission{
-		KeyID:      upstreamPubkey,
-		UserPubkey: proxyPubkey,
-		Methods:    []string{"sign_event", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt", "get_public_key"},
+		KeyID:          upstreamPubkey,
+		UserPubkey:     proxyPubkey,
+		Methods:        []string{"sign_event", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt", "get_public_key"},
+		DelegatePubkey: originalClient, // Track original requester for audit
 	}
 
 	// Handle the request directly using the upstream key
@@ -884,6 +1030,10 @@ func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey s
 	}
 
 	// Set pubkey and sign
+	// NOTE: FROST keys are not supported via NIP-46 because NIP-46 requires decryption
+	// of incoming requests using the target key's private key. FROST keys don't have
+	// a single private key - they have distributed shares. FROST signing is available
+	// via the HTTP API at /api/v1/frost/keys/{id}/sign instead.
 	event.PubKey = targetPubkey
 	if err := event.Sign(privateKey); err != nil {
 		return "", fmt.Errorf("signing failed: %w", err)
