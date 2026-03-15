@@ -359,8 +359,10 @@ func TestSigner_handleConnect(t *testing.T) {
 		t.Fatalf("handleConnect() error = %v", err)
 	}
 
-	if result != "ack" {
-		t.Errorf("handleConnect() = %q, want %q", result, "ack")
+	// Connect now returns JSON with pubkey to save a round-trip
+	expected := `{"pubkey":"target123"}`
+	if result != expected {
+		t.Errorf("handleConnect() = %q, want %q", result, expected)
 	}
 
 	// Verify session was created
@@ -438,6 +440,66 @@ func TestSigner_handleSignEvent_AllowedKinds(t *testing.T) {
 		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{"not-json"}, perm)
 		if err == nil {
 			t.Error("handleSignEvent() should return error for invalid JSON")
+		}
+	})
+}
+
+func TestSigner_handleBatchSign(t *testing.T) {
+	store := storage.NewMemoryStorage()
+	signer := New(&config.Config{}, store, nil, nil, nil, nil, nil)
+	ctx := context.Background()
+
+	// Register a key (using a test key)
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	privateKey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	signer.RegisterKey(pubkey, privateKey)
+
+	t.Run("batch sign multiple events", func(t *testing.T) {
+		perm := &storage.Permission{Methods: []string{"batch_sign"}}
+
+		events := []string{
+			`{"kind":1,"content":"hello","tags":[],"created_at":1234567890}`,
+			`{"kind":1,"content":"world","tags":[],"created_at":1234567891}`,
+		}
+
+		result, err := signer.handleBatchSign(ctx, pubkey, privateKey, events, perm)
+		if err != nil {
+			t.Fatalf("handleBatchSign() error = %v", err)
+		}
+
+		// Result should be a JSON array
+		var signedEvents []json.RawMessage
+		if err := json.Unmarshal([]byte(result), &signedEvents); err != nil {
+			t.Fatalf("failed to unmarshal result: %v", err)
+		}
+
+		if len(signedEvents) != 2 {
+			t.Errorf("expected 2 signed events, got %d", len(signedEvents))
+		}
+	})
+
+	t.Run("empty params", func(t *testing.T) {
+		perm := &storage.Permission{Methods: []string{"batch_sign"}}
+		_, err := signer.handleBatchSign(ctx, pubkey, privateKey, []string{}, perm)
+		if err == nil {
+			t.Error("handleBatchSign() should return error for empty params")
+		}
+	})
+
+	t.Run("kind not allowed", func(t *testing.T) {
+		perm := &storage.Permission{
+			Methods:      []string{"batch_sign"},
+			AllowedKinds: []int{1}, // Only kind 1 allowed
+		}
+
+		events := []string{
+			`{"kind":1,"content":"allowed","tags":[],"created_at":1234567890}`,
+			`{"kind":4,"content":"not allowed","tags":[],"created_at":1234567891}`,
+		}
+
+		_, err := signer.handleBatchSign(ctx, pubkey, privateKey, events, perm)
+		if err == nil {
+			t.Error("handleBatchSign() should return error when kind not allowed")
 		}
 	})
 }

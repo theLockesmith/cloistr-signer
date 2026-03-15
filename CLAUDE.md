@@ -2,698 +2,104 @@
 
 **Go-based NIP-46 Remote Signing Service**
 
-**Domain:** signer.cloistr.xyz (Cloistr is the consumer-facing brand for Coldforge Nostr services)
+**Domain:** signer.cloistr.xyz | **Status:** Production
 
-## REQUIRED READING (Before ANY Action)
+## Required Reading
 
-**Claude MUST read this file at the start of every session:**
-- `~/claude/coldforge/cloistr/CLAUDE.md` - Cloistr project rules (contains further required reading)
+| Document | Purpose |
+|----------|---------|
+| `~/claude/coldforge/cloistr/CLAUDE.md` | Cloistr project rules |
+| [docs/reference.md](docs/reference.md) | Full API, config, phases |
 
 ## Overview
 
-coldforge-signer is our Kubernetes-native NIP-46 remote signer, serving as the identity foundation for all Coldforge services. Written in Go for minimal footprint and fast startup. (nsecbunker was deprecated 2026-02-19)
+Kubernetes-native NIP-46 remote signer - identity foundation for all Coldforge services. Written in Go for minimal footprint and fast startup.
 
 ## Quick Start
 
 ```bash
-# Build
-go build -o coldforge-signer ./cmd/signer
-
-# Run locally
-RELAYS="wss://relay.coldforge.xyz" ./coldforge-signer
-
-# Run tests
-go test ./...
-
-# Build Docker image
-docker build -t coldforge-signer .
+go build -o coldforge-signer ./cmd/signer     # Build
+RELAYS="wss://relay.coldforge.xyz" ./coldforge-signer  # Run
+go test ./...                                  # Test
+docker build -t coldforge-signer .             # Docker
 ```
 
 ## Architecture
 
 ```
-cmd/signer/main.go          # Entry point, server setup
+cmd/signer/main.go         Entry point
 internal/
-  config/config.go          # Configuration (env + yaml)
-  storage/
-    storage.go              # Storage interface + in-memory backend
-    postgres.go             # PostgreSQL storage backend
-  nostr/
-    client.go               # Relay client with NIP-42 auth
-    key_relay_manager.go    # Per-key relay connections for scalability
-  signer/signer.go          # NIP-46 request handling
-  api/handler.go            # HTTP management API
-  auth/auth.go              # JWT, bcrypt, TOTP, backup codes
-  admin/admin.go            # Admin DM command handler
-  bunker/bunker.go          # bunker:// URI generation/parsing
-  nip05/nip05.go            # NIP-05 verification and serving
-  nip89/nip89.go            # NIP-89 service announcements
-  vault/vault.go            # HashiCorp Vault integration
-  audit/audit.go            # Audit logging (memory/JSON backends)
-  metrics/metrics.go        # Prometheus metrics and HTTP middleware
-  crypto/crypto.go          # AES-256-GCM encryption for keys at rest
-  discovery/                # Optional relay discovery integration
-    discovery.go            # Discovery service client
-    selector.go             # Relay selection with fallbacks
-  web/                      # Web UI
-    web.go                  # Web handlers and routes
-    templates/              # HTML templates
-    static/                 # CSS and JS
+  config/                   Configuration
+  storage/                  Memory + PostgreSQL backends
+  nostr/                    Relay client, per-key connections
+  signer/                   NIP-46 request handling
+  api/                      HTTP management API
+  auth/                     JWT, bcrypt, TOTP, backup codes
+  admin/                    Admin DM commands
+  bunker/                   bunker:// URI handling
+  frost/                    FROST threshold signing
+  web/                      Web UI
 ```
 
-## NIP-46 Methods Supported
+## NIP-46 Methods
 
-| Method | Status | Description |
-|--------|--------|-------------|
-| `connect` | ✅ | Establish session |
-| `ping` | ✅ | Health check |
-| `get_public_key` | ✅ | Return signer pubkey |
-| `get_relays` | ✅ | List connected relays |
-| `sign_event` | ✅ | Sign a Nostr event |
-| `nip04_encrypt` | ✅ | NIP-04 encryption |
-| `nip04_decrypt` | ✅ | NIP-04 decryption |
-| `nip44_encrypt` | ✅ | NIP-44 encryption |
-| `nip44_decrypt` | ✅ | NIP-44 decryption |
+| Method | Description |
+|--------|-------------|
+| `connect` | Establish session |
+| `ping` | Health check |
+| `get_public_key` | Return signer pubkey |
+| `get_relays` | List connected relays |
+| `sign_event` | Sign a Nostr event |
+| `nip04_encrypt/decrypt` | NIP-04 encryption |
+| `nip44_encrypt/decrypt` | NIP-44 encryption |
 
-## HTTP API
+## Core API Endpoints
 
-### Health
-- `GET /health` - Overall health
-- `GET /health/live` - Liveness probe
-- `GET /health/ready` - Readiness probe
+| Path | Description |
+|------|-------------|
+| `/health`, `/health/live`, `/health/ready` | Health probes |
+| `/api/v1/keys` | Key CRUD |
+| `/api/v1/keys/{id}/permissions` | Permission management |
+| `/api/v1/requests` | Pending authorization |
+| `/api/v1/users/*` | User management (register, login, MFA) |
+| `/api/v1/bunker/{id}` | Generate bunker:// URI |
+| `/.well-known/nostr.json` | NIP-05 endpoint |
 
-### Keys
-- `GET /api/v1/keys` - List keys
-- `POST /api/v1/keys` - Create key
-- `GET /api/v1/keys/{id}` - Get key
-- `DELETE /api/v1/keys/{id}` - Delete key
-
-### Permissions
-- `GET /api/v1/keys/{id}/permissions` - List permissions
-- `POST /api/v1/keys/{id}/permissions` - Set permission
-- `DELETE /api/v1/keys/{id}/permissions/{pubkey}` - Delete permission
-
-### Policies
-- `GET /api/v1/policies` - List policies
-- `POST /api/v1/policies` - Create policy
-- `GET /api/v1/policies/{id}` - Get policy
-- `DELETE /api/v1/policies/{id}` - Delete policy
-
-### Tokens
-- `GET /api/v1/tokens?key_id={id}` - List tokens for a key
-- `POST /api/v1/tokens` - Create token
-- `GET /api/v1/tokens/{id}` - Get token
-- `POST /api/v1/tokens/{id}/redeem` - Redeem token (creates permissions)
-- `DELETE /api/v1/tokens/{id}` - Delete token
-
-### Pending Requests (Authorization)
-- `GET /api/v1/requests?key_pubkey={pubkey}` - List pending requests
-- `GET /api/v1/requests/{id}` - Get pending request
-- `POST /api/v1/requests/{id}/approve` - Approve request
-- `POST /api/v1/requests/{id}/deny` - Deny request
-
-### User Management
-- `POST /api/v1/users/register` - Register new user (username/email/password)
-- `POST /api/v1/users/login` - Login (returns JWT, supports MFA)
-- `POST /api/v1/users/logout` - Logout (revokes sessions)
-- `GET /api/v1/users/me` - Get current user info (requires JWT)
-- `POST /api/v1/users/mfa/setup` - Setup MFA (returns secret + backup codes)
-- `POST /api/v1/users/mfa/verify` - Verify MFA code and enable
-- `POST /api/v1/users/mfa/disable` - Disable MFA (requires current code)
-- `GET /api/v1/users/sessions` - List active sessions
-- `DELETE /api/v1/users/sessions` - Revoke all sessions
-
-### bunker:// URI (Phase 6)
-- `GET /api/v1/bunker/{id}` - Generate bunker:// connection URI for a key
-
-### nostrconnect:// (Client-Initiated Connections)
-- `POST /api/v1/nostrconnect` - Connect to app via nostrconnect:// URI
-  - Body: `{"uri": "nostrconnect://...", "key_id": "<key-id>"}`
-  - Parses the nostrconnect URI, creates permission, sends connect response
-
-### NIP-05 (Phase 6)
-- `GET /.well-known/nostr.json` - NIP-05 identifier endpoint
-
-### Audit (Phase 6)
-- `GET /api/v1/audit` - Query audit logs (supports filtering by type, actor, target)
-
-## Admin DM Commands
-
-Admins can manage the signer via encrypted Nostr DMs (kind:4). Send commands to the signer's pubkey:
-
-| Command | Description |
-|---------|-------------|
-| `help` | Show available commands |
-| `status` | Get signer status (keys, relays, users) |
-| `get_keys` | List all signing keys |
-| `get_key <id>` | Get key details |
-| `create_key [name]` | Create a new signing key |
-| `delete_key <id>` | Delete a key |
-| `list_pending` | List pending authorization requests |
-| `approve <id>` | Approve a pending request |
-| `deny <id>` | Deny a pending request |
-| `list_users` | List registered users |
-| `list_policies` | List permission policies |
-
-Admins receive boot notifications when the signer starts.
+**Full API:** See [docs/reference.md](docs/reference.md)
 
 ## Web UI
 
-The signer includes a web interface for management:
-
 | Route | Description |
 |-------|-------------|
-| `/` | Home/landing page |
-| `/login` | Login with password or NIP-07 extension |
-| `/register` | User registration |
-| `/dashboard` | Admin dashboard with stats |
-| `/keys` | Key management (create, delete, copy) |
-| `/requests` | Pending authorization requests |
-| `/users` | User management |
-| `/approve/{id}` | Authorization approval page (shareable link) |
-
-The approval page can be shared via link for async authorization.
-
-## Configuration
-
-| Env Variable | Description | Default |
-|--------------|-------------|---------|
-| `SERVER_ADDRESS` | HTTP listen address | `:7777` |
-| `RELAYS` | Comma-separated relay URLs | `wss://relay.coldforge.xyz` |
-| `RELAY_AUTH_KEY` | Hex private key for NIP-42 auth | (none) |
-| `STORAGE_TYPE` | `memory` or `postgres` | `memory` |
-| `DATABASE_URL` | PostgreSQL connection string | (none) |
-| `ADMIN_PUBKEYS` | Comma-separated admin pubkeys | (none) |
-| `REQUIRE_APPROVAL` | Require manual approval for unknown clients (see below) | `false` |
-| `AUTHORIZATION_TIMEOUT` | Timeout for authorization in seconds | `60` |
-| `NOTIFY_ADMINS` | Send DMs to admins for pending requests | `true` |
-| `JWT_SECRET` | Secret for JWT signing (required for user auth) | (none) |
-| `JWT_EXPIRY` | JWT expiry in hours (max session length) | `24` |
-| `SESSION_INACTIVITY_MINUTES` | Session expires after inactivity | `1440` (24h) |
-| `REMEMBER_DEVICE_DAYS` | "Remember this device" session length | `30` |
-| `MFA_ISSUER` | Issuer name for TOTP | `Coldforge` |
-| `MAX_FAILED_LOGINS` | Max failed logins before lockout | `5` |
-| `LOCKOUT_MINUTES` | Lockout duration in minutes | `15` |
-| **Encryption** | | |
-| `ENCRYPTION_KEY` | 32-byte hex key for AES-256-GCM encryption of keys at rest | (none) |
-| **Vault** (optional) | | |
-| `VAULT_ENABLED` | Enable HashiCorp Vault integration | `false` |
-| `VAULT_ADDR` | Vault server address | (none) |
-| `VAULT_TOKEN` | Vault authentication token | (none) |
-| `VAULT_MOUNT_PATH` | KV secrets mount path | `secret` |
-| **Audit** | | |
-| `AUDIT_ENABLED` | Enable audit logging | `true` |
-| `AUDIT_BACKEND` | Backend type: `memory`, `file`, `json` | `memory` |
-| `AUDIT_FILE_PATH` | Path for file/json backend | (none) |
-| **Service Metadata** | | |
-| `SERVICE_NAME` | Service name for NIP-89 | `Coldforge Signer` |
-| `SERVICE_DESCRIPTION` | Service description | `NIP-46 Remote Signing Service` |
-| `SERVICE_URL` | Public service URL | (none) |
-| `NIP05_DOMAIN` | Domain for NIP-05 identifiers | (none) |
-| `PUBLISH_NIP89` | Publish NIP-89 announcements | `false` |
-| **Proxy/Chaining** (Phase 12) | | |
-| `PROXY_MODE` | How to handle local proxy keys: `internal` or `external` | `internal` |
-| `PROXY_TIMEOUT` | Timeout for upstream proxy requests in seconds | `30` |
-| **Discovery** (optional) | | |
-| `DISCOVERY_URL` | Discovery service URL for relay selection (empty = disabled) | (none) |
-| `DISCOVERY_TIMEOUT` | Discovery query timeout in seconds | `5` |
-| `DISCOVERY_MAX_RELAYS` | Maximum relays to include from discovery | `3` |
-| `DISCOVERY_INCLUDE_IN_BUNKER` | Include discovered relays in bunker:// URI | `true` |
-| **Relay Preferences** (via cloistr-common) | | |
-| `DISCOVERY_INTERNAL` | Self-hosted discovery URL for relay prefs | (none) |
-| `RELAY_LIST` | Comma-separated relays to query for user relay prefs | (none) |
-| `DISCOVERY_EXTERNAL` | Third-party discovery URL for relay prefs | (none) |
-| `USE_CLOISTR_FALLBACK` | Use Cloistr services as fallback for relay prefs | `true` |
-| `RELAY_PREFS_CACHE_TTL` | Cache duration for relay prefs (e.g., "1h", "30m") | `1h` |
-
-### REQUIRE_APPROVAL Behavior
-
-Controls how the signer handles requests from unknown clients (no existing permission):
-
-- **`false` (default)**: Auto-approve all requests with full access. Simpler UX for personal bunkers - clients can connect immediately using the bunker:// URI. Recommended for new users.
-
-- **`true`**: Requests wait for manual admin approval via the web UI (`/requests`) or admin DM commands. Opt-in for high-security or shared deployments where you want to vet each app.
-
-**Bunker Secret Validation**: When a client connects with a valid bunker:// URI secret, they are auto-approved with full access regardless of `REQUIRE_APPROVAL` setting. Secrets are one-time use and expire after 24 hours. If the secret is invalid or missing, the normal `REQUIRE_APPROVAL` behavior applies.
-
-### PROXY_MODE Behavior (Phase 12)
-
-Controls how proxy keys (keys stored as bunker:// URIs pointing to upstream signers) are handled:
-
-- **`internal` (default)**: When both the proxy key and the target key are in the same signer, handle the delegation internally without going through relays. Faster, more reliable, and more private.
-
-- **`external`**: Always use NIP-46 over relays, even for local-to-local proxying. Useful for testing, auditing, or if you want delegation visible on relays.
-
-**Multi-hop chains**: Proxy keys can chain through multiple signers (e.g., Personal → Business → Sub-brand). Each hop adds latency but the protocol supports unlimited depth.
-
-**Privacy note**: `internal` mode keeps your delegation structure private. `external` mode exposes delegation requests on relays as kind:24133 events.
-
-## Development Status
-
-### Completed (Phase 1)
-- [x] Project structure scaffolded
-- [x] Configuration loading (env + yaml)
-- [x] In-memory storage backend
-- [x] Relay client with reconnection
-- [x] NIP-46 request/response handling
-- [x] All core NIP-46 methods
-- [x] HTTP management API
-- [x] Per-method permissions
-- [x] Event kind filtering
-- [x] NIP-42 relay authentication
-- [x] Dockerfile + GitLab CI
-- [x] Atlas role for Kubernetes
-- [x] Deployed to Atlantis cluster
-
-### Completed (Phase 2)
-- [x] Policy engine (reusable permission templates)
-- [x] Access tokens (one-time redeemable)
-- [x] Token redemption with permission creation
-- [x] Authorization callbacks (async approval framework)
-- [x] Pending request queue with timeout
-
-### Completed (Phase 2.5)
-- [x] Interactive approval flow integration with NIP-46 handler
-- [x] Admin DM notification for pending approvals
-- [x] Policy usage tracking and limits
-- [x] Configurable authorization timeout
-- [x] Async request processing with goroutines
-
-### Completed (Phase 3)
-- [x] User registration (username/email/password)
-- [x] Password auth with bcrypt
-- [x] MFA (TOTP + backup codes)
-- [x] Session management (JWT)
-- [x] Account lockout after failed attempts
-- [x] CI deploy stage for automatic deployment
-
-### Completed (Phase 4)
-- [x] Admin Nostr DM commands (help, status, get_keys, create_key, delete_key, list_pending, approve, deny, list_users, list_policies)
-- [x] Admin RPC handler for encrypted DMs from admin pubkeys
-- [x] Boot notification to admins on signer startup
-
-### Completed (Phase 5)
-- [x] Authorization approval page (/approve/{id})
-- [x] Account registration page (/register)
-- [x] Login page with NIP-07 support (/login)
-- [x] Admin dashboard with stats (/dashboard)
-- [x] Keys management page (/keys)
-- [x] Pending requests page (/requests)
-- [x] Users management page (/users)
-
-### Completed (Phase 6)
-- [x] bunker:// URI protocol (`internal/bunker/bunker.go`)
-- [x] NIP-05 integration (`internal/nip05/nip05.go`)
-- [x] NIP-89 service announcements (`internal/nip89/nip89.go`)
-- [x] HashiCorp Vault integration (`internal/vault/vault.go`)
-- [x] Audit logging (`internal/audit/audit.go`)
-
-### Completed (Phase 7 - Connection Flows)
-- [x] bunker:// URI connection flow working with Primal
-- [x] nostrconnect:// client-initiated connections
-- [x] NIP-44 encryption support (with NIP-04 fallback)
-- [x] Auto-approve mode for simpler UX
-- [x] Web UI for Connect to App (nostrconnect modal)
-- [x] Password strength indicator on registration
-- [x] Password visibility toggle on login
-
-### Completed (Phase 8 - Production Ready)
-- [x] PostgreSQL storage backend (persistent data across restarts)
-- [x] Database migrations (auto-creates tables on startup)
-- [x] User roles (admin/user) with first-user-is-admin logic
-- [x] Admin-only access to Users page
-- [x] Key import via web UI (nsec or hex)
-- [x] Logout functionality (cookie-based)
-- [x] npub registration (link Nostr identity to account)
-- [x] NIP-07 login for any user with linked pubkey
-- [x] Dark mode theming fixes for modals and forms
-
-### Completed (Phase 9 - Security & Management)
-- [x] Bunker secret validation (auto-approve only with valid secret)
-- [x] One-time use secrets with 24-hour expiry
-- [x] Connected apps management UI (/apps)
-
-### Completed (Phase 10 - Test Coverage)
-- [x] PostgreSQL storage tests (54 tests)
-- [x] Metrics package tests (19 tests)
-- [x] Fixed PostgreSQL array scanning bugs (pq.Array usage)
-- [x] Fixed metrics path normalization bugs
-- [x] Total: 311+ unit tests across all packages
-
-### Roadmap to Production
-
-**Core functionality and tests complete! Next:**
-- [x] Production PostgreSQL deployment (Atlas vars/main.yml)
-- [x] Key encryption at rest (AES-256-GCM via ENCRYPTION_KEY)
-- [x] Documentation (docs/user-guide.md, admin-guide.md, api-reference.md)
-- [x] Deprecate nsecbunker (2026-02-19: Atlas role removed, namespace deleted)
-
-### Completed (Phase 11 - Enhanced Approval & Connection UX)
-
-**Per-key approval mode:**
-- [x] Per-key `require_approval` toggle in DB and UI
-- [x] Per-permission approval override (hybrid: permission → key → global)
-- [x] Auto-use signing key for NIP-42 relay auth
-
-**Granular approval:**
-- [x] Per-kind approval rules (allowed_kinds field, enforced in signer)
-- [x] Approval UI showing event content preview (kind name, content, tags, mentions)
-- [x] Remember approval choices per-app and per-kind
-- [x] Edit permissions UI with kind restrictions and quick presets
-
-**Bidirectional connection dialogs:**
-- [x] Per-key "Connect" dialog with tabs (share bunker:// / paste nostrconnect://)
-- [x] Per-key nostrconnect:// support (connect TO apps from specific key)
-- [x] "Connect to App" modal for quick connections
-
-### Completed (Phase 12 - Signer Chaining)
-
-**The Problem:** Businesses need team members to post on behalf of a shared identity without sharing the nsec. Traditional delegation (NIP-26) failed due to revocation problems and poor ecosystem adoption.
-
-**The Solution:** Signer Chaining - NIP-46 signers can act as clients to other signers, enabling a daisy-chain where personal signers (Amber, nsecbunker) proxy signing requests to an upstream business signer.
-
-```
-Team Member's Client ──► Personal Signer ──► Business Signer (cloistr)
-                              (Amber)              │
-                                              signs with
-                                            business key
-                                                   │
-Team Member's Client ◄── Personal Signer ◄────────┘
-```
-
-**Why it works:**
-- Revocation is instant (remove permission in cloistr-signer)
-- No new NIPs or protocol changes needed (NIP-46 all the way down)
-- Team members keep their preferred signer setup
-- Business maintains full control over who can sign
-
-**Implementation - Proxy Key Support (completed 2026-02-21):**
-- [x] Add "proxy key" type to storage (bunker:// URI + local keypair for NIP-46)
-- [x] NIP-46 client mode: `internal/proxy` package connects to upstream signers
-- [x] Forward sign_event/encrypt/decrypt requests to upstream
-- [x] Web UI: Add proxy key via bunker:// URI (keys page "Add Proxy Key" button)
-- [x] Proxy mode config: PROXY_MODE and PROXY_TIMEOUT environment variables
-- [x] Connection management: detect disconnect, cleanup, auto-reconnect on next request
-- [x] Test harness: internal proxy chain tests (`internal/signer/signer_test.go`)
-
-**Implementation - Upstream Signer Enhancements (completed 2026-03-05):**
-- [x] Document cloistr-signer as "upstream signer" for chained connections
-- [x] Verify NIP-46 auth flow works when connecting signer is a proxy (standard NIP-46)
-- [x] Add "delegate pubkey" field to permissions (for audit trail in proxy chains)
-- [x] Add audit logging for chained signatures (tracks proxy_key, upstream_pubkey, delegate_pubkey)
-- [x] Audit logging integrated into signer request flow (`internal/signer/signer.go`)
-- [x] API endpoint `/api/v1/audit` queries audit logs with filtering
-- [x] Team invitation via existing bunker:// URI generation (keys page "Connect" button)
-- [ ] Web UI: Team management page showing delegates and their activity (enhancement)
-
-**Ecosystem outreach:**
-- [x] Technical documentation (`docs/signer-chaining.md`)
-- [x] Blog post for Nostr community
-- [x] Reference implementation complete (cloistr-signer as both upstream AND proxy)
-- [ ] Feature requests to Amber, nsecbunker for "proxy key" support
-- [ ] Propose pattern as NIP-46 addendum (after adoption)
-
-### Completed (Phase 12.5 - NIP-46 Relay Scalability)
-
-**The Problem:** NIP-46 logins were failing ~90% of the time due to rate limiting on public relays like damus.io. Multiple rapid round-trips (connect → get_public_key → sign_event) triggered rate limits.
-
-**The Solution:** Per-key relay architecture with intelligent retry:
-
-**Per-Key Relay Connections:**
-- [x] Each signing key gets its own relay client (`internal/nostr/key_relay_manager.go`)
-- [x] Isolated rate limits per key (not shared across all keys)
-- [x] NIP-42 authentication as the signing key (higher limits on some relays)
-- [x] Pre-warming: Relay connections established on startup, not first request
-
-**Subscription Optimization:**
-- [x] #p filter in NIP-46 subscription (relay-side filtering, not firehose)
-- [x] Event deduplication (same event from multiple relays processed once)
-- [x] Subscription refresh when keys added/removed
-
-**Intelligent Retry with NIP-01 Prefix Detection:**
-- [x] Non-retryable errors: `invalid:`, `duplicate:`, `blocked:` (fail immediately)
-- [x] Retryable errors: everything else (rate-limited, pow, error, unknown)
-- [x] Exponential backoff: 1s initial, up to 30s max, 5 retries
-- [x] Adaptive POW: mines proof-of-work if relay demands it
-
-**Multi-Relay Fallback (User Freedom):**
-- [x] User-specified relays always tried first
-- [x] Global relays (relay.cloistr.xyz) included as reliable fallback
-- [x] Messages published to ALL configured relays (success if any accepts)
-- [x] relay.cloistr.xyz exempts kind:24133 from rate limiting
-
-**Key Files:**
-- `internal/nostr/key_relay_manager.go` - Per-key relay connections
-- `internal/nostr/client.go` - `isRetryableError()` NIP-01 detection
-- `internal/signer/signer.go` - Deduplication, #p filter subscription
-
-### Completed (Phase 12.6 - Relay Optimization & UX - 2026-02-28)
-
-**The Problem:** Even with per-key relay connections, requests arriving from damus.io caused 31-second delays due to aggressive rate limiting on responses. Users had no visibility into why delays occurred.
-
-**Root Cause Analysis:**
-- Requests arrived from damus.io (client's chosen relay)
-- Responses sent back to damus.io (source relay)
-- damus.io rate limits after 2-3 kind:24133 messages
-- Exponential backoff (1s+2s+4s+8s+16s = 31s) before success
-
-**Solution - Smart Relay Response Routing:**
-- [x] Prefer relay.cloistr.xyz for responses (no rate limits for kind:24133)
-- [x] Respect user choice: if key has custom relays, use those
-- [x] Fall back to source relay if preferred relays fail
-- [x] Fixed `isRateLimited()` detection for `msg: rate-limited:` errors
-
-**Solution - Detailed Request Logging:**
-- [x] Log event latency (`latency_ms` - time since event.created_at)
-- [x] Log decryption timing (`decrypt_ms`)
-- [x] Log total request duration (`total_ms`)
-- [x] Log response encryption and publish timing
-- [x] Upgrade publish retry logging from Debug to Info level
-
-**Solution - Relay Warning UI:**
-- [x] `/web/api/relay/check` endpoint validates relay URLs
-- [x] Fetches NIP-11 relay info for name/description
-- [x] Returns warning flag for external relays
-- [x] Frontend shows real-time warning as user types relay URLs
-- [x] Concise warning: "External relays may rate limit NIP-46 signing traffic"
-
-**Solution - Settings Page:**
-- [x] `/settings` page for account management
-- [x] Link/unlink Nostr pubkey for NIP-07 extension login
-- [x] Support both NIP-07 extension and manual npub entry
-- [x] Username in nav links to settings
-
-**Pending - Discovery Service Integration:**
-- [ ] Query discovery service for relay metadata (rate limit status)
-- [ ] Use discovery data as first check before NIP-11 fallback
-- [ ] Richer warnings based on relay reliability data
-
-**Key Files:**
-- `internal/signer/signer.go` - Smart relay response routing
-- `internal/nostr/client.go` - Fixed rate limit detection
-- `internal/nostr/key_relay_manager.go` - Enhanced publish logging
-- `internal/web/web.go` - Settings page, relay check API
-- `internal/web/templates/keys.html` - Relay warning UI
-- `internal/web/templates/settings.html` - Account settings page
-
-### Completed (Phase 12.7 - Relay Preferences Integration - 2026-03-01)
-
-**Purpose:** Integrate `cloistr-common/relayprefs` library for discovering user relay preferences when delivering DMs (admin notifications).
-
-**What it does:**
-- Admin DM notifications (authorization requests, boot notifications) now query the admin's relay preferences
-- DMs are delivered to the admin's preferred relays (from their `cloistr-relays` or NIP-65 event)
-- Falls back to configured relays if preferences aren't found
-- Uses Cloistr discovery service by default (no configuration needed for hosted services)
-
-**Why:**
-- Admins may use custom relays that aren't in our default list
-- Better DM deliverability - notifications reach admins on their preferred relays
-- Consistent with Cloistr's philosophy: user data goes where users want it
-
-**Note:** NIP-46 protocol traffic (signing requests/responses) is NOT affected - that's operational protocol and uses relay.cloistr.xyz for rate-limit-free delivery. Only admin DM delivery uses relay preferences.
-
-**Implementation:**
-- [x] Add `cloistr-common` library to go.mod
-- [x] Create `relayprefs.Client` at startup
-- [x] Integrate relay prefs for admin DM delivery in `signer.go`
-- [x] Integrate relay prefs for admin DM delivery in `admin.go`
-- [x] Document new environment variables
-
-**Key Files:**
-- `cmd/signer/main.go` - Creates relayprefs client from env
-- `internal/signer/signer.go` - Uses relay prefs for admin notifications
-- `internal/admin/admin.go` - Uses relay prefs for admin DM responses
-
-### In Progress (Phase 13 - FROST Threshold Signing)
-
-**The Problem:** Signer chaining solves team delegation but introduces a single point of failure - the upstream business signer holds the complete private key. If compromised, the business identity is lost.
-
-**The Solution:** FROST (Flexible Round-Optimized Schnorr Threshold) signatures distribute the private key across multiple share holders. A t-of-n threshold (e.g., 3-of-5) is required to produce a valid signature. No single party ever holds the complete key.
-
-**Key Benefits:**
-- **No single point of failure:** Compromise of 1-2 shares doesn't compromise the key
-- **Key rotation without identity change:** Rotate shares, keep the same npub
-- **Geographic/organizational distribution:** Shares across data centers, team members, cold storage
-- **Combines with signer chaining:** Delegates request signatures, FROST handles custody
-
-**Architecture:**
-
-```
-                    Business npub (3-of-5 FROST)
-                              │
-     ┌──────────┬──────────┬──┴───┬──────────┬──────────┐
-     │          │          │      │          │          │
-  Share 1    Share 2    Share 3  Share 4   Share 5
-  (Infra)    (Infra)    (Cold)   (Team)    (Team)
-     │          │          │      │          │
-     └────┬─────┘          │      │          │
-          │                │      │          │
-    Coordinator         Cold     John's   Sarah's
-   (NIP-46 frontend)   Storage   Signer   Signer
-          │
-          ▼
-   Signer Chaining Layer
-   (Delegate permissions,
-    audit logging)
-          │
-    ┌─────┴─────┐
-    ▼           ▼
-  John's     Sarah's
-  Amber      nos2x
-```
-
-**Signing Scenarios (3-of-5):**
-- **Routine:** 2 infra shares + cold storage (automated, no human needed)
-- **Team participation:** 2 infra shares + John's share (John actively participates)
-- **Disaster recovery:** John + Sarah + cold (infrastructure down)
-- **Maximum decentralization:** Any 3 team members (no auto-signing)
-
-**Implementation - Core FROST Support (Phase 13.1 - Completed 2026-03-06):**
-- [x] Selected bytemare/frost library (pure Go, RFC 9591, secp256k1 ciphersuite)
-- [x] Core types: `internal/frost/frost.go` - FrostKey, FrostShare, SigningSession
-- [x] Trusted dealer DKG: `internal/frost/dkg.go` - KeyGenerator.GenerateKey()
-- [x] Local signing coordinator: `internal/frost/coordinator.go` - threshold signing
-- [x] Share encryption: AES-256-GCM via ENCRYPTION_KEY (same as regular keys)
-- [x] 17 unit tests covering key generation, signing, and verification
-
-**Implementation - Storage & API (Phase 13.2 - Completed 2026-03-06):**
-- [x] FrostKey and FrostShare types in `internal/storage/storage.go`
-- [x] PostgreSQL tables: `signer_frost_keys`, `signer_frost_shares`
-- [x] Memory storage implementation for testing
-- [x] HTTP API endpoints:
-  - `POST /api/v1/frost/keys` - Create FROST key (trusted dealer mode)
-  - `GET /api/v1/frost/keys` - List FROST keys
-  - `GET /api/v1/frost/keys/{id}` - Get FROST key details
-  - `DELETE /api/v1/frost/keys/{id}` - Delete FROST key
-  - `GET /api/v1/frost/keys/{id}/shares` - List shares for a key
-  - `POST /api/v1/frost/keys/{id}/sign` - Sign message with FROST key
-
-**Current Limitation - NIP-46 Integration:**
-FROST keys are currently API-only. NIP-46 protocol requires decryption of incoming
-requests using the target key's private key, but FROST keys have no single private key.
-Future work will add a "communication keypair" for NIP-46 integration.
-
-**Key Files:**
-- `internal/frost/frost.go` - Core types and FrostStorage interface
-- `internal/frost/dkg.go` - Trusted dealer key generation
-- `internal/frost/coordinator.go` - Local signing coordinator
-- `internal/frost/frost_test.go` - 17 unit tests
-- `internal/api/handler.go` - FROST HTTP API endpoints
-
-**Remaining Work (Phase 13.3+):**
-- [ ] NIP-46 integration (requires communication keypair design)
-- [ ] Web UI: FROST key management page
-- [ ] Share export/import for distribution
-- [ ] Remote share coordination via Nostr DMs
-- [ ] Distributed DKG (no trusted dealer)
-- [ ] Share rotation and threshold modification
-
-**Research & Ecosystem:**
-- [ ] Contact FROSTR team about integration/collaboration
-- [ ] Evaluate Igloo, Frost2x for interoperability
-- [ ] Document FROST + Signer Chaining architecture
-- [ ] Consider: could Amber hold a FROST share? (feature request)
-
-**Security Considerations:**
-- Share compromise: rotate immediately, old share becomes useless
-- Coordinator compromise: can't sign alone, only orchestrates
-- Communication security: all share coordination via NIP-04/NIP-44 encrypted
-- Offline shares: cold storage for disaster recovery, never online
-
-**Future Extensions:**
-- [ ] Hardware wallet support for share custody (Frostsnap integration?)
-- [ ] Mobile share holder app
-- [ ] Multi-organization federations (each org holds shares)
-- [ ] Time-locked shares (require delay for high-value operations)
+| `/login`, `/register` | Auth |
+| `/dashboard` | Admin stats |
+| `/keys` | Key management |
+| `/requests` | Pending approvals |
+| `/settings` | Account settings |
+
+## Key Features
+
+| Feature | Status |
+|---------|--------|
+| NIP-46 signing (all methods) | Done |
+| PostgreSQL + encryption at rest | Done |
+| User auth (password + MFA) | Done |
+| Admin DM commands | Done |
+| bunker:// + nostrconnect:// | Done |
+| Signer chaining (proxy keys) | Done |
+| Per-key relay connections | Done |
+| FROST threshold signing (API) | Done |
 
 ## Deployment
 
 ```bash
-# Deploy via Atlas
-cd ~/Atlas
-K8S_AUTH_KUBECONFIG=~/.kube/config ansible-playbook -i inventory/kube.yaml playbooks/kube.yml \
-  -e "manifest_names=['coldforge-signer']" \
-  -e "kube_state=present"
-
-# With NIP-42 auth key
-ansible-playbook ... \
-  -e "signer_relay_auth_key=<hex-private-key>"
-```
-
-## Testing
-
-### Unit Tests
-
-```bash
-# Run all unit tests
-go test ./...
-
-# Run with verbose output
-go test -v ./...
-
-# Run tests for a specific package
-go test ./internal/storage/...
-go test ./internal/metrics/...
-
-# Run PostgreSQL storage tests (requires database)
-TEST_DATABASE_URL="postgres://user:pass@localhost:5432/testdb?sslmode=disable" go test -v ./internal/storage/...
-
-# Run with coverage
-go test -cover ./...
-```
-
-### Integration Tests
-
-```bash
-# Port-forward to deployed signer
-oc -n coldforge-signer port-forward svc/coldforge-signer 7780:7777
-
-# Create test key
-curl -X POST http://localhost:7780/api/v1/keys \
-  -H "Content-Type: application/json" \
-  -d '{"name": "testkey"}'
-
-# Set permission
-curl -X POST http://localhost:7780/api/v1/keys/<id>/permissions \
-  -H "Content-Type: application/json" \
-  -d '{"user_pubkey": "<client-pubkey>", "methods": ["sign_event", "ping"]}'
-
-# Run NIP-46 integration tests (Node.js)
-cd test/integration
-npm install
-node test-nip46.mjs
-node test-go-signer.mjs
+cd ~/Atlas && K8S_AUTH_KUBECONFIG=~/.kube/config ansible-playbook \
+  -i inventory/kube.yaml playbooks/kube.yml \
+  -e "manifest_names=['coldforge-signer']" -e "kube_state=present"
 ```
 
 ## Related
 
-- Full roadmap: `~/claude/coldforge/services/identity/CLAUDE.md`
-- Integration tests: `test/integration/`
+- Service docs: `~/claude/coldforge/cloistr/services/identity/CLAUDE.md`
 - Atlas role: `~/Atlas/roles/kube/coldforge-signer/`
-- NIP-46 spec: https://github.com/nostr-protocol/nips/blob/master/46.md
-- NIP-42 spec: https://github.com/nostr-protocol/nips/blob/master/42.md
-
----
-
-**Last Updated:** 2026-03-06 (Phase 13.1-13.2 complete: FROST threshold signing core, storage, and API)
+- [NIP-46 spec](https://github.com/nostr-protocol/nips/blob/master/46.md)

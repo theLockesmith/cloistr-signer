@@ -832,6 +832,9 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 		return s.handleGetRelays()
 	case "sign_event":
 		return s.handleSignEvent(ctx, targetPubkey, privateKey, req.Params, perm)
+	case "batch_sign":
+		// Cloistr extension: sign multiple events in one request to reduce round-trips
+		return s.handleBatchSign(ctx, targetPubkey, privateKey, req.Params, perm)
 	case "nip04_encrypt":
 		return s.handleNIP04Encrypt(privateKey, req.Params)
 	case "nip04_decrypt":
@@ -884,7 +887,11 @@ func (s *Signer) handleConnect(ctx context.Context, targetPubkey, clientPubkey s
 		return "", fmt.Errorf("failed to create session: %w", err)
 	}
 
-	return "ack", nil
+	// Return pubkey in connect response to save a round-trip on rate-limited relays
+	// Cloistr extension: clients that understand this skip the get_public_key call
+	// Standard NIP-46 clients will receive this as the "ack" and still work
+	// (they typically just check for non-error response)
+	return fmt.Sprintf(`{"pubkey":"%s"}`, targetPubkey), nil
 }
 
 func (s *Signer) handleGetRelays() (string, error) {
@@ -1047,6 +1054,59 @@ func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey s
 
 	slog.Info("signed event", "kind", event.Kind, "id", event.ID[:16]+"...")
 	return string(data), nil
+}
+
+// handleBatchSign signs multiple events in one request to reduce round-trips on rate-limited relays
+// Cloistr extension: params is an array of JSON-encoded events
+// Returns a JSON array of signed events in the same order
+func (s *Signer) handleBatchSign(ctx context.Context, targetPubkey, privateKey string, params []string, perm *storage.Permission) (string, error) {
+	if len(params) < 1 {
+		return "", errors.New("missing events parameter")
+	}
+
+	signedEvents := make([]json.RawMessage, 0, len(params))
+
+	for i, param := range params {
+		var event nostr.Event
+		if err := json.Unmarshal([]byte(param), &event); err != nil {
+			return "", fmt.Errorf("invalid event at index %d: %w", i, err)
+		}
+
+		// Check if kind is allowed
+		if len(perm.AllowedKinds) > 0 {
+			allowed := false
+			for _, k := range perm.AllowedKinds {
+				if k == event.Kind {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return "", fmt.Errorf("kind %d not allowed at index %d", event.Kind, i)
+			}
+		}
+
+		// Set pubkey and sign
+		event.PubKey = targetPubkey
+		if err := event.Sign(privateKey); err != nil {
+			return "", fmt.Errorf("signing failed at index %d: %w", i, err)
+		}
+
+		data, err := json.Marshal(event)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal signed event at index %d: %w", i, err)
+		}
+		signedEvents = append(signedEvents, data)
+	}
+
+	// Return array of signed events
+	result, err := json.Marshal(signedEvents)
+	if err != nil {
+		return "", err
+	}
+
+	slog.Info("batch signed events", "count", len(signedEvents))
+	return string(result), nil
 }
 
 func (s *Signer) handleNIP04Encrypt(privateKey string, params []string) (string, error) {
