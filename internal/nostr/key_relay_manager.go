@@ -57,26 +57,24 @@ func (m *KeyRelayManager) GetClient(ctx context.Context, pubkey, privateKey stri
 		return client
 	}
 
-	// Merge key-specific relays with global relays
-	// Global relays (like relay.cloistr.xyz) are ALWAYS included as fallback
-	// This ensures messages get through even if user-specified relays rate limit
-	urlSet := make(map[string]bool)
+	// Use key-specific relays if configured, otherwise fall back to global relays
+	// This respects user intent - if they configure specific relays, use only those
 	var urls []string
 
-	// Add key-specific relays first (user preference)
-	for _, url := range relayURLs {
-		if !urlSet[url] {
-			urlSet[url] = true
-			urls = append(urls, url)
+	if len(relayURLs) > 0 {
+		// Key has specific relays configured - use only those
+		urlSet := make(map[string]bool)
+		for _, url := range relayURLs {
+			if !urlSet[url] {
+				urlSet[url] = true
+				urls = append(urls, url)
+			}
 		}
-	}
-
-	// Always add global relays as fallback (guaranteed delivery)
-	for _, url := range m.globalRelays {
-		if !urlSet[url] {
-			urlSet[url] = true
-			urls = append(urls, url)
-		}
+		slog.Debug("using key-specific relays", "pubkey", pubkey[:16]+"...", "relays", urls)
+	} else {
+		// No key-specific relays - use global relays as default
+		urls = m.globalRelays
+		slog.Debug("using global relays (no key-specific config)", "pubkey", pubkey[:16]+"...", "relays", urls)
 	}
 
 	client = &KeyRelayClient{
