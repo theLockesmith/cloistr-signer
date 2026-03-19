@@ -121,7 +121,7 @@ func main() {
 	apiHandler := api.NewHandler(cfg, nip46Signer, store, encryptor)
 
 	// Initialize Web UI
-	webHandler, err := web.New(cfg, store, nip46Signer, nip46Signer)
+	webHandler, err := web.New(cfg, store, nip46Signer, nip46Signer, discoveryClient)
 	if err != nil {
 		slog.Error("failed to initialize web handler", "error", err)
 		os.Exit(1)

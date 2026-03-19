@@ -235,3 +235,67 @@ func TestClient_Enabled(t *testing.T) {
 		t.Error("configured client should be enabled")
 	}
 }
+
+func TestClient_GetRelayMetadata_NoNIP46(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := relayMetadataResponse{
+			Relay: &RelayMetadata{
+				URL:           "wss://relay.damus.io",
+				Name:          "damus.io",
+				SupportedNIPs: []int{1, 2, 4, 9, 11, 22, 28, 40, 70, 77}, // No NIP-46
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{URL: server.URL})
+	metadata := client.GetRelayMetadata(context.Background(), "wss://relay.damus.io")
+
+	if metadata == nil {
+		t.Fatal("expected metadata, got nil")
+	}
+
+	if metadata.NIP46Compatible() {
+		t.Error("relay without NIP-46 should NOT be compatible")
+	}
+}
+
+func TestClient_GetRelayMetadata_HasNIP46(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := relayMetadataResponse{
+			Relay: &RelayMetadata{
+				URL:           "wss://relay.cloistr.xyz",
+				Name:          "Cloistr Relay",
+				SupportedNIPs: []int{1, 46},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{URL: server.URL})
+	metadata := client.GetRelayMetadata(context.Background(), "wss://relay.cloistr.xyz")
+
+	if metadata == nil {
+		t.Fatal("expected metadata, got nil")
+	}
+
+	if !metadata.NIP46Compatible() {
+		t.Error("relay with NIP-46 should be compatible")
+	}
+}
+
+func TestClient_GetRelayMetadata_NilClient(t *testing.T) {
+	var client *Client
+	if client.GetRelayMetadata(context.Background(), "wss://relay.example.com") != nil {
+		t.Error("nil client should return nil")
+	}
+}
+
+func TestRelayMetadata_NIP46Compatible_Nil(t *testing.T) {
+	var m *RelayMetadata
+	if m.NIP46Compatible() {
+		t.Error("nil metadata should not be compatible")
+	}
+}

@@ -11,6 +11,7 @@ import (
 
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/auth"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/discovery"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
@@ -65,7 +66,7 @@ func testHandler(t *testing.T) (*Handler, *storage.MemoryStorage, *mockRequestHa
 	}
 	reqHandler := &mockRequestHandler{}
 
-	h, err := New(cfg, store, status, reqHandler)
+	h, err := New(cfg, store, status, reqHandler, nil)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -101,7 +102,7 @@ func TestNew(t *testing.T) {
 	status := &mockStatusProvider{}
 	reqHandler := &mockRequestHandler{}
 
-	h, err := New(cfg, store, status, reqHandler)
+	h, err := New(cfg, store, status, reqHandler, nil)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -1065,3 +1066,160 @@ func TestHandleAPINIP07Login_WithLinkedPubkey(t *testing.T) {
 // Note: handleApps test is skipped because apps.html template is not included
 // in the pageFiles array in New(). This is a bug in the production code that
 // should be fixed separately - the template exists but isn't loaded.
+
+// mockDiscoveryClient implements DiscoveryClient for testing
+type mockDiscoveryClient struct {
+	metadata map[string]*discovery.RelayMetadata
+	enabled  bool
+}
+
+func (m *mockDiscoveryClient) GetRelayMetadata(ctx context.Context, relayURL string) *discovery.RelayMetadata {
+	if m.metadata == nil {
+		return nil
+	}
+	return m.metadata[relayURL]
+}
+
+func (m *mockDiscoveryClient) Enabled() bool {
+	return m.enabled
+}
+
+func TestHandleAPIRelayCheck_NIP46NotSupported(t *testing.T) {
+	cfg := &config.Config{
+		Auth: config.AuthConfig{JWTSecret: "test"},
+	}
+	store := storage.NewMemoryStorage()
+	status := &mockStatusProvider{}
+	reqHandler := &mockRequestHandler{}
+
+	// Mock discovery that returns damus.io without NIP-46
+	disc := &mockDiscoveryClient{
+		enabled: true,
+		metadata: map[string]*discovery.RelayMetadata{
+			"wss://relay.damus.io": {
+				URL:           "wss://relay.damus.io",
+				Name:          "damus.io",
+				SupportedNIPs: []int{1, 2, 4, 9, 11, 22, 28, 40, 70, 77}, // No NIP-46
+			},
+		},
+	}
+
+	h, err := New(cfg, store, status, reqHandler, disc)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body := `{"url": "wss://relay.damus.io"}`
+	req := httptest.NewRequest(http.MethodPost, "/web/api/relay/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.handleAPIRelayCheck(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	var resp RelayCheckResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if !resp.Warning {
+		t.Error("expected warning for relay without NIP-46")
+	}
+
+	expectedWarning := "This relay does not support NIP-46 remote signing"
+	if resp.WarningMessage != expectedWarning {
+		t.Errorf("expected warning %q, got %q", expectedWarning, resp.WarningMessage)
+	}
+}
+
+func TestHandleAPIRelayCheck_NIP46Supported(t *testing.T) {
+	cfg := &config.Config{
+		Auth: config.AuthConfig{JWTSecret: "test"},
+	}
+	store := storage.NewMemoryStorage()
+	status := &mockStatusProvider{}
+	reqHandler := &mockRequestHandler{}
+
+	// Mock discovery that returns a relay WITH NIP-46
+	disc := &mockDiscoveryClient{
+		enabled: true,
+		metadata: map[string]*discovery.RelayMetadata{
+			"wss://good.relay.com": {
+				URL:           "wss://good.relay.com",
+				Name:          "Good Relay",
+				SupportedNIPs: []int{1, 46},
+			},
+		},
+	}
+
+	h, err := New(cfg, store, status, reqHandler, disc)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body := `{"url": "wss://good.relay.com"}`
+	req := httptest.NewRequest(http.MethodPost, "/web/api/relay/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.handleAPIRelayCheck(rr, req)
+
+	var resp RelayCheckResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if resp.Warning {
+		t.Errorf("expected no warning for NIP-46 compatible relay, got: %s", resp.WarningMessage)
+	}
+}
+
+func TestHandleAPIRelayCheck_CloistrRelay(t *testing.T) {
+	cfg := &config.Config{
+		Auth: config.AuthConfig{JWTSecret: "test"},
+	}
+	store := storage.NewMemoryStorage()
+	status := &mockStatusProvider{}
+	reqHandler := &mockRequestHandler{}
+
+	// Mock discovery with cloistr relay data
+	disc := &mockDiscoveryClient{
+		enabled: true,
+		metadata: map[string]*discovery.RelayMetadata{
+			"wss://relay.cloistr.xyz": {
+				URL:           "wss://relay.cloistr.xyz",
+				Name:          "Cloistr Relay",
+				SupportedNIPs: []int{1, 46},
+			},
+		},
+	}
+
+	h, err := New(cfg, store, status, reqHandler, disc)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	body := `{"url": "wss://relay.cloistr.xyz"}`
+	req := httptest.NewRequest(http.MethodPost, "/web/api/relay/check", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.handleAPIRelayCheck(rr, req)
+
+	var resp RelayCheckResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Cloistr relay has NIP-46 - no warning needed
+	if resp.Warning {
+		t.Errorf("expected no warning for NIP-46 compatible relay, got: %s", resp.WarningMessage)
+	}
+
+	if resp.Name != "Cloistr Relay" {
+		t.Errorf("expected name 'Cloistr Relay', got %q", resp.Name)
+	}
+}

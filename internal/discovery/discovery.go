@@ -45,8 +45,8 @@ type Client struct {
 	maxRelays  int
 
 	// Cache for relay lookups
-	cache   map[string]*cacheEntry
-	cacheMu sync.RWMutex
+	cache    map[string]*cacheEntry
+	cacheMu  sync.RWMutex
 	cacheTTL time.Duration
 }
 
@@ -264,4 +264,66 @@ func truncatePubkeyForLog(pubkey string) string {
 		return pubkey[:16] + "..."
 	}
 	return pubkey
+}
+
+// RelayMetadata represents relay information needed for NIP-46 compatibility check
+type RelayMetadata struct {
+	URL           string `json:"url"`
+	Name          string `json:"name"`
+	SupportedNIPs []int  `json:"supported_nips"`
+}
+
+// relayMetadataResponse wraps the discovery API response
+type relayMetadataResponse struct {
+	Relay *RelayMetadata `json:"relay,omitempty"`
+	Error string         `json:"error,omitempty"`
+}
+
+// GetRelayMetadata queries the discovery service for relay NIP support
+// Returns nil if discovery fails, is disabled, or relay not found
+func (c *Client) GetRelayMetadata(ctx context.Context, relayURL string) *RelayMetadata {
+	if c == nil || relayURL == "" {
+		return nil
+	}
+
+	// Build request URL
+	reqURL := fmt.Sprintf("%s/api/v1/relay/?url=%s", c.baseURL, url.QueryEscape(relayURL))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		slog.Debug("relay metadata query failed", "url", relayURL, "error", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	var metaResp relayMetadataResponse
+	if err := json.NewDecoder(resp.Body).Decode(&metaResp); err != nil {
+		return nil
+	}
+
+	return metaResp.Relay
+}
+
+// NIP46Compatible returns true if the relay advertises NIP-46 support
+func (m *RelayMetadata) NIP46Compatible() bool {
+	if m == nil {
+		return false
+	}
+	for _, n := range m.SupportedNIPs {
+		if n == 46 {
+			return true
+		}
+	}
+	return false
 }

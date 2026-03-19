@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/auth"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/discovery"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
@@ -217,10 +219,17 @@ type Handler struct {
 	pageTemplates map[string]*template.Template
 	status        StatusProvider
 	reqHandler    RequestHandler
+	discovery     DiscoveryClient
+}
+
+// DiscoveryClient provides relay metadata lookup
+type DiscoveryClient interface {
+	GetRelayMetadata(ctx context.Context, relayURL string) *discovery.RelayMetadata
+	Enabled() bool
 }
 
 // New creates a new web handler
-func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHandler RequestHandler) (*Handler, error) {
+func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHandler RequestHandler, disc DiscoveryClient) (*Handler, error) {
 	// Create base template with functions
 	funcs := template.FuncMap{
 		"formatTime": func(t interface{}) string {
@@ -339,6 +348,7 @@ func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHa
 		pageTemplates: templates,
 		status:        status,
 		reqHandler:    reqHandler,
+		discovery:     disc,
 	}, nil
 }
 
@@ -1405,25 +1415,40 @@ func (h *Handler) handleAPIRelayCheck(w http.ResponseWriter, r *http.Request) {
 		Valid: true,
 	}
 
-	// Check if it's our relay (no warning needed)
-	if strings.Contains(relayURL, "relay.cloistr.xyz") {
-		resp.Name = "Cloistr Relay"
-		resp.Description = "Optimized for NIP-46 signing"
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-		return
+	// Try discovery service first for relay metadata with NIP support info
+	if h.discovery != nil && h.discovery.Enabled() {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+
+		if metadata := h.discovery.GetRelayMetadata(ctx, relayURL); metadata != nil {
+			resp.Name = metadata.Name
+
+			// Check NIP-46 support
+			if !metadata.NIP46Compatible() {
+				resp.Warning = true
+				resp.WarningMessage = "This relay does not support NIP-46 remote signing"
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+				return
+			}
+
+			// Relay supports NIP-46 - no warning needed
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
 	}
 
-	// Try to fetch NIP-11 info from the relay
+	// Fall back to NIP-11 fetch if discovery unavailable or relay not indexed
 	nip11 := h.fetchNIP11(relayURL)
 	if nip11 != nil {
 		resp.Name = nip11.Name
 		resp.Description = nip11.Description
 	}
 
-	// External relay - show warning
+	// External relay without discovery data - show generic warning
 	resp.Warning = true
-	resp.WarningMessage = "External relays may rate limit NIP-46 signing traffic"
+	resp.WarningMessage = "This relay is not in our directory. NIP-46 compatibility unknown."
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
