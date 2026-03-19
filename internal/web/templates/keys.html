@@ -826,17 +826,21 @@ document.addEventListener('DOMContentLoaded', function() {
                     const data = await resp.json();
                     if (data.warning) {
                         const name = data.name || url;
-                        warnings.push(name);
+                        const msg = data.warningMessage || 'May have NIP-46 compatibility issues';
+                        warnings.push({name, message: msg});
                     }
                 }
             } catch (e) {
                 // If API fails, assume external relay
-                warnings.push(url);
+                warnings.push({name: url, message: 'Could not verify relay'});
             }
         }
 
         if (warnings.length > 0) {
-            relayWarning.innerHTML = '<strong>Rate Limit Warning:</strong> External relays may rate limit NIP-46 signing traffic';
+            const warningHtml = warnings.map(w =>
+                `<div><strong>${w.name}:</strong> ${w.message}</div>`
+            ).join('');
+            relayWarning.innerHTML = '<strong>Relay Warnings:</strong>' + warningHtml;
             relayWarning.style.display = 'block';
         } else {
             relayWarning.style.display = 'none';
