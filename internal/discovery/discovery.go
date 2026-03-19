@@ -327,3 +327,46 @@ func (m *RelayMetadata) NIP46Compatible() bool {
 	}
 	return false
 }
+
+// NIP46Score represents the suitability score for NIP-46 remote signing
+type NIP46Score struct {
+	URL            string   `json:"url"`
+	Score          int      `json:"score"`          // 0-100
+	Recommendation string   `json:"recommendation"` // recommended, acceptable, warning, avoid, unknown
+	Reasons        []string `json:"reasons"`        // Explanation of score factors
+}
+
+// GetNIP46Score queries the discovery service for a relay's NIP-46 suitability score
+// Returns nil if discovery fails, is disabled, or relay not found
+func (c *Client) GetNIP46Score(ctx context.Context, relayURL string) *NIP46Score {
+	if c == nil || relayURL == "" {
+		return nil
+	}
+
+	// Build request URL
+	reqURL := fmt.Sprintf("%s/api/v1/relay/nip46-score?url=%s", c.baseURL, url.QueryEscape(relayURL))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "cloistr-signer/1.0")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		slog.Debug("NIP-46 score query failed", "url", relayURL, "error", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	// Even 404 returns a valid score response with recommendation "unknown"
+	var scoreResp NIP46Score
+	if err := json.NewDecoder(resp.Body).Decode(&scoreResp); err != nil {
+		slog.Debug("failed to decode NIP-46 score response", "url", relayURL, "error", err)
+		return nil
+	}
+
+	return &scoreResp
+}

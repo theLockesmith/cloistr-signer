@@ -299,3 +299,81 @@ func TestRelayMetadata_NIP46Compatible_Nil(t *testing.T) {
 		t.Error("nil metadata should not be compatible")
 	}
 }
+
+func TestClient_GetNIP46Score_Recommended(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/relay/nip46-score" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+
+		resp := NIP46Score{
+			URL:            "wss://relay.cloistr.xyz",
+			Score:          100,
+			Recommendation: "recommended",
+			Reasons:        []string{"relay advertises NIP-46 support", "relay is online"},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{URL: server.URL})
+	score := client.GetNIP46Score(context.Background(), "wss://relay.cloistr.xyz")
+
+	if score == nil {
+		t.Fatal("expected score, got nil")
+	}
+
+	if score.Score != 100 {
+		t.Errorf("expected score 100, got %d", score.Score)
+	}
+
+	if score.Recommendation != "recommended" {
+		t.Errorf("expected recommendation 'recommended', got %s", score.Recommendation)
+	}
+}
+
+func TestClient_GetNIP46Score_Avoid(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := NIP46Score{
+			URL:            "wss://relay.damus.io",
+			Score:          0,
+			Recommendation: "avoid",
+			Reasons:        []string{"relay does not advertise NIP-46 support"},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(Config{URL: server.URL})
+	score := client.GetNIP46Score(context.Background(), "wss://relay.damus.io")
+
+	if score == nil {
+		t.Fatal("expected score, got nil")
+	}
+
+	if score.Score != 0 {
+		t.Errorf("expected score 0, got %d", score.Score)
+	}
+
+	if score.Recommendation != "avoid" {
+		t.Errorf("expected recommendation 'avoid', got %s", score.Recommendation)
+	}
+
+	if len(score.Reasons) == 0 {
+		t.Error("expected at least one reason")
+	}
+}
+
+func TestClient_GetNIP46Score_NilClient(t *testing.T) {
+	var client *Client
+	if client.GetNIP46Score(context.Background(), "wss://relay.example.com") != nil {
+		t.Error("nil client should return nil")
+	}
+}
+
+func TestClient_GetNIP46Score_EmptyURL(t *testing.T) {
+	client := NewClient(Config{URL: "https://discovery.example.com"})
+	if client.GetNIP46Score(context.Background(), "") != nil {
+		t.Error("empty URL should return nil")
+	}
+}

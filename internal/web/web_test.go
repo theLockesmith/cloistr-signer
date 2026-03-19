@@ -1070,6 +1070,7 @@ func TestHandleAPINIP07Login_WithLinkedPubkey(t *testing.T) {
 // mockDiscoveryClient implements DiscoveryClient for testing
 type mockDiscoveryClient struct {
 	metadata map[string]*discovery.RelayMetadata
+	scores   map[string]*discovery.NIP46Score
 	enabled  bool
 }
 
@@ -1078,6 +1079,13 @@ func (m *mockDiscoveryClient) GetRelayMetadata(ctx context.Context, relayURL str
 		return nil
 	}
 	return m.metadata[relayURL]
+}
+
+func (m *mockDiscoveryClient) GetNIP46Score(ctx context.Context, relayURL string) *discovery.NIP46Score {
+	if m.scores == nil {
+		return nil
+	}
+	return m.scores[relayURL]
 }
 
 func (m *mockDiscoveryClient) Enabled() bool {
@@ -1100,6 +1108,14 @@ func TestHandleAPIRelayCheck_NIP46NotSupported(t *testing.T) {
 				URL:           "wss://relay.damus.io",
 				Name:          "damus.io",
 				SupportedNIPs: []int{1, 2, 4, 9, 11, 22, 28, 40, 70, 77}, // No NIP-46
+			},
+		},
+		scores: map[string]*discovery.NIP46Score{
+			"wss://relay.damus.io": {
+				URL:            "wss://relay.damus.io",
+				Score:          0,
+				Recommendation: "avoid",
+				Reasons:        []string{"relay does not advertise NIP-46 support"},
 			},
 		},
 	}
@@ -1129,7 +1145,8 @@ func TestHandleAPIRelayCheck_NIP46NotSupported(t *testing.T) {
 		t.Error("expected warning for relay without NIP-46")
 	}
 
-	expectedWarning := "This relay does not support NIP-46 remote signing"
+	// Warning message comes from first reason in NIP46Score
+	expectedWarning := "relay does not advertise NIP-46 support"
 	if resp.WarningMessage != expectedWarning {
 		t.Errorf("expected warning %q, got %q", expectedWarning, resp.WarningMessage)
 	}
@@ -1151,6 +1168,14 @@ func TestHandleAPIRelayCheck_NIP46Supported(t *testing.T) {
 				URL:           "wss://good.relay.com",
 				Name:          "Good Relay",
 				SupportedNIPs: []int{1, 46},
+			},
+		},
+		scores: map[string]*discovery.NIP46Score{
+			"wss://good.relay.com": {
+				URL:            "wss://good.relay.com",
+				Score:          100,
+				Recommendation: "recommended",
+				Reasons:        []string{"relay advertises NIP-46 support"},
 			},
 		},
 	}
@@ -1193,6 +1218,14 @@ func TestHandleAPIRelayCheck_CloistrRelay(t *testing.T) {
 				URL:           "wss://relay.cloistr.xyz",
 				Name:          "Cloistr Relay",
 				SupportedNIPs: []int{1, 46},
+			},
+		},
+		scores: map[string]*discovery.NIP46Score{
+			"wss://relay.cloistr.xyz": {
+				URL:            "wss://relay.cloistr.xyz",
+				Score:          100,
+				Recommendation: "recommended",
+				Reasons:        []string{"relay advertises NIP-46 support"},
 			},
 		},
 	}

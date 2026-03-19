@@ -225,6 +225,7 @@ type Handler struct {
 // DiscoveryClient provides relay metadata lookup
 type DiscoveryClient interface {
 	GetRelayMetadata(ctx context.Context, relayURL string) *discovery.RelayMetadata
+	GetNIP46Score(ctx context.Context, relayURL string) *discovery.NIP46Score
 	Enabled() bool
 }
 
@@ -1415,29 +1416,49 @@ func (h *Handler) handleAPIRelayCheck(w http.ResponseWriter, r *http.Request) {
 		Valid: true,
 	}
 
-	// Try discovery service first for relay metadata with NIP support info
+	// Try discovery service first for relay NIP-46 suitability scoring
 	if h.discovery != nil && h.discovery.Enabled() {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 
-		if metadata := h.discovery.GetRelayMetadata(ctx, relayURL); metadata != nil {
-			resp.Name = metadata.Name
-
-			// Check NIP-46 support
-			if !metadata.NIP46Compatible() {
+		if score := h.discovery.GetNIP46Score(ctx, relayURL); score != nil {
+			// Set warning based on recommendation
+			switch score.Recommendation {
+			case "recommended":
+				// No warning needed
+			case "acceptable":
+				// No warning, but could note it's not ideal
+			case "warning":
 				resp.Warning = true
-				resp.WarningMessage = "This relay does not support NIP-46 remote signing"
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(resp)
-				return
+				if len(score.Reasons) > 0 {
+					resp.WarningMessage = score.Reasons[0]
+				} else {
+					resp.WarningMessage = "This relay may have NIP-46 compatibility issues"
+				}
+			case "avoid":
+				resp.Warning = true
+				if len(score.Reasons) > 0 {
+					resp.WarningMessage = score.Reasons[0]
+				} else {
+					resp.WarningMessage = "This relay does not support NIP-46 remote signing"
+				}
+			case "unknown":
+				// Relay not in discovery - fall through to NIP-11 check
+				goto fallbackNIP11
 			}
 
-			// Relay supports NIP-46 - no warning needed
+			// Also get relay name from metadata if available
+			if meta := h.discovery.GetRelayMetadata(ctx, relayURL); meta != nil {
+				resp.Name = meta.Name
+			}
+
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
 	}
+
+fallbackNIP11:
 
 	// Fall back to NIP-11 fetch if discovery unavailable or relay not indexed
 	nip11 := h.fetchNIP11(relayURL)
