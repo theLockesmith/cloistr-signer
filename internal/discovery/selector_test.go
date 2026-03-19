@@ -19,14 +19,21 @@ func TestSelector_SelectRelays_ManualMode(t *testing.T) {
 		Mode:      RelayModeManual,
 	})
 
-	// Should include key relays and fallback
-	if len(relays) != 3 {
-		t.Errorf("expected 3 relays, got %d: %v", len(relays), relays)
+	// Should include ONLY key relays (strict per-key behavior)
+	if len(relays) != 2 {
+		t.Errorf("expected 2 relays (key relays only), got %d: %v", len(relays), relays)
 	}
 
 	// Key relays should come first
 	if relays[0] != "wss://key1.example.com" {
 		t.Errorf("expected key1 first, got %s", relays[0])
+	}
+
+	// Fallback should NOT be included when key relays are configured
+	for _, r := range relays {
+		if r == "wss://fallback.example.com" {
+			t.Error("fallback should not be included when key relays are configured")
+		}
 	}
 }
 
@@ -75,7 +82,8 @@ func TestSelector_SelectRelays_DiscoveryMode(t *testing.T) {
 	}
 }
 
-func TestSelector_SelectRelays_AutoMode(t *testing.T) {
+func TestSelector_SelectRelays_AutoMode_WithKeyRelays(t *testing.T) {
+	// When key relays are configured, auto mode uses ONLY those (strict per-key)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := RelayResponse{
 			Relays: []RelayInfo{
@@ -99,15 +107,47 @@ func TestSelector_SelectRelays_AutoMode(t *testing.T) {
 		DiscoveryHint: "testpubkey",
 	})
 
-	// Auto mode should include ALL sources
-	hasKey := false
+	// With key relays configured, should ONLY use those (strict per-key behavior)
+	if len(relays) != 1 {
+		t.Errorf("expected 1 relay (key relay only), got %d: %v", len(relays), relays)
+	}
+
+	if relays[0] != "wss://key.example.com" {
+		t.Errorf("expected key relay, got %s", relays[0])
+	}
+}
+
+func TestSelector_SelectRelays_AutoMode_NoKeyRelays(t *testing.T) {
+	// When NO key relays are configured, auto mode uses discovery + fallback
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := RelayResponse{
+			Relays: []RelayInfo{
+				{URL: "wss://discovered.example.com", Write: true},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	discovery := NewClient(Config{URL: server.URL})
+	selector := NewSelector(SelectorConfig{
+		Discovery:      discovery,
+		FallbackRelays: []string{"wss://fallback.example.com"},
+		MaxRelays:      5,
+	})
+
+	relays := selector.SelectRelays(context.Background(), SelectionInput{
+		KeyRelays:     nil, // No key relays
+		Mode:          RelayModeAuto,
+		DiscoveryHint: "testpubkey",
+	})
+
+	// Without key relays, should include discovered and fallback
 	hasDiscovered := false
 	hasFallback := false
 
 	for _, r := range relays {
 		switch r {
-		case "wss://key.example.com":
-			hasKey = true
 		case "wss://discovered.example.com":
 			hasDiscovered = true
 		case "wss://fallback.example.com":
@@ -115,14 +155,11 @@ func TestSelector_SelectRelays_AutoMode(t *testing.T) {
 		}
 	}
 
-	if !hasKey {
-		t.Error("auto mode should include key relays")
-	}
 	if !hasDiscovered {
-		t.Error("auto mode should include discovered relays")
+		t.Error("auto mode without key relays should include discovered relays")
 	}
 	if !hasFallback {
-		t.Error("auto mode should include fallback relays")
+		t.Error("auto mode without key relays should include fallback relays")
 	}
 }
 

@@ -74,10 +74,17 @@ func (s *Selector) SelectRelays(ctx context.Context, input SelectionInput) []str
 		mode = RelayModeAuto
 	}
 
-	// Step 1: Add key-specific relays (if mode allows)
+	// Step 1: If key has explicit relays configured, use ONLY those (respects user intent)
 	if mode != RelayModeDiscovery && len(input.KeyRelays) > 0 {
 		relays = append(relays, input.KeyRelays...)
-		slog.Debug("added key relays", "count", len(input.KeyRelays))
+		slog.Debug("using key-specific relays only", "count", len(input.KeyRelays))
+		// Skip discovery and fallback - user explicitly configured relays
+		result := deduplicateRelays(relays, s.maxRelays)
+		slog.Info("selected relays (key-specific)",
+			"mode", mode,
+			"total", len(result),
+		)
+		return result
 	}
 
 	// Step 2: Query discovery (if mode allows and discovery is enabled)
@@ -91,8 +98,8 @@ func (s *Selector) SelectRelays(ctx context.Context, input SelectionInput) []str
 		}
 	}
 
-	// Step 3: Always add fallback relays (if not already at max)
-	// Fallbacks ensure the signer is always reachable
+	// Step 3: Add fallback relays only if no key-specific relays were set
+	// (we already returned early if key relays were configured)
 	relays = append(relays, s.fallbackRelays...)
 	slog.Debug("added fallback relays", "count", len(s.fallbackRelays))
 
