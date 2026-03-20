@@ -275,3 +275,92 @@ func TestRequireApprovalValues(t *testing.T) {
 	}
 	os.Unsetenv("REQUIRE_APPROVAL")
 }
+
+func TestRelayPublicMappings(t *testing.T) {
+	os.Setenv("CONFIG_PATH", "/nonexistent/config.yaml")
+	defer os.Unsetenv("CONFIG_PATH")
+
+	// Test parsing RELAY_PUBLIC_MAPPINGS
+	os.Setenv("RELAY_PUBLIC_MAPPINGS", "ws://internal.svc=wss://public.example.com,ws://other.svc=wss://other.example.com")
+	defer os.Unsetenv("RELAY_PUBLIC_MAPPINGS")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if len(cfg.RelayPublicMappings) != 2 {
+		t.Errorf("RelayPublicMappings length = %d, want 2", len(cfg.RelayPublicMappings))
+	}
+
+	if cfg.RelayPublicMappings["ws://internal.svc"] != "wss://public.example.com" {
+		t.Errorf("RelayPublicMappings[ws://internal.svc] = %q, want %q",
+			cfg.RelayPublicMappings["ws://internal.svc"], "wss://public.example.com")
+	}
+
+	if cfg.RelayPublicMappings["ws://other.svc"] != "wss://other.example.com" {
+		t.Errorf("RelayPublicMappings[ws://other.svc] = %q, want %q",
+			cfg.RelayPublicMappings["ws://other.svc"], "wss://other.example.com")
+	}
+}
+
+func TestMapRelayToPublic(t *testing.T) {
+	cfg := &Config{
+		RelayPublicMappings: map[string]string{
+			"ws://internal.svc.cluster.local":  "wss://public.example.com",
+			"ws://internal2.svc.cluster.local": "wss://public2.example.com",
+		},
+	}
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"ws://internal.svc.cluster.local", "wss://public.example.com"},
+		{"ws://internal2.svc.cluster.local", "wss://public2.example.com"},
+		{"wss://already.public.com", "wss://already.public.com"}, // No mapping, pass through
+	}
+
+	for _, tt := range tests {
+		result := cfg.MapRelayToPublic(tt.input)
+		if result != tt.want {
+			t.Errorf("MapRelayToPublic(%q) = %q, want %q", tt.input, result, tt.want)
+		}
+	}
+}
+
+func TestMapRelaysToPublic(t *testing.T) {
+	cfg := &Config{
+		RelayPublicMappings: map[string]string{
+			"ws://internal.svc.cluster.local": "wss://public.example.com",
+		},
+	}
+
+	input := []string{"ws://internal.svc.cluster.local", "wss://already.public.com"}
+	result := cfg.MapRelaysToPublic(input)
+
+	if len(result) != 2 {
+		t.Fatalf("MapRelaysToPublic() length = %d, want 2", len(result))
+	}
+
+	if result[0] != "wss://public.example.com" {
+		t.Errorf("result[0] = %q, want %q", result[0], "wss://public.example.com")
+	}
+
+	if result[1] != "wss://already.public.com" {
+		t.Errorf("result[1] = %q, want %q", result[1], "wss://already.public.com")
+	}
+}
+
+func TestMapRelaysToPublic_NilMappings(t *testing.T) {
+	cfg := &Config{
+		RelayPublicMappings: nil,
+	}
+
+	input := []string{"wss://relay.example.com"}
+	result := cfg.MapRelaysToPublic(input)
+
+	if len(result) != 1 || result[0] != "wss://relay.example.com" {
+		t.Errorf("MapRelaysToPublic with nil mappings should pass through, got %v", result)
+	}
+}

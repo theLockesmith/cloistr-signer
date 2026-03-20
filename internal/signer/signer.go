@@ -324,7 +324,10 @@ func (s *Signer) AuditLogger() audit.Logger {
 // GetRelaysForBunker returns the relays to include in a bunker:// URI for a key.
 // Uses the discovery-aware relay selector if available, otherwise falls back to
 // key-specific relays or global config.
+// Internal relay URLs are mapped to public URLs for bunker URIs.
 func (s *Signer) GetRelaysForBunker(ctx context.Context, key *storage.Key) []string {
+	var relays []string
+
 	// If we have a relay selector, use it
 	if s.relaySelector != nil {
 		input := discovery.SelectionInput{
@@ -332,14 +335,19 @@ func (s *Signer) GetRelaysForBunker(ctx context.Context, key *storage.Key) []str
 			Mode:          discovery.RelayMode(key.RelayMode),
 			DiscoveryHint: key.Pubkey, // Use the signing key's pubkey for discovery
 		}
-		return s.relaySelector.SelectRelays(ctx, input)
+		relays = s.relaySelector.SelectRelays(ctx, input)
+	} else {
+		// Fallback: use key relays if set, otherwise global config
+		if len(key.Relays) > 0 {
+			relays = key.Relays
+		} else {
+			relays = s.config.Relays
+		}
 	}
 
-	// Fallback: use key relays if set, otherwise global config
-	if len(key.Relays) > 0 {
-		return key.Relays
-	}
-	return s.config.Relays
+	// Map internal URLs to public URLs for bunker URIs
+	// Key-specific and discovery relays pass through unchanged (not in mapping)
+	return s.config.MapRelaysToPublic(relays)
 }
 
 // RegisterKey registers a key for signing (runtime, not persisted)

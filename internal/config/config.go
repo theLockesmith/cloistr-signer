@@ -11,17 +11,18 @@ import (
 
 // Config holds all configuration for the signer service
 type Config struct {
-	Server           ServerConfig    `yaml:"server"`
-	Relays           []string        `yaml:"relays"`
-	RelayAuthKey     string          `yaml:"relay_auth_key"`     // Private key for NIP-42 relay auth (hex)
-	MinPowDifficulty int             `yaml:"min_pow_difficulty"` // Minimum POW difficulty for publishing (0 = disabled)
-	Storage          StorageConfig   `yaml:"storage"`
-	Auth             AuthConfig      `yaml:"auth"`
-	Vault            VaultConfig     `yaml:"vault"`
-	Audit            AuditConfig     `yaml:"audit"`
-	Service          ServiceConfig   `yaml:"service"`
-	Proxy            ProxyConfig     `yaml:"proxy"`
-	Discovery        DiscoveryConfig `yaml:"discovery"`
+	Server             ServerConfig      `yaml:"server"`
+	Relays             []string          `yaml:"relays"`
+	RelayPublicMappings map[string]string `yaml:"relay_public_mappings"` // Internal URL -> Public URL for bunker URIs
+	RelayAuthKey       string            `yaml:"relay_auth_key"`         // Private key for NIP-42 relay auth (hex)
+	MinPowDifficulty   int               `yaml:"min_pow_difficulty"`     // Minimum POW difficulty for publishing (0 = disabled)
+	Storage            StorageConfig     `yaml:"storage"`
+	Auth               AuthConfig        `yaml:"auth"`
+	Vault              VaultConfig       `yaml:"vault"`
+	Audit              AuditConfig       `yaml:"audit"`
+	Service            ServiceConfig     `yaml:"service"`
+	Proxy              ProxyConfig       `yaml:"proxy"`
+	Discovery          DiscoveryConfig   `yaml:"discovery"`
 }
 
 // DiscoveryConfig holds optional discovery service configuration
@@ -157,6 +158,19 @@ func Load() (*Config, error) {
 
 	if relays := os.Getenv("RELAYS"); relays != "" {
 		cfg.Relays = strings.Split(relays, ",")
+	}
+
+	// Parse relay public mappings: internal=public,internal2=public2
+	if mappings := os.Getenv("RELAY_PUBLIC_MAPPINGS"); mappings != "" {
+		cfg.RelayPublicMappings = make(map[string]string)
+		for _, mapping := range strings.Split(mappings, ",") {
+			parts := strings.SplitN(mapping, "=", 2)
+			if len(parts) == 2 {
+				internal := strings.TrimSpace(parts[0])
+				public := strings.TrimSpace(parts[1])
+				cfg.RelayPublicMappings[internal] = public
+			}
+		}
 	}
 
 	if authKey := os.Getenv("RELAY_AUTH_KEY"); authKey != "" {
@@ -316,4 +330,28 @@ func getEnvInt(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
+}
+
+// MapRelayToPublic converts an internal relay URL to its public URL.
+// Returns the original URL if no mapping exists.
+func (c *Config) MapRelayToPublic(internalURL string) string {
+	if c.RelayPublicMappings == nil {
+		return internalURL
+	}
+	if public, ok := c.RelayPublicMappings[internalURL]; ok {
+		return public
+	}
+	return internalURL
+}
+
+// MapRelaysToPublic converts a slice of internal relay URLs to public URLs.
+func (c *Config) MapRelaysToPublic(internalURLs []string) []string {
+	if c.RelayPublicMappings == nil || len(c.RelayPublicMappings) == 0 {
+		return internalURLs
+	}
+	result := make([]string, len(internalURLs))
+	for i, url := range internalURLs {
+		result[i] = c.MapRelayToPublic(url)
+	}
+	return result
 }
