@@ -25,8 +25,9 @@ For quick start and essential info, see [CLAUDE.md](../CLAUDE.md).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SERVER_ADDRESS` | `:8080` | HTTP listen address |
-| `RELAYS` | - | Comma-separated relay URLs |
+| `SERVER_ADDRESS` | `:7777` | HTTP listen address |
+| `RELAYS` | - | Comma-separated relay URLs (can use internal K8s DNS) |
+| `RELAY_PUBLIC_MAPPINGS` | - | Internal→external URL mappings for bunker URIs (format: `internal=external,internal2=external2`) |
 | `RELAY_AUTH_KEY` | - | NIP-42 auth key (optional) |
 | `MIN_POW_DIFFICULTY` | `0` | Required PoW bits |
 
