@@ -1404,9 +1404,11 @@ func (s *Signer) SendNostrConnectResponse(ctx context.Context, signerPubkey, cli
 
 // GetStatus returns the current signer status
 func (s *Signer) GetStatus() map[string]interface{} {
+	// Map internal relay URLs to public URLs for display
+	connectedRelays := s.config.MapRelaysToPublic(s.relayClient.GetConnectedRelays())
 	return map[string]interface{}{
 		"keys_loaded":      len(s.keys),
-		"connected_relays": s.relayClient.GetConnectedRelays(),
+		"connected_relays": connectedRelays,
 	}
 }
 
