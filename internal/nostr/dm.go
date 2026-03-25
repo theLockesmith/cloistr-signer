@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -112,6 +113,7 @@ func (c *Client) SendEphemeralDM(ctx context.Context, privateKey, recipientPubke
 type DMHandler func(senderPubkey string, message *DMMessage)
 
 // SubscribeDMs subscribes to direct messages for a specific pubkey
+// Uses NIP-42 authentication when required by the relay
 func (c *Client) SubscribeDMs(ctx context.Context, privateKey string, handler DMHandler) error {
 	pubkey, err := nostr.GetPublicKey(privateKey)
 	if err != nil {
@@ -129,7 +131,8 @@ func (c *Client) SubscribeDMs(ctx context.Context, privateKey string, handler DM
 		},
 	}
 
-	c.SubscribeWithRelayInfoReconnect(ctx, filters, func(event *nostr.Event, relayURL string) {
+	// Event handler for DMs
+	eventHandler := func(event *nostr.Event, relayURL string) {
 		// Skip our own messages
 		if event.PubKey == pubkey {
 			return
@@ -158,9 +161,118 @@ func (c *Client) SubscribeDMs(ctx context.Context, privateKey string, handler DM
 
 		slog.Debug("received DM", "type", msg.Type, "from", event.PubKey, "relay", relayURL)
 		handler(event.PubKey, &msg)
-	})
+	}
+
+	// Subscribe to each relay with NIP-42 auth support
+	c.subscribeDMsWithAuth(ctx, privateKey, filters, eventHandler)
 
 	return nil
+}
+
+// subscribeDMsWithAuth subscribes with NIP-42 authentication support
+func (c *Client) subscribeDMsWithAuth(ctx context.Context, privateKey string, filters nostr.Filters, handler func(*nostr.Event, string)) {
+	c.mu.Lock()
+	relays := make(map[string]*nostr.Relay, len(c.relays))
+	for url, relay := range c.relays {
+		relays[url] = relay
+	}
+	c.mu.Unlock()
+
+	for url, relay := range relays {
+		go c.subscribeDMToRelayWithAuth(ctx, privateKey, url, relay, filters, handler)
+	}
+
+	// Reconnection loop
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.reconnectDMsWithAuth(ctx, privateKey, filters, handler)
+			}
+		}
+	}()
+
+	// Block until context is done
+	<-ctx.Done()
+}
+
+// subscribeDMToRelayWithAuth subscribes to a single relay with NIP-42 auth
+func (c *Client) subscribeDMToRelayWithAuth(ctx context.Context, privateKey, url string, relay *nostr.Relay, filters nostr.Filters, handler func(*nostr.Event, string)) {
+	sub, err := relay.Subscribe(ctx, filters)
+	if err != nil {
+		slog.Warn("DM subscription failed", "url", url, "error", err)
+		return
+	}
+	slog.Info("DM subscription started", "url", url)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case reason, ok := <-sub.ClosedReason:
+			if !ok {
+				slog.Warn("DM subscription closed", "url", url)
+				return
+			}
+			// Check if auth is required
+			if isAuthRequiredReason(reason) {
+				slog.Info("DM subscription requires auth, authenticating", "url", url, "reason", reason)
+				if authErr := c.authenticateRelayWithKey(ctx, relay, privateKey); authErr != nil {
+					slog.Warn("DM auth failed", "url", url, "error", authErr)
+					return
+				}
+				slog.Info("DM auth successful, resubscribing", "url", url)
+				// Resubscribe after auth
+				sub, err = relay.Subscribe(ctx, filters)
+				if err != nil {
+					slog.Warn("DM resubscription failed", "url", url, "error", err)
+					return
+				}
+				slog.Info("DM resubscription successful", "url", url)
+			} else {
+				slog.Warn("DM subscription closed", "url", url, "reason", reason)
+				return
+			}
+		case ev, ok := <-sub.Events:
+			if !ok {
+				slog.Warn("DM subscription events closed", "url", url)
+				return
+			}
+			handler(ev, url)
+		}
+	}
+}
+
+// reconnectDMsWithAuth reconnects disconnected relays for DM subscriptions
+func (c *Client) reconnectDMsWithAuth(ctx context.Context, privateKey string, filters nostr.Filters, handler func(*nostr.Event, string)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, url := range c.relayURLs {
+		if _, exists := c.relays[url]; !exists {
+			relay, err := nostr.RelayConnect(ctx, url)
+			if err != nil {
+				slog.Debug("DM reconnect failed", "url", url, "error", err)
+				continue
+			}
+			c.relays[url] = relay
+			slog.Info("DM reconnected to relay", "url", url)
+			go c.subscribeDMToRelayWithAuth(ctx, privateKey, url, relay, filters, handler)
+		}
+	}
+}
+
+// isAuthRequiredReason checks if the subscription close reason indicates auth is needed
+func isAuthRequiredReason(reason string) bool {
+	reasonLower := strings.ToLower(reason)
+	return strings.Contains(reasonLower, "auth-required") ||
+		strings.Contains(reasonLower, "restricted") ||
+		strings.Contains(reasonLower, "authentication")
 }
 
 // QueryDMs queries for DMs within a time range
