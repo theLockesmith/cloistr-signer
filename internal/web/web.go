@@ -293,6 +293,9 @@ func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHa
 			}
 			return s[:n] + "..."
 		},
+		"add": func(a, b int) int {
+			return a + b
+		},
 		"json": func(v interface{}) template.JS {
 			b, _ := json.Marshal(v)
 			return template.JS(b)
@@ -709,10 +712,16 @@ func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 	users, _ := h.storage.ListUsers(r.Context())
 
+	// Get platform users and services for admin tab
+	platformUsers, _, _ := h.storage.ListPlatformUsers(r.Context(), 100, 0)
+	services, _ := h.storage.ListServices(r.Context())
+
 	h.render(w, "users.html", map[string]interface{}{
-		"Title": "Users - Cloistr Signer",
-		"User":  user,
-		"Users": users,
+		"Title":         "Users - Cloistr Signer",
+		"User":          user,
+		"Users":         users,
+		"PlatformUsers": platformUsers,
+		"Services":      services,
 	})
 }
 

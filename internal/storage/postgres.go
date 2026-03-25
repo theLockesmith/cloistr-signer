@@ -1448,9 +1448,139 @@ func (ps *PostgresStorage) GrantServiceAccess(ctx context.Context, pubkey string
 		INSERT INTO user_service_access (pubkey, service_id, enabled, created_at)
 		SELECT $1, id, TRUE, NOW()
 		FROM services WHERE slug = $2
-		ON CONFLICT (pubkey, service_id) DO NOTHING`,
+		ON CONFLICT (pubkey, service_id) DO UPDATE SET enabled = TRUE`,
 		pubkey, serviceSlug)
 	return err
+}
+
+// RevokeServiceAccess revokes a user's access to a service in the platform.
+func (ps *PostgresStorage) RevokeServiceAccess(ctx context.Context, pubkey string, serviceSlug string) error {
+	_, err := ps.db.ExecContext(ctx, `
+		UPDATE user_service_access usa
+		SET enabled = FALSE
+		FROM services s
+		WHERE usa.service_id = s.id
+		  AND usa.pubkey = $1
+		  AND s.slug = $2`,
+		pubkey, serviceSlug)
+	return err
+}
+
+// ListPlatformUsers returns all platform users with their service access.
+// Returns users, total count, and error.
+func (ps *PostgresStorage) ListPlatformUsers(ctx context.Context, limit, offset int) ([]*PlatformUser, int, error) {
+	// Get total count
+	var total int
+	err := ps.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to count users: %w", err)
+	}
+
+	// Get users with pagination
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT pubkey, enabled, created_at, updated_at
+		FROM users
+		ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2`,
+		limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []*PlatformUser
+	for rows.Next() {
+		user := &PlatformUser{}
+		if err := rows.Scan(&user.Pubkey, &user.Enabled, &user.CreatedAt, &user.UpdatedAt); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan user: %w", err)
+		}
+		users = append(users, user)
+	}
+
+	// Get service access for each user
+	for _, user := range users {
+		services, err := ps.getUserServices(ctx, user.Pubkey)
+		if err != nil {
+			slog.Warn("failed to get user services", "pubkey", user.Pubkey[:16]+"...", "error", err)
+			continue
+		}
+		user.Services = services
+	}
+
+	return users, total, nil
+}
+
+// getUserServices returns service access for a user
+func (ps *PostgresStorage) getUserServices(ctx context.Context, pubkey string) ([]ServiceAccess, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT s.id, s.slug, s.name, usa.enabled, usa.created_at
+		FROM user_service_access usa
+		JOIN services s ON usa.service_id = s.id
+		WHERE usa.pubkey = $1
+		ORDER BY s.name`,
+		pubkey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var services []ServiceAccess
+	for rows.Next() {
+		var sa ServiceAccess
+		if err := rows.Scan(&sa.ServiceID, &sa.ServiceSlug, &sa.ServiceName, &sa.Enabled, &sa.CreatedAt); err != nil {
+			return nil, err
+		}
+		services = append(services, sa)
+	}
+
+	return services, nil
+}
+
+// GetPlatformUserAccess returns a single platform user with service access
+func (ps *PostgresStorage) GetPlatformUserAccess(ctx context.Context, pubkey string) (*PlatformUser, error) {
+	user := &PlatformUser{}
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT pubkey, enabled, created_at, updated_at
+		FROM users
+		WHERE pubkey = $1`,
+		pubkey).Scan(&user.Pubkey, &user.Enabled, &user.CreatedAt, &user.UpdatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("user not found")
+		}
+		return nil, fmt.Errorf("failed to query user: %w", err)
+	}
+
+	services, err := ps.getUserServices(ctx, pubkey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user services: %w", err)
+	}
+	user.Services = services
+
+	return user, nil
+}
+
+// ListServices returns all available services in the platform
+func (ps *PostgresStorage) ListServices(ctx context.Context) ([]*Service, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, slug, name, COALESCE(description, ''), is_free
+		FROM services
+		ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query services: %w", err)
+	}
+	defer rows.Close()
+
+	var services []*Service
+	for rows.Next() {
+		s := &Service{}
+		if err := rows.Scan(&s.ID, &s.Slug, &s.Name, &s.Description, &s.IsFree); err != nil {
+			return nil, fmt.Errorf("failed to scan service: %w", err)
+		}
+		services = append(services, s)
+	}
+
+	return services, nil
 }
 
 // getPlatformIdentitySeed returns the seed used for deriving user identity keys.

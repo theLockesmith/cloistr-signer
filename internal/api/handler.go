@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -123,6 +124,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 	// Audit logs
 	mux.HandleFunc("/api/v1/audit", h.handleAuditLogs)
+
+	// Admin - Platform user management
+	mux.HandleFunc("/api/v1/admin/users", h.handleAdminUsers)
+	mux.HandleFunc("/api/v1/admin/users/", h.handleAdminUserByPubkey)
+	mux.HandleFunc("/api/v1/admin/services", h.handleAdminServices)
 
 	// FROST threshold signing
 	mux.HandleFunc("/api/v1/frost/keys", h.handleFrostKeys)
@@ -2616,6 +2622,171 @@ func (h *Handler) handleImportFrostShare(w http.ResponseWriter, r *http.Request)
 // Helper function for hex decoding
 func hex_DecodeString(s string) ([]byte, error) {
 	return hex.DecodeString(s)
+}
+
+// Admin - Platform user management handlers
+
+// handleAdminUsers handles GET /api/v1/admin/users (list platform users)
+func (h *Handler) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Validate auth and admin role
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	// Check admin role (get user from storage if not config-based admin)
+	if !strings.HasPrefix(claims.Username, "admin:") {
+		user, err := h.storage.GetUser(r.Context(), claims.UserID)
+		if err != nil || !user.IsAdmin() {
+			h.errorResponse(w, http.StatusForbidden, "admin access required")
+			return
+		}
+	}
+
+	// Parse pagination
+	limit := 50
+	offset := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 100 {
+			limit = parsed
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	users, total, err := h.storage.ListPlatformUsers(r.Context(), limit, offset)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to list users")
+		return
+	}
+
+	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"users":  users,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+// handleAdminUserByPubkey handles /api/v1/admin/users/{pubkey}/services/{service}
+func (h *Handler) handleAdminUserByPubkey(w http.ResponseWriter, r *http.Request) {
+	// Validate auth and admin role
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	// Check admin role
+	if !strings.HasPrefix(claims.Username, "admin:") {
+		user, err := h.storage.GetUser(r.Context(), claims.UserID)
+		if err != nil || !user.IsAdmin() {
+			h.errorResponse(w, http.StatusForbidden, "admin access required")
+			return
+		}
+	}
+
+	// Parse path: /api/v1/admin/users/{pubkey}/services/{service}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/users/")
+	parts := strings.Split(path, "/")
+
+	if len(parts) < 1 || parts[0] == "" {
+		h.errorResponse(w, http.StatusBadRequest, "pubkey required")
+		return
+	}
+
+	pubkey := parts[0]
+
+	// GET /api/v1/admin/users/{pubkey} - get user details
+	if len(parts) == 1 {
+		if r.Method != http.MethodGet {
+			h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		user, err := h.storage.GetPlatformUserAccess(r.Context(), pubkey)
+		if err != nil {
+			h.errorResponse(w, http.StatusNotFound, "user not found")
+			return
+		}
+
+		h.jsonResponse(w, http.StatusOK, user)
+		return
+	}
+
+	// /api/v1/admin/users/{pubkey}/services/{service}
+	if len(parts) == 3 && parts[1] == "services" {
+		serviceSlug := parts[2]
+
+		switch r.Method {
+		case http.MethodPut:
+			// Grant service access
+			if err := h.storage.GrantServiceAccess(r.Context(), pubkey, serviceSlug); err != nil {
+				h.errorResponse(w, http.StatusInternalServerError, "failed to grant access")
+				return
+			}
+			slog.Info("service access granted", "pubkey", pubkey[:16]+"...", "service", serviceSlug)
+			h.jsonResponse(w, http.StatusOK, map[string]string{"status": "granted"})
+
+		case http.MethodDelete:
+			// Revoke service access
+			if err := h.storage.RevokeServiceAccess(r.Context(), pubkey, serviceSlug); err != nil {
+				h.errorResponse(w, http.StatusInternalServerError, "failed to revoke access")
+				return
+			}
+			slog.Info("service access revoked", "pubkey", pubkey[:16]+"...", "service", serviceSlug)
+			h.jsonResponse(w, http.StatusOK, map[string]string{"status": "revoked"})
+
+		default:
+			h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	}
+
+	h.errorResponse(w, http.StatusNotFound, "endpoint not found")
+}
+
+// handleAdminServices handles GET /api/v1/admin/services (list available services)
+func (h *Handler) handleAdminServices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// Validate auth and admin role
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	// Check admin role
+	if !strings.HasPrefix(claims.Username, "admin:") {
+		user, err := h.storage.GetUser(r.Context(), claims.UserID)
+		if err != nil || !user.IsAdmin() {
+			h.errorResponse(w, http.StatusForbidden, "admin access required")
+			return
+		}
+	}
+
+	services, err := h.storage.ListServices(r.Context())
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to list services")
+		return
+	}
+
+	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"services": services,
+	})
 }
 
 // Helper methods

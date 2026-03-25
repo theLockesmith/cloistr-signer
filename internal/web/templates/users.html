@@ -3,62 +3,271 @@
     <h1>Users</h1>
 </div>
 
-<div class="table-container">
-    <table class="data-table">
-        <thead>
-            <tr>
-                <th>Username</th>
-                <th>Role</th>
-                <th>Pubkey</th>
-                <th>Email</th>
-                <th>MFA</th>
-                <th>Created</th>
-                <th>Last Login</th>
-            </tr>
-        </thead>
-        <tbody>
-            {{range .Users}}
-            <tr>
-                <td>{{.Username}}</td>
-                <td>
-                    {{if .IsAdmin}}
-                    <span class="badge badge-admin">admin</span>
-                    {{else}}
-                    <span class="badge badge-muted">user</span>
-                    {{end}}
-                </td>
-                <td>
-                    {{if .Pubkey}}
-                    <span class="pubkey">{{truncate .Pubkey 16}}...</span>
-                    {{else}}
-                    <span class="text-muted">-</span>
-                    {{end}}
-                </td>
-                <td>{{if .Email}}{{.Email}}{{else}}<span class="text-muted">-</span>{{end}}</td>
-                <td>
-                    {{if .MFAEnabled}}
-                    <span class="badge badge-success">Enabled</span>
-                    {{else}}
-                    <span class="badge badge-muted">Disabled</span>
-                    {{end}}
-                </td>
-                <td>{{formatTime .CreatedAt}}</td>
-                <td>
-                    {{if .LastLoginAt}}
-                    {{formatTime .LastLoginAt}}
-                    {{else}}
-                    <span class="text-muted">Never</span>
-                    {{end}}
-                </td>
-            </tr>
-            {{else}}
-            <tr>
-                <td colspan="7" class="text-center text-muted">No users registered</td>
-            </tr>
-            {{end}}
-        </tbody>
-    </table>
+<!-- Tab navigation -->
+<div class="tabs" style="margin-bottom: 1.5rem;">
+    <button class="tab-btn active" data-tab="signer-users">Signer Accounts</button>
+    <button class="tab-btn" data-tab="platform-users">Platform Users</button>
 </div>
+
+<!-- Signer Users Tab -->
+<div id="signer-users" class="tab-content active">
+    <h2>Signer Accounts</h2>
+    <p class="text-muted" style="margin-bottom: 1rem;">Users with accounts on this signer instance.</p>
+    <div class="table-container">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Username</th>
+                    <th>Role</th>
+                    <th>Pubkey</th>
+                    <th>Email</th>
+                    <th>MFA</th>
+                    <th>Created</th>
+                    <th>Last Login</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Users}}
+                <tr>
+                    <td>{{.Username}}</td>
+                    <td>
+                        {{if .IsAdmin}}
+                        <span class="badge badge-admin">admin</span>
+                        {{else}}
+                        <span class="badge badge-muted">user</span>
+                        {{end}}
+                    </td>
+                    <td>
+                        {{if .Pubkey}}
+                        <span class="pubkey">{{truncate .Pubkey 16}}...</span>
+                        {{else}}
+                        <span class="text-muted">-</span>
+                        {{end}}
+                    </td>
+                    <td>{{if .Email}}{{.Email}}{{else}}<span class="text-muted">-</span>{{end}}</td>
+                    <td>
+                        {{if .MFAEnabled}}
+                        <span class="badge badge-success">Enabled</span>
+                        {{else}}
+                        <span class="badge badge-muted">Disabled</span>
+                        {{end}}
+                    </td>
+                    <td>{{formatTime .CreatedAt}}</td>
+                    <td>
+                        {{if .LastLoginAt}}
+                        {{formatTime .LastLoginAt}}
+                        {{else}}
+                        <span class="text-muted">Never</span>
+                        {{end}}
+                    </td>
+                </tr>
+                {{else}}
+                <tr>
+                    <td colspan="7" class="text-center text-muted">No users registered</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Platform Users Tab -->
+<div id="platform-users" class="tab-content">
+    <h2>Platform Users</h2>
+    <p class="text-muted" style="margin-bottom: 1rem;">Manage service access for cloistr platform users.</p>
+
+    {{if .Services}}
+    <div class="table-container">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Pubkey</th>
+                    <th>Status</th>
+                    {{range .Services}}
+                    <th>{{.Name}}</th>
+                    {{end}}
+                    <th>Created</th>
+                </tr>
+            </thead>
+            <tbody id="platform-users-body">
+                {{range .PlatformUsers}}
+                <tr data-pubkey="{{.Pubkey}}">
+                    <td>
+                        <span class="pubkey" title="{{.Pubkey}}">{{truncate .Pubkey 16}}...</span>
+                    </td>
+                    <td>
+                        {{if .Enabled}}
+                        <span class="badge badge-success">Active</span>
+                        {{else}}
+                        <span class="badge badge-muted">Disabled</span>
+                        {{end}}
+                    </td>
+                    {{$user := .}}
+                    {{range $.Services}}
+                    <td>
+                        {{$hasAccess := false}}
+                        {{range $user.Services}}
+                            {{if and (eq .ServiceSlug $.Slug) .Enabled}}
+                                {{$hasAccess = true}}
+                            {{end}}
+                        {{end}}
+                        <label class="toggle-switch">
+                            <input type="checkbox"
+                                   data-pubkey="{{$user.Pubkey}}"
+                                   data-service="{{.Slug}}"
+                                   {{if $hasAccess}}checked{{end}}
+                                   onchange="toggleServiceAccess(this)">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </td>
+                    {{end}}
+                    <td>{{formatTime .CreatedAt}}</td>
+                </tr>
+                {{else}}
+                <tr>
+                    <td colspan="{{add (len .Services) 3}}" class="text-center text-muted">No platform users found</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    {{else}}
+    <div class="empty-state">
+        <p>Platform integration not configured or no services available.</p>
+    </div>
+    {{end}}
+</div>
+
+<style>
+.tabs {
+    display: flex;
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--border-color, #333);
+    padding-bottom: 0;
+}
+.tab-btn {
+    padding: 0.75rem 1.5rem;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted, #888);
+    cursor: pointer;
+    font-size: 1rem;
+    transition: all 0.2s;
+}
+.tab-btn:hover {
+    color: var(--text-color, #fff);
+}
+.tab-btn.active {
+    color: var(--primary-color, #6366f1);
+    border-bottom-color: var(--primary-color, #6366f1);
+}
+.tab-content {
+    display: none;
+}
+.tab-content.active {
+    display: block;
+}
+.toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 22px;
+}
+.toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #444;
+    transition: 0.3s;
+    border-radius: 22px;
+}
+.toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 16px;
+    width: 16px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    transition: 0.3s;
+    border-radius: 50%;
+}
+input:checked + .toggle-slider {
+    background-color: var(--success-color, #22c55e);
+}
+input:checked + .toggle-slider:before {
+    transform: translateX(18px);
+}
+input:disabled + .toggle-slider {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+</style>
+
+<script>
+// Tab switching
+document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById(btn.dataset.tab).classList.add('active');
+    });
+});
+
+// Toggle service access
+async function toggleServiceAccess(checkbox) {
+    const pubkey = checkbox.dataset.pubkey;
+    const service = checkbox.dataset.service;
+    const granting = checkbox.checked;
+
+    checkbox.disabled = true;
+
+    try {
+        const method = granting ? 'PUT' : 'DELETE';
+        const response = await fetch(`/api/v1/admin/users/${pubkey}/services/${service}`, {
+            method: method,
+            headers: {
+                'Authorization': 'Bearer ' + getCookie('auth_token')
+            }
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to update access');
+        }
+
+        // Show success feedback briefly
+        const row = checkbox.closest('tr');
+        row.style.backgroundColor = 'rgba(34, 197, 94, 0.1)';
+        setTimeout(() => {
+            row.style.backgroundColor = '';
+        }, 500);
+
+    } catch (error) {
+        console.error('Error:', error);
+        checkbox.checked = !granting; // Revert
+        alert('Failed to update service access');
+    } finally {
+        checkbox.disabled = false;
+    }
+}
+
+function getCookie(name) {
+    const value = `; ${document.cookie}`;
+    const parts = value.split(`; ${name}=`);
+    if (parts.length === 2) return parts.pop().split(';').shift();
+    return '';
+}
+</script>
 {{end}}
 
 {{template "base" .}}

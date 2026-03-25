@@ -161,6 +161,33 @@ func (u *User) IsAdmin() bool {
 	return u.Role == "admin"
 }
 
+// PlatformUser represents a user in the cloistr platform with service access info
+type PlatformUser struct {
+	Pubkey    string           `json:"pubkey"`
+	Enabled   bool             `json:"enabled"`
+	Services  []ServiceAccess  `json:"services"`
+	CreatedAt time.Time        `json:"created_at"`
+	UpdatedAt time.Time        `json:"updated_at"`
+}
+
+// ServiceAccess represents a user's access to a service
+type ServiceAccess struct {
+	ServiceID   string    `json:"service_id"`
+	ServiceSlug string    `json:"service_slug"`
+	ServiceName string    `json:"service_name"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// Service represents a service in the platform
+type Service struct {
+	ID          string `json:"id"`
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	IsFree      bool   `json:"is_free"`
+}
+
 // UserSession represents an authenticated user session (JWT-based)
 type UserSession struct {
 	ID             string     `json:"id"`
@@ -276,6 +303,11 @@ type Storage interface {
 	// Platform user management (cross-service authorization)
 	EnsurePlatformUser(ctx context.Context, pubkey string) error
 	DeriveUserPubkey(ctx context.Context, userID string) (string, error)
+	ListPlatformUsers(ctx context.Context, limit, offset int) ([]*PlatformUser, int, error)
+	GetPlatformUserAccess(ctx context.Context, pubkey string) (*PlatformUser, error)
+	GrantServiceAccess(ctx context.Context, pubkey, serviceSlug string) error
+	RevokeServiceAccess(ctx context.Context, pubkey, serviceSlug string) error
+	ListServices(ctx context.Context) ([]*Service, error)
 
 	// User session management
 	CreateUserSession(ctx context.Context, session *UserSession) error
@@ -1097,6 +1129,33 @@ func derivePubkeyFromSeed(seedHex, userID string) (string, error) {
 		return "", err
 	}
 	return nostr.GetPublicKey(privateKey)
+}
+
+// ListPlatformUsers returns empty list for in-memory storage (no platform integration)
+func (m *MemoryStorage) ListPlatformUsers(ctx context.Context, limit, offset int) ([]*PlatformUser, int, error) {
+	return nil, 0, nil
+}
+
+// GetPlatformUserAccess returns nil for in-memory storage (no platform integration)
+func (m *MemoryStorage) GetPlatformUserAccess(ctx context.Context, pubkey string) (*PlatformUser, error) {
+	return nil, fmt.Errorf("platform not available in memory storage")
+}
+
+// GrantServiceAccess is a no-op for in-memory storage
+func (m *MemoryStorage) GrantServiceAccess(ctx context.Context, pubkey, serviceSlug string) error {
+	slog.Debug("GrantServiceAccess skipped (in-memory storage)", "pubkey", pubkey[:16]+"...", "service", serviceSlug)
+	return nil
+}
+
+// RevokeServiceAccess is a no-op for in-memory storage
+func (m *MemoryStorage) RevokeServiceAccess(ctx context.Context, pubkey, serviceSlug string) error {
+	slog.Debug("RevokeServiceAccess skipped (in-memory storage)", "pubkey", pubkey[:16]+"...", "service", serviceSlug)
+	return nil
+}
+
+// ListServices returns empty list for in-memory storage
+func (m *MemoryStorage) ListServices(ctx context.Context) ([]*Service, error) {
+	return nil, nil
 }
 
 // User session management
