@@ -362,39 +362,94 @@ func (c *KeyRelayClient) SubscribeWithAuth(ctx context.Context, filters nostr.Fi
 	go c.subscribeReconnectLoop(ctx, filters, handler)
 }
 
-// subscribeToRelayWithAuth authenticates and subscribes to a single relay
+// subscribeToRelayWithAuth subscribes to a relay, authenticating if required.
+// NIP-42 flow: subscribe first, if rejected with restricted/auth, authenticate and retry.
 func (c *KeyRelayClient) subscribeToRelayWithAuth(ctx context.Context, url string, relay *nostr.Relay, filters nostr.Filters, handler func(*nostr.Event, string)) {
-	// Authenticate first - required for HAVEN inbox access
-	if err := c.authenticateRelay(ctx, relay); err != nil {
-		slog.Warn("failed to authenticate for subscription", "pubkey", c.pubkey[:16]+"...", "url", url, "error", err)
-		// Continue anyway - maybe relay doesn't require auth
-	} else {
-		slog.Info("authenticated for subscription", "pubkey", c.pubkey[:16]+"...", "url", url)
-	}
-
-	// Subscribe
+	// First attempt without auth
 	sub, err := relay.Subscribe(ctx, filters)
 	if err != nil {
-		slog.Warn("failed to subscribe after auth", "pubkey", c.pubkey[:16]+"...", "url", url, "error", err)
-		// Mark relay as disconnected so reconnect loop can retry
-		c.mu.Lock()
-		delete(c.relays, url)
-		c.mu.Unlock()
-		return
+		slog.Warn("initial subscribe failed", "pubkey", c.pubkey[:16]+"...", "url", url, "error", err)
+		// Check if it's an auth-related error
+		if isAuthRequired(err) || isRestricted(err) {
+			sub = c.authAndRetrySubscribe(ctx, url, relay, filters)
+		}
+		if sub == nil {
+			c.mu.Lock()
+			delete(c.relays, url)
+			c.mu.Unlock()
+			return
+		}
 	}
 
-	slog.Info("subscribed with auth", "pubkey", c.pubkey[:16]+"...", "url", url, "filters", filters)
+	slog.Info("subscribed", "pubkey", c.pubkey[:16]+"...", "url", url, "filters", filters)
 
-	// Handle events
-	for ev := range sub.Events {
-		handler(ev, url)
+	// Monitor for immediate CLOSED (auth rejection) vs normal event flow
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case reason, ok := <-sub.ClosedReason:
+			if !ok {
+				// Channel closed without reason
+				slog.Warn("subscription closed (no reason)", "pubkey", c.pubkey[:16]+"...", "url", url)
+				c.mu.Lock()
+				delete(c.relays, url)
+				c.mu.Unlock()
+				return
+			}
+			slog.Info("subscription CLOSED received", "pubkey", c.pubkey[:16]+"...", "url", url, "reason", reason)
+
+			// Check if it's an auth-related rejection
+			reasonLower := strings.ToLower(reason)
+			if strings.Contains(reasonLower, "restricted") ||
+				strings.Contains(reasonLower, "auth") ||
+				strings.Contains(reasonLower, "owner") {
+				// Authenticate and retry
+				sub = c.authAndRetrySubscribe(ctx, url, relay, filters)
+				if sub == nil {
+					c.mu.Lock()
+					delete(c.relays, url)
+					c.mu.Unlock()
+					return
+				}
+				slog.Info("subscribed after auth", "pubkey", c.pubkey[:16]+"...", "url", url)
+				// Continue the loop with new subscription
+				continue
+			}
+			// Closed for other reason - mark for reconnection
+			c.mu.Lock()
+			delete(c.relays, url)
+			c.mu.Unlock()
+			return
+
+		case ev, ok := <-sub.Events:
+			if !ok {
+				// Events channel closed
+				slog.Warn("subscription events closed", "pubkey", c.pubkey[:16]+"...", "url", url)
+				c.mu.Lock()
+				delete(c.relays, url)
+				c.mu.Unlock()
+				return
+			}
+			handler(ev, url)
+		}
 	}
+}
 
-	// Subscription closed - mark for reconnection
-	slog.Warn("authenticated subscription closed", "pubkey", c.pubkey[:16]+"...", "url", url)
-	c.mu.Lock()
-	delete(c.relays, url)
-	c.mu.Unlock()
+// authAndRetrySubscribe authenticates and retries subscription
+func (c *KeyRelayClient) authAndRetrySubscribe(ctx context.Context, url string, relay *nostr.Relay, filters nostr.Filters) *nostr.Subscription {
+	if err := c.authenticateRelay(ctx, relay); err != nil {
+		slog.Warn("auth failed", "pubkey", c.pubkey[:16]+"...", "url", url, "error", err)
+		return nil
+	}
+	slog.Info("authenticated", "pubkey", c.pubkey[:16]+"...", "url", url)
+
+	sub, err := relay.Subscribe(ctx, filters)
+	if err != nil {
+		slog.Warn("subscribe failed after auth", "pubkey", c.pubkey[:16]+"...", "url", url, "error", err)
+		return nil
+	}
+	return sub
 }
 
 // subscribeReconnectLoop periodically reconnects dropped relays and re-subscribes
