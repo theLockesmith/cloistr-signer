@@ -32,6 +32,7 @@ type Handler struct {
 	encryptor        *crypto.Encryptor
 	frostCoordinator *frost.Coordinator
 	frostKeyGen      *frost.KeyGenerator
+	distributedDKG   *frost.DistributedDKG
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -75,6 +76,11 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 		frostCoordinator: frostCoord,
 		frostKeyGen:      frostKG,
 	}
+}
+
+// SetDistributedDKG sets the distributed DKG coordinator (called after nostr client is ready)
+func (h *Handler) SetDistributedDKG(dkg *frost.DistributedDKG) {
+	h.distributedDKG = dkg
 }
 
 // RegisterRoutes registers all HTTP routes
@@ -134,6 +140,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/frost/keys", h.handleFrostKeys)
 	mux.HandleFunc("/api/v1/frost/keys/", h.handleFrostKeyByID)
 	mux.HandleFunc("/api/v1/frost/shares/", h.handleFrostShares)
+
+	// FROST distributed DKG
+	mux.HandleFunc("/api/v1/frost/dkg", h.handleFrostDKG)
+	mux.HandleFunc("/api/v1/frost/dkg/", h.handleFrostDKGByID)
 }
 
 // Health check response
@@ -2786,6 +2796,173 @@ func (h *Handler) handleAdminServices(w http.ResponseWriter, r *http.Request) {
 
 	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"services": services,
+	})
+}
+
+// ============================================================================
+// FROST Distributed DKG API
+// ============================================================================
+
+// DKGSessionResponse represents a DKG session in API responses
+type DKGSessionResponse struct {
+	ID           string     `json:"id"`
+	Initiator    string     `json:"initiator"`
+	Participants []string   `json:"participants"`
+	Threshold    int        `json:"threshold"`
+	TotalShares  int        `json:"total_shares"`
+	Status       string     `json:"status"`
+	Round        int        `json:"round"`
+	StartedAt    time.Time  `json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	FrostKeyID   string     `json:"frost_key_id,omitempty"`
+	GroupPubkey  string     `json:"group_pubkey,omitempty"`
+	Error        string     `json:"error,omitempty"`
+}
+
+// InitDKGRequest is the request body for initiating a DKG session
+type InitDKGRequest struct {
+	Participants []string `json:"participants"` // Nostr pubkeys of participants (including self)
+	Threshold    int      `json:"threshold"`    // Minimum shares required to sign
+	KeyName      string   `json:"key_name,omitempty"` // Optional name for the resulting key
+}
+
+func (h *Handler) handleFrostDKG(w http.ResponseWriter, r *http.Request) {
+	if h.distributedDKG == nil {
+		h.errorResponse(w, http.StatusServiceUnavailable, "distributed DKG not enabled")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.handleListDKGSessions(w, r)
+	case http.MethodPost:
+		h.handleInitDKGSession(w, r)
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) handleListDKGSessions(w http.ResponseWriter, r *http.Request) {
+	sessions := h.distributedDKG.ListSessions()
+
+	response := make([]DKGSessionResponse, len(sessions))
+	for i, s := range sessions {
+		response[i] = DKGSessionResponse{
+			ID:           s.ID,
+			Initiator:    s.Initiator,
+			Participants: s.Participants,
+			Threshold:    s.Threshold,
+			TotalShares:  s.TotalShares,
+			Status:       string(s.Status),
+			Round:        s.Round,
+			StartedAt:    s.StartedAt,
+			CompletedAt:  s.CompletedAt,
+			FrostKeyID:   s.FrostKeyID,
+			GroupPubkey:  s.GroupPubkey,
+			Error:        s.Error,
+		}
+	}
+
+	h.jsonResponse(w, http.StatusOK, response)
+}
+
+func (h *Handler) handleInitDKGSession(w http.ResponseWriter, r *http.Request) {
+	var req InitDKGRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if len(req.Participants) < 2 {
+		h.errorResponse(w, http.StatusBadRequest, "at least 2 participants required for distributed DKG")
+		return
+	}
+
+	if req.Threshold < 2 {
+		h.errorResponse(w, http.StatusBadRequest, "threshold must be at least 2 for distributed DKG")
+		return
+	}
+
+	if req.Threshold > len(req.Participants) {
+		h.errorResponse(w, http.StatusBadRequest, "threshold cannot exceed number of participants")
+		return
+	}
+
+	// Validate pubkeys
+	for _, p := range req.Participants {
+		if len(p) != 64 {
+			h.errorResponse(w, http.StatusBadRequest, fmt.Sprintf("invalid pubkey length: %s", p))
+			return
+		}
+	}
+
+	session, err := h.distributedDKG.InitiateSession(r.Context(), req.Participants, req.Threshold, req.KeyName)
+	if err != nil {
+		slog.Error("failed to initiate DKG session", "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to initiate DKG session: "+err.Error())
+		return
+	}
+
+	slog.Info("initiated distributed DKG session",
+		"session_id", session.ID,
+		"participants", len(req.Participants),
+		"threshold", req.Threshold,
+	)
+
+	h.jsonResponse(w, http.StatusCreated, DKGSessionResponse{
+		ID:           session.ID,
+		Initiator:    session.Initiator,
+		Participants: session.Participants,
+		Threshold:    session.Threshold,
+		TotalShares:  session.TotalShares,
+		Status:       string(session.Status),
+		Round:        session.Round,
+		StartedAt:    session.StartedAt,
+	})
+}
+
+func (h *Handler) handleFrostDKGByID(w http.ResponseWriter, r *http.Request) {
+	if h.distributedDKG == nil {
+		h.errorResponse(w, http.StatusServiceUnavailable, "distributed DKG not enabled")
+		return
+	}
+
+	// Parse session ID from URL
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/frost/dkg/")
+	sessionID := strings.TrimSuffix(path, "/")
+	if sessionID == "" {
+		h.errorResponse(w, http.StatusBadRequest, "session ID required")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.handleGetDKGSession(w, r, sessionID)
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) handleGetDKGSession(w http.ResponseWriter, r *http.Request, sessionID string) {
+	session := h.distributedDKG.GetSession(sessionID)
+	if session == nil {
+		h.errorResponse(w, http.StatusNotFound, "DKG session not found")
+		return
+	}
+
+	h.jsonResponse(w, http.StatusOK, DKGSessionResponse{
+		ID:           session.ID,
+		Initiator:    session.Initiator,
+		Participants: session.Participants,
+		Threshold:    session.Threshold,
+		TotalShares:  session.TotalShares,
+		Status:       string(session.Status),
+		Round:        session.Round,
+		StartedAt:    session.StartedAt,
+		CompletedAt:  session.CompletedAt,
+		FrostKeyID:   session.FrostKeyID,
+		GroupPubkey:  session.GroupPubkey,
+		Error:        session.Error,
 	})
 }
 
