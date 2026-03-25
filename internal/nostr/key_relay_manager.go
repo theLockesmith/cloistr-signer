@@ -161,49 +161,17 @@ func (c *KeyRelayClient) authenticateRelay(ctx context.Context, relay *nostr.Rel
 
 	// Get the public URL for this relay (for AUTH event relay tag)
 	publicURL := c.getPublicURL(relay.URL)
-	slog.Info("auth URL mapping",
-		"pubkey", c.pubkey[:16]+"...",
-		"relay_url", relay.URL,
-		"public_url", publicURL,
-		"has_mappings", c.publicURLMappings != nil,
-		"mapping_count", len(c.publicURLMappings))
 
 	// Short timeout - if relay doesn't respond to AUTH quickly, continue without it
 	authCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	return relay.Auth(authCtx, func(event *nostr.Event) error {
-		// Log the event before modification for debugging
-		var challengeTag, relayTag string
-		for _, tag := range event.Tags {
-			if len(tag) >= 2 {
-				if tag[0] == "challenge" {
-					challengeTag = tag[1]
-				} else if tag[0] == "relay" {
-					relayTag = tag[1]
-				}
-			}
-		}
-		slog.Info("AUTH event before signing",
-			"pubkey", c.pubkey[:16]+"...",
-			"challenge_len", len(challengeTag),
-			"challenge_preview", func() string {
-				if len(challengeTag) > 8 {
-					return challengeTag[:8] + "..."
-				}
-				return challengeTag
-			}(),
-			"relay_tag", relayTag)
-
 		event.PubKey = c.pubkey
 		// Replace the relay tag with the public URL
 		// go-nostr sets this to relay.URL (internal), but we need the public URL
 		for i, tag := range event.Tags {
 			if len(tag) >= 2 && tag[0] == "relay" {
-				slog.Info("replacing relay tag in AUTH event",
-					"pubkey", c.pubkey[:16]+"...",
-					"original", tag[1],
-					"replacement", publicURL)
 				event.Tags[i] = nostr.Tag{"relay", publicURL}
 				break
 			}
