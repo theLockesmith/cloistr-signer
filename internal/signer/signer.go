@@ -124,7 +124,7 @@ func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, e
 		config:           cfg,
 		storage:          store,
 		relayClient:      relayClient,
-		keyRelayManager:  relay.NewKeyRelayManager(cfg.Relays),
+		keyRelayManager:  relay.NewKeyRelayManager(cfg.Relays, cfg.RelayPublicMappings),
 		encryptor:        encryptor,
 		auditLogger:      auditLogger,
 		proxyClient:      proxy.NewClient(cfg),

@@ -16,25 +16,29 @@ import (
 // Each signing key gets its own set of relay connections, authenticated as that key.
 // This isolates rate limits per key and ensures proper NIP-42 authentication.
 type KeyRelayManager struct {
-	mu           sync.RWMutex
-	clients      map[string]*KeyRelayClient // pubkey -> client
-	globalRelays []string                   // fallback relays if key has none configured
+	mu                sync.RWMutex
+	clients           map[string]*KeyRelayClient // pubkey -> client
+	globalRelays      []string                   // fallback relays if key has none configured
+	publicURLMappings map[string]string          // internal URL -> public URL for NIP-42 auth
 }
 
 // KeyRelayClient is a relay client dedicated to a specific signing key
 type KeyRelayClient struct {
-	pubkey     string
-	privateKey string
-	relayURLs  []string
-	relays     map[string]*nostr.Relay
-	mu         sync.RWMutex
+	pubkey            string
+	privateKey        string
+	relayURLs         []string
+	relays            map[string]*nostr.Relay
+	publicURLMappings map[string]string // internal URL -> public URL for NIP-42 auth
+	mu                sync.RWMutex
 }
 
-// NewKeyRelayManager creates a new manager for per-key relay connections
-func NewKeyRelayManager(globalRelays []string) *KeyRelayManager {
+// NewKeyRelayManager creates a new manager for per-key relay connections.
+// publicURLMappings maps internal relay URLs to public URLs for NIP-42 authentication.
+func NewKeyRelayManager(globalRelays []string, publicURLMappings map[string]string) *KeyRelayManager {
 	return &KeyRelayManager{
-		clients:      make(map[string]*KeyRelayClient),
-		globalRelays: globalRelays,
+		clients:           make(map[string]*KeyRelayClient),
+		globalRelays:      globalRelays,
+		publicURLMappings: publicURLMappings,
 	}
 }
 
@@ -78,10 +82,11 @@ func (m *KeyRelayManager) GetClient(ctx context.Context, pubkey, privateKey stri
 	}
 
 	client = &KeyRelayClient{
-		pubkey:     pubkey,
-		privateKey: privateKey,
-		relayURLs:  urls,
-		relays:     make(map[string]*nostr.Relay),
+		pubkey:            pubkey,
+		privateKey:        privateKey,
+		relayURLs:         urls,
+		relays:            make(map[string]*nostr.Relay),
+		publicURLMappings: m.publicURLMappings,
 	}
 
 	// Connect to relays
@@ -136,19 +141,41 @@ func (c *KeyRelayClient) Disconnect() {
 	c.relays = make(map[string]*nostr.Relay)
 }
 
-// authenticateRelay performs NIP-42 authentication with this key
+// getPublicURL returns the public URL for a relay URL.
+// This maps internal K8s service URLs to public URLs for NIP-42 authentication.
+func (c *KeyRelayClient) getPublicURL(internalURL string) string {
+	if c.publicURLMappings != nil {
+		if public, ok := c.publicURLMappings[internalURL]; ok {
+			return public
+		}
+	}
+	return internalURL
+}
+
+// authenticateRelay performs NIP-42 authentication with this key.
+// Uses the public URL mapping for the relay tag in the AUTH event.
 func (c *KeyRelayClient) authenticateRelay(ctx context.Context, relay *nostr.Relay) error {
 	if c.privateKey == "" {
 		return nil
 	}
 
+	// Get the public URL for this relay (for AUTH event relay tag)
+	publicURL := c.getPublicURL(relay.URL)
+
 	// Short timeout - if relay doesn't respond to AUTH quickly, continue without it
-	// Most relays don't require auth, and we can retry on publish if needed
 	authCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	return relay.Auth(authCtx, func(event *nostr.Event) error {
 		event.PubKey = c.pubkey
+		// Replace the relay tag with the public URL
+		// go-nostr sets this to relay.URL (internal), but we need the public URL
+		for i, tag := range event.Tags {
+			if len(tag) >= 2 && tag[0] == "relay" {
+				event.Tags[i] = nostr.Tag{"relay", publicURL}
+				break
+			}
+		}
 		return event.Sign(c.privateKey)
 	})
 }
