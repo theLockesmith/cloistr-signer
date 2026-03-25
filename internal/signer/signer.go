@@ -94,7 +94,7 @@ type Signer struct {
 	seenEventsLock  sync.RWMutex
 	ctx             context.Context                     // Main context for subscription management
 	cancel          context.CancelFunc
-	subCancel       context.CancelFunc                  // Cancel function for current subscription
+	subCancels      map[string]context.CancelFunc       // Per-key subscription cancel functions (pubkey -> cancel)
 	subLock         sync.Mutex                          // Protects subscription refresh
 }
 
@@ -137,6 +137,7 @@ func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, e
 		frostKeys:        make(map[string]string),
 		pendingCtx:       make(map[string]*pendingRequestContext),
 		seenEvents:       make(map[string]time.Time),
+		subCancels:       make(map[string]context.CancelFunc),
 	}
 }
 
@@ -244,7 +245,8 @@ func (s *Signer) prewarmKeyRelayClients() {
 	slog.Info("finished pre-warming relay clients", "count", len(keysToWarm))
 }
 
-// refreshSubscription updates the relay subscription with current pubkeys.
+// refreshSubscription updates per-key relay subscriptions.
+// Each key gets its own authenticated subscription to support HAVEN inbox access.
 // Call this when keys are added or removed.
 func (s *Signer) refreshSubscription() {
 	s.subLock.Lock()
@@ -255,51 +257,92 @@ func (s *Signer) refreshSubscription() {
 		return
 	}
 
-	// Cancel existing subscription if any
-	if s.subCancel != nil {
-		s.subCancel()
-	}
-
-	// Get current pubkeys (regular keys + FROST keys)
+	// Get current pubkeys and their private keys (regular keys + FROST keys)
 	s.keysLock.RLock()
-	pubkeys := make([]string, 0, len(s.keys)+len(s.frostKeys))
-	for pubkey := range s.keys {
-		pubkeys = append(pubkeys, pubkey)
+	currentKeys := make(map[string]string) // pubkey -> privateKey
+	keyRelaysCopy := make(map[string][]string)
+	for pubkey, privateKey := range s.keys {
+		currentKeys[pubkey] = privateKey
 	}
+	for pubkey, relays := range s.keyRelays {
+		keyRelaysCopy[pubkey] = relays
+	}
+	// FROST keys don't have private keys here, they use the coordinator
+	frostPubkeys := make(map[string]bool)
 	for pubkey := range s.frostKeys {
-		// Only add if not already present (shouldn't happen, but be safe)
-		found := false
-		for _, p := range pubkeys {
-			if p == pubkey {
-				found = true
-				break
-			}
-		}
-		if !found {
-			pubkeys = append(pubkeys, pubkey)
-		}
+		frostPubkeys[pubkey] = true
 	}
 	s.keysLock.RUnlock()
 
-	if len(pubkeys) == 0 {
+	// Cancel subscriptions for keys that were removed
+	for pubkey, cancel := range s.subCancels {
+		_, hasRegular := currentKeys[pubkey]
+		_, hasFrost := frostPubkeys[pubkey]
+		if !hasRegular && !hasFrost {
+			slog.Info("canceling subscription for removed key", "pubkey", pubkey[:16]+"...")
+			cancel()
+			delete(s.subCancels, pubkey)
+		}
+	}
+
+	if len(currentKeys) == 0 && len(frostPubkeys) == 0 {
 		slog.Info("no keys to subscribe for, waiting for keys to be added")
 		return
 	}
 
-	// Create subscription context
-	subCtx, cancel := context.WithCancel(s.ctx)
-	s.subCancel = cancel
+	// Start subscriptions for regular keys that don't have one yet
+	for pubkey, privateKey := range currentKeys {
+		if _, exists := s.subCancels[pubkey]; exists {
+			continue // Already has subscription
+		}
 
-	// Subscribe with #p filter - relay will only send events addressed to our keys
-	// This is the proper way to do NIP-46 subscriptions at scale
-	filters := nostr.Filters{{
-		Kinds: []int{KindNIP46Request},
-		Tags:  nostr.TagMap{"p": pubkeys},
-	}}
+		// Create per-key subscription context
+		subCtx, cancel := context.WithCancel(s.ctx)
+		s.subCancels[pubkey] = cancel
 
-	slog.Info("subscribing to NIP-46 requests", "pubkeys", len(pubkeys))
+		// Get or create per-key relay client (will connect and be ready for auth)
+		relays := keyRelaysCopy[pubkey]
+		keyClient := s.keyRelayManager.GetClient(s.ctx, pubkey, privateKey, relays)
 
-	go s.relayClient.SubscribeWithRelayInfoReconnect(subCtx, filters, s.handleEventWithRelay)
+		// Create filter for just this key's pubkey
+		filters := nostr.Filters{{
+			Kinds: []int{KindNIP46Request},
+			Tags:  nostr.TagMap{"p": []string{pubkey}},
+		}}
+
+		slog.Info("starting per-key authenticated subscription", "pubkey", pubkey[:16]+"...", "relays", len(keyClient.GetConnectedRelays()))
+
+		// Subscribe with authentication (required for HAVEN inbox access)
+		go keyClient.SubscribeWithAuth(subCtx, filters, s.handleEventWithRelay)
+	}
+
+	// For FROST keys, we still need to receive events but don't have the private key here
+	// Use the main relay client for FROST keys (they may not need auth if on different relays)
+	// TODO: FROST keys may need a different approach for HAVEN-enabled relays
+	for pubkey := range frostPubkeys {
+		if _, exists := s.subCancels[pubkey]; exists {
+			continue // Already has subscription
+		}
+		if _, hasRegular := currentKeys[pubkey]; hasRegular {
+			continue // Handled by regular key subscription above
+		}
+
+		// Create subscription context
+		subCtx, cancel := context.WithCancel(s.ctx)
+		s.subCancels[pubkey] = cancel
+
+		filters := nostr.Filters{{
+			Kinds: []int{KindNIP46Request},
+			Tags:  nostr.TagMap{"p": []string{pubkey}},
+		}}
+
+		slog.Info("starting FROST key subscription (unauthenticated)", "pubkey", pubkey[:16]+"...")
+
+		// FROST keys use main relay client (may not work on HAVEN relays without auth)
+		go s.relayClient.SubscribeWithRelayInfoReconnect(subCtx, filters, s.handleEventWithRelay)
+	}
+
+	slog.Info("subscription refresh complete", "regular_keys", len(currentKeys), "frost_keys", len(frostPubkeys))
 }
 
 // RefreshSubscription is the public method to trigger subscription refresh.
@@ -310,6 +353,15 @@ func (s *Signer) RefreshSubscription() {
 
 // Stop stops the signer
 func (s *Signer) Stop() {
+	// Cancel all per-key subscriptions
+	s.subLock.Lock()
+	for pubkey, cancel := range s.subCancels {
+		cancel()
+		delete(s.subCancels, pubkey)
+	}
+	s.subLock.Unlock()
+
+	// Cancel main context (also cancels any remaining child contexts)
 	if s.cancel != nil {
 		s.cancel()
 	}

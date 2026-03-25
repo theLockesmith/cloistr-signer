@@ -342,3 +342,105 @@ func (c *KeyRelayClient) GetConnectedRelays() []string {
 	}
 	return urls
 }
+
+// SubscribeWithAuth authenticates as this key and subscribes to the given filters.
+// This is required for HAVEN-enabled relays where inbox events can only be read
+// by the authenticated owner of that inbox.
+func (c *KeyRelayClient) SubscribeWithAuth(ctx context.Context, filters nostr.Filters, handler func(*nostr.Event, string)) {
+	c.mu.RLock()
+	relaysCopy := make(map[string]*nostr.Relay)
+	for url, relay := range c.relays {
+		relaysCopy[url] = relay
+	}
+	c.mu.RUnlock()
+
+	for url, relay := range relaysCopy {
+		go c.subscribeToRelayWithAuth(ctx, url, relay, filters, handler)
+	}
+
+	// Start reconnection loop
+	go c.subscribeReconnectLoop(ctx, filters, handler)
+}
+
+// subscribeToRelayWithAuth authenticates and subscribes to a single relay
+func (c *KeyRelayClient) subscribeToRelayWithAuth(ctx context.Context, url string, relay *nostr.Relay, filters nostr.Filters, handler func(*nostr.Event, string)) {
+	// Authenticate first - required for HAVEN inbox access
+	if err := c.authenticateRelay(ctx, relay); err != nil {
+		slog.Warn("failed to authenticate for subscription", "pubkey", c.pubkey[:16]+"...", "url", url, "error", err)
+		// Continue anyway - maybe relay doesn't require auth
+	} else {
+		slog.Info("authenticated for subscription", "pubkey", c.pubkey[:16]+"...", "url", url)
+	}
+
+	// Subscribe
+	sub, err := relay.Subscribe(ctx, filters)
+	if err != nil {
+		slog.Warn("failed to subscribe after auth", "pubkey", c.pubkey[:16]+"...", "url", url, "error", err)
+		// Mark relay as disconnected so reconnect loop can retry
+		c.mu.Lock()
+		delete(c.relays, url)
+		c.mu.Unlock()
+		return
+	}
+
+	slog.Info("subscribed with auth", "pubkey", c.pubkey[:16]+"...", "url", url, "filters", filters)
+
+	// Handle events
+	for ev := range sub.Events {
+		handler(ev, url)
+	}
+
+	// Subscription closed - mark for reconnection
+	slog.Warn("authenticated subscription closed", "pubkey", c.pubkey[:16]+"...", "url", url)
+	c.mu.Lock()
+	delete(c.relays, url)
+	c.mu.Unlock()
+}
+
+// subscribeReconnectLoop periodically reconnects dropped relays and re-subscribes
+func (c *KeyRelayClient) subscribeReconnectLoop(ctx context.Context, filters nostr.Filters, handler func(*nostr.Event, string)) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.reconnectAndSubscribe(ctx, filters, handler)
+		}
+	}
+}
+
+// reconnectAndSubscribe reconnects to any disconnected relays and re-subscribes
+func (c *KeyRelayClient) reconnectAndSubscribe(ctx context.Context, filters nostr.Filters, handler func(*nostr.Event, string)) {
+	c.mu.Lock()
+	// Find relays that need reconnection
+	connectedURLs := make(map[string]bool)
+	for url := range c.relays {
+		connectedURLs[url] = true
+	}
+	c.mu.Unlock()
+
+	for _, url := range c.relayURLs {
+		if connectedURLs[url] {
+			continue // Already connected
+		}
+
+		// Reconnect
+		relay, err := nostr.RelayConnect(ctx, url)
+		if err != nil {
+			slog.Debug("reconnect failed", "pubkey", c.pubkey[:16]+"...", "url", url, "error", err)
+			continue
+		}
+
+		c.mu.Lock()
+		c.relays[url] = relay
+		c.mu.Unlock()
+
+		slog.Info("reconnected relay", "pubkey", c.pubkey[:16]+"...", "url", url)
+
+		// Authenticate and subscribe in goroutine
+		go c.subscribeToRelayWithAuth(ctx, url, relay, filters, handler)
+	}
+}
