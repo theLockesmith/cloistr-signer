@@ -161,11 +161,12 @@ func (c *KeyRelayClient) authenticateRelay(ctx context.Context, relay *nostr.Rel
 
 	// Get the public URL for this relay (for AUTH event relay tag)
 	publicURL := c.getPublicURL(relay.URL)
-	slog.Debug("auth URL mapping",
+	slog.Info("auth URL mapping",
 		"pubkey", c.pubkey[:16]+"...",
 		"relay_url", relay.URL,
 		"public_url", publicURL,
-		"mappings", c.publicURLMappings)
+		"has_mappings", c.publicURLMappings != nil,
+		"mapping_count", len(c.publicURLMappings))
 
 	// Short timeout - if relay doesn't respond to AUTH quickly, continue without it
 	authCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -177,7 +178,7 @@ func (c *KeyRelayClient) authenticateRelay(ctx context.Context, relay *nostr.Rel
 		// go-nostr sets this to relay.URL (internal), but we need the public URL
 		for i, tag := range event.Tags {
 			if len(tag) >= 2 && tag[0] == "relay" {
-				slog.Debug("replacing relay tag",
+				slog.Info("replacing relay tag in AUTH event",
 					"pubkey", c.pubkey[:16]+"...",
 					"original", tag[1],
 					"replacement", publicURL)
