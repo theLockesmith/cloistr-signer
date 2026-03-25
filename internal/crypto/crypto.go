@@ -4,12 +4,15 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+
+	"golang.org/x/crypto/hkdf"
 )
 
 var (
@@ -132,4 +135,26 @@ func GenerateKey() (string, error) {
 		return "", fmt.Errorf("failed to generate key: %w", err)
 	}
 	return hex.EncodeToString(key), nil
+}
+
+// DeriveNostrKey deterministically derives a Nostr private key from a seed and identifier.
+// Uses HKDF-SHA256 to produce a 32-byte key suitable for secp256k1.
+// The same seed + identifier always produces the same key (deterministic).
+// Returns hex-encoded private key.
+func DeriveNostrKey(seedHex, identifier, context string) (string, error) {
+	seed, err := hex.DecodeString(seedHex)
+	if err != nil {
+		return "", fmt.Errorf("invalid seed hex: %w", err)
+	}
+
+	// HKDF: extract-then-expand with SHA-256
+	// Salt = context string, Info = identifier
+	hkdfReader := hkdf.New(sha256.New, seed, []byte(context), []byte(identifier))
+
+	derivedKey := make([]byte, 32)
+	if _, err := io.ReadFull(hkdfReader, derivedKey); err != nil {
+		return "", fmt.Errorf("HKDF expansion failed: %w", err)
+	}
+
+	return hex.EncodeToString(derivedKey), nil
 }

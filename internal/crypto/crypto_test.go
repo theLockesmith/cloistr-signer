@@ -260,3 +260,65 @@ func TestDifferentKeysCannotDecrypt(t *testing.T) {
 		t.Error("Different key should not be able to decrypt")
 	}
 }
+
+func TestDeriveNostrKey_Deterministic(t *testing.T) {
+	seed := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	userID := "user123"
+	context := "cloistr-platform-identity"
+
+	// Derive the same key multiple times
+	key1, err := DeriveNostrKey(seed, userID, context)
+	if err != nil {
+		t.Fatalf("DeriveNostrKey() error = %v", err)
+	}
+
+	key2, err := DeriveNostrKey(seed, userID, context)
+	if err != nil {
+		t.Fatalf("DeriveNostrKey() error = %v", err)
+	}
+
+	// Must be deterministic - same inputs = same output
+	if key1 != key2 {
+		t.Errorf("DeriveNostrKey() not deterministic: %s != %s", key1, key2)
+	}
+
+	// Should be 64 hex chars (32 bytes)
+	if len(key1) != 64 {
+		t.Errorf("DeriveNostrKey() length = %d, want 64", len(key1))
+	}
+}
+
+func TestDeriveNostrKey_DifferentInputs(t *testing.T) {
+	seed := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	context := "cloistr-platform-identity"
+
+	// Different user IDs should produce different keys
+	key1, _ := DeriveNostrKey(seed, "user1", context)
+	key2, _ := DeriveNostrKey(seed, "user2", context)
+
+	if key1 == key2 {
+		t.Error("DeriveNostrKey() should produce different keys for different user IDs")
+	}
+
+	// Different seeds should produce different keys
+	seed2 := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	key3, _ := DeriveNostrKey(seed2, "user1", context)
+
+	if key1 == key3 {
+		t.Error("DeriveNostrKey() should produce different keys for different seeds")
+	}
+
+	// Different contexts should produce different keys
+	key4, _ := DeriveNostrKey(seed, "user1", "different-context")
+
+	if key1 == key4 {
+		t.Error("DeriveNostrKey() should produce different keys for different contexts")
+	}
+}
+
+func TestDeriveNostrKey_InvalidSeed(t *testing.T) {
+	_, err := DeriveNostrKey("not-valid-hex", "user1", "context")
+	if err == nil {
+		t.Error("DeriveNostrKey() should return error for invalid hex seed")
+	}
+}

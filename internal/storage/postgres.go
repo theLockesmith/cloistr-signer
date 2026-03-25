@@ -2,12 +2,18 @@ package storage
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/nbd-wtf/go-nostr"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
 )
 
 // PostgresStorage implements Storage interface using PostgreSQL
@@ -37,6 +43,12 @@ func NewPostgresStorage(dsn string) (*PostgresStorage, error) {
 	// Run migrations
 	if err := ps.migrate(); err != nil {
 		return nil, fmt.Errorf("failed to run migrations: %w", err)
+	}
+
+	// Backfill platform users for existing web accounts
+	if err := ps.backfillPlatformUsers(context.Background()); err != nil {
+		slog.Warn("failed to backfill platform users", "error", err)
+		// Non-fatal - continue anyway
 	}
 
 	return ps, nil
@@ -1439,6 +1451,122 @@ func (ps *PostgresStorage) GrantServiceAccess(ctx context.Context, pubkey string
 		ON CONFLICT (pubkey, service_id) DO NOTHING`,
 		pubkey, serviceSlug)
 	return err
+}
+
+// getPlatformIdentitySeed returns the seed used for deriving user identity keys.
+// Creates the seed on first access (stored in signer_settings).
+func (ps *PostgresStorage) getPlatformIdentitySeed(ctx context.Context) (string, error) {
+	const seedKey = "platform_identity_seed"
+
+	// Try to get existing seed
+	var seed string
+	err := ps.db.QueryRowContext(ctx,
+		`SELECT value FROM signer_settings WHERE key = $1`, seedKey).Scan(&seed)
+	if err == nil {
+		return seed, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", fmt.Errorf("failed to query seed: %w", err)
+	}
+
+	// Generate new seed (32 bytes, hex-encoded)
+	seedBytes := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, seedBytes); err != nil {
+		return "", fmt.Errorf("failed to generate seed: %w", err)
+	}
+	seed = hex.EncodeToString(seedBytes)
+
+	// Store it (race-safe: ON CONFLICT returns existing value)
+	err = ps.db.QueryRowContext(ctx, `
+		INSERT INTO signer_settings (key, value, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (key) DO UPDATE SET key = signer_settings.key
+		RETURNING value`, seedKey, seed).Scan(&seed)
+	if err != nil {
+		return "", fmt.Errorf("failed to store seed: %w", err)
+	}
+
+	slog.Info("platform identity seed initialized")
+	return seed, nil
+}
+
+// DeriveUserPubkey deterministically derives a pubkey for a user ID.
+// Same user ID always produces the same pubkey.
+func (ps *PostgresStorage) DeriveUserPubkey(ctx context.Context, userID string) (string, error) {
+	seed, err := ps.getPlatformIdentitySeed(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	privateKey, err := crypto.DeriveNostrKey(seed, userID, "cloistr-platform-identity")
+	if err != nil {
+		return "", fmt.Errorf("key derivation failed: %w", err)
+	}
+
+	pubkey, err := nostr.GetPublicKey(privateKey)
+	if err != nil {
+		return "", fmt.Errorf("pubkey derivation failed: %w", err)
+	}
+
+	return pubkey, nil
+}
+
+// backfillPlatformUsers ensures all existing signer web accounts have:
+// 1. A pubkey (derives one deterministically if missing)
+// 2. A corresponding platform user record
+// This runs on startup to catch accounts created before platform integration.
+func (ps *PostgresStorage) backfillPlatformUsers(ctx context.Context) error {
+	// Find users without pubkeys and derive them deterministically
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id FROM signer_web_accounts WHERE pubkey IS NULL OR pubkey = ''`)
+	if err != nil {
+		return fmt.Errorf("failed to query users without pubkeys: %w", err)
+	}
+	defer rows.Close()
+
+	var usersWithoutPubkey []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("failed to scan user id: %w", err)
+		}
+		usersWithoutPubkey = append(usersWithoutPubkey, id)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating users: %w", err)
+	}
+
+	// Derive pubkeys for users without them (deterministic from user ID)
+	for _, userID := range usersWithoutPubkey {
+		pubkey, err := ps.DeriveUserPubkey(ctx, userID)
+		if err != nil {
+			slog.Warn("failed to derive pubkey for user", "user_id", userID, "error", err)
+			continue
+		}
+
+		_, err = ps.db.ExecContext(ctx, `
+			UPDATE signer_web_accounts SET pubkey = $1, updated_at = NOW() WHERE id = $2`,
+			pubkey, userID)
+		if err != nil {
+			slog.Warn("failed to update user pubkey", "user_id", userID, "error", err)
+			continue
+		}
+		slog.Info("derived pubkey for existing user", "user_id", userID, "pubkey", pubkey[:16]+"...")
+	}
+
+	// Ensure all users with pubkeys have platform records
+	_, err = ps.db.ExecContext(ctx, `
+		INSERT INTO users (pubkey, enabled, created_at, updated_at)
+		SELECT pubkey, TRUE, NOW(), NOW()
+		FROM signer_web_accounts
+		WHERE pubkey IS NOT NULL AND pubkey != ''
+		ON CONFLICT (pubkey) DO NOTHING`)
+	if err != nil {
+		return fmt.Errorf("failed to backfill platform users: %w", err)
+	}
+
+	slog.Info("platform user backfill complete", "users_without_pubkey", len(usersWithoutPubkey))
+	return nil
 }
 
 func (ps *PostgresStorage) GetSetting(ctx context.Context, key string) (string, error) {

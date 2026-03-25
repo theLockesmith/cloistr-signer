@@ -894,6 +894,10 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 			h.jsonError(w, http.StatusForbidden, "No account linked to this pubkey")
 			return
 		}
+		// Ensure platform user exists for cross-service authorization
+		if err := h.storage.EnsurePlatformUser(r.Context(), req.Pubkey); err != nil {
+			slog.Warn("failed to ensure platform user for admin", "error", err, "pubkey", req.Pubkey[:16]+"...")
+		}
 		// Config-based admin login (no session tracking for these legacy logins)
 		token, expiresAt, err := auth.GenerateJWT(h.authConfig, req.Pubkey, "admin:"+req.Pubkey[:8])
 		if err != nil {
@@ -915,6 +919,11 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 			"redirect": "/dashboard",
 		})
 		return
+	}
+
+	// Ensure platform user exists for cross-service authorization
+	if err := h.storage.EnsurePlatformUser(r.Context(), req.Pubkey); err != nil {
+		slog.Warn("failed to ensure platform user", "error", err, "pubkey", req.Pubkey[:16]+"...")
 	}
 
 	// Create database session for activity tracking

@@ -8,7 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nbd-wtf/go-nostr"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
 )
 
 var (
@@ -270,6 +272,10 @@ type Storage interface {
 	ResetFailedLogins(ctx context.Context, userID string) error
 	LockUser(ctx context.Context, userID string, until time.Time) error
 	UnlockUser(ctx context.Context, userID string) error
+
+	// Platform user management (cross-service authorization)
+	EnsurePlatformUser(ctx context.Context, pubkey string) error
+	DeriveUserPubkey(ctx context.Context, userID string) (string, error)
 
 	// User session management
 	CreateUserSession(ctx context.Context, session *UserSession) error
@@ -1062,6 +1068,35 @@ func (m *MemoryStorage) UnlockUser(ctx context.Context, userID string) error {
 	user.FailedLoginAttempts = 0
 	user.UpdatedAt = time.Now()
 	return nil
+}
+
+// EnsurePlatformUser is a no-op for in-memory storage (no platform DB)
+func (m *MemoryStorage) EnsurePlatformUser(ctx context.Context, pubkey string) error {
+	// In-memory storage doesn't have platform integration
+	slog.Debug("EnsurePlatformUser skipped (in-memory storage)", "pubkey", pubkey[:16]+"...")
+	return nil
+}
+
+// DeriveUserPubkey generates a deterministic pubkey for testing
+// In production (PostgresStorage), this uses HKDF with a persistent seed
+func (m *MemoryStorage) DeriveUserPubkey(ctx context.Context, userID string) (string, error) {
+	// For in-memory/testing: use a fixed test seed + HKDF
+	// This is deterministic within a test run
+	testSeed := "0000000000000000000000000000000000000000000000000000000000000000"
+	pubkey, err := derivePubkeyFromSeed(testSeed, userID)
+	if err != nil {
+		return "", err
+	}
+	return pubkey, nil
+}
+
+// derivePubkeyFromSeed derives a pubkey from seed and user ID using HKDF
+func derivePubkeyFromSeed(seedHex, userID string) (string, error) {
+	privateKey, err := crypto.DeriveNostrKey(seedHex, userID, "cloistr-platform-identity")
+	if err != nil {
+		return "", err
+	}
+	return nostr.GetPublicKey(privateKey)
 }
 
 // User session management

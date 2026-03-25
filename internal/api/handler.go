@@ -1477,6 +1477,15 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Derive identity pubkey deterministically from user ID
+	// Every signer user gets a Nostr identity for cross-service authorization
+	identityPubkey, err := h.storage.DeriveUserPubkey(r.Context(), userID)
+	if err != nil {
+		slog.Error("failed to derive identity pubkey", "error", err, "user_id", userID)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to generate identity")
+		return
+	}
+
 	// Create user
 	now := time.Now()
 	user := &storage.User{
@@ -1484,6 +1493,7 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		Username:     req.Username,
 		Email:        req.Email,
 		PasswordHash: passwordHash,
+		Pubkey:       identityPubkey,
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -1497,7 +1507,13 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("user registered", "username", req.Username, "user_id", userID)
+	// Ensure platform user exists for cross-service authorization
+	if err := h.storage.EnsurePlatformUser(r.Context(), user.Pubkey); err != nil {
+		// Log but don't fail registration - platform linking is supplementary
+		slog.Warn("failed to ensure platform user", "error", err, "pubkey", user.Pubkey[:16]+"...")
+	}
+
+	slog.Info("user registered", "username", req.Username, "user_id", userID, "pubkey", user.Pubkey[:16]+"...")
 
 	h.jsonResponse(w, http.StatusCreated, UserResponse{
 		ID:         user.ID,
