@@ -17,6 +17,7 @@ import (
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/discovery"
+	"git.coldforge.xyz/coldforge/cloistr-signer/internal/frost"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.coldforge.xyz/coldforge/cloistr-signer/internal/signer"
@@ -175,6 +176,24 @@ func main() {
 		slog.Warn("failed to start admin handler", "error", err)
 	}
 
+	// Initialize distributed DKG if encryption is enabled and we have a signer identity
+	if encryptor != nil && signerPrivkey != "" {
+		frostEncAdapter := &frostEncryptorAdapter{enc: encryptor}
+		distributedDKG, err := frost.NewDistributedDKG(store, frostEncAdapter, relayClient, signerPrivkey)
+		if err != nil {
+			slog.Warn("failed to initialize distributed DKG", "error", err)
+		} else {
+			apiHandler.SetDistributedDKG(distributedDKG)
+			// Start listening for DKG messages
+			go func() {
+				if err := distributedDKG.StartDMListener(ctx); err != nil {
+					slog.Warn("distributed DKG listener stopped", "error", err)
+				}
+			}()
+			slog.Info("distributed DKG enabled", "pubkey", signerPubkey[:16]+"...")
+		}
+	}
+
 	// Send boot notification to admins (async)
 	go func() {
 		// Give relays a moment to connect
@@ -267,4 +286,17 @@ func loadOrGenerateSignerIdentity(ctx context.Context, store storage.Storage, en
 
 	slog.Info("generated new signer identity", "pubkey", pubkey)
 	return privkey, pubkey
+}
+
+// frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
+type frostEncryptorAdapter struct {
+	enc *crypto.Encryptor
+}
+
+func (a *frostEncryptorAdapter) Encrypt(plaintext []byte) ([]byte, error) {
+	return a.enc.EncryptBytes(plaintext)
+}
+
+func (a *frostEncryptorAdapter) Decrypt(ciphertext []byte) ([]byte, error) {
+	return a.enc.DecryptBytes(ciphertext)
 }
