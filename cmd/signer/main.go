@@ -52,6 +52,11 @@ func main() {
 	// Initialize relay client
 	relayClient := nostr.NewClient(cfg.Relays)
 
+	// Set public URL mappings for NIP-42 auth (maps internal K8s URLs to public URLs)
+	if len(cfg.RelayPublicMappings) > 0 {
+		relayClient.SetPublicURLMappings(cfg.RelayPublicMappings)
+	}
+
 	// Initialize encryptor for key encryption at rest
 	var encryptor *crypto.Encryptor
 	if cfg.Storage.EncryptionKey != "" {

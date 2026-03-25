@@ -22,10 +22,11 @@ type subscription struct {
 
 // Client manages connections to Nostr relays
 type Client struct {
-	relayURLs []string
-	relays    map[string]*nostr.Relay
-	authKey   string // Private key for NIP-42 auth (hex)
-	mu        sync.RWMutex
+	relayURLs         []string
+	relays            map[string]*nostr.Relay
+	authKey           string            // Private key for NIP-42 auth (hex)
+	publicURLMappings map[string]string // internal URL -> public URL for NIP-42 auth
+	mu                sync.RWMutex
 
 	// Subscription state for reconnection - supports multiple subscriptions
 	subscriptions []subscription
@@ -45,6 +46,24 @@ func (c *Client) SetAuthKey(privateKeyHex string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.authKey = privateKeyHex
+}
+
+// SetPublicURLMappings sets the internal-to-public URL mappings for NIP-42 auth
+// This maps internal K8s service URLs to public URLs for the AUTH event relay tag
+func (c *Client) SetPublicURLMappings(mappings map[string]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.publicURLMappings = mappings
+}
+
+// getPublicURL returns the public URL for a relay URL
+func (c *Client) getPublicURL(internalURL string) string {
+	if c.publicURLMappings != nil {
+		if public, ok := c.publicURLMappings[internalURL]; ok {
+			return public
+		}
+	}
+	return internalURL
 }
 
 // Connect establishes connections to all configured relays
@@ -84,6 +103,9 @@ func (c *Client) authenticateRelayWithKey(ctx context.Context, relay *nostr.Rela
 		return fmt.Errorf("no private key for authentication")
 	}
 
+	// Get the public URL for this relay (for AUTH event relay tag)
+	publicURL := c.getPublicURL(relay.URL)
+
 	// Use a dedicated context with sufficient timeout for auth
 	// The parent context might have a tight deadline from HTTP handlers
 	authCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -95,12 +117,20 @@ func (c *Client) authenticateRelayWithKey(ctx context.Context, relay *nostr.Rela
 			return err
 		}
 		event.PubKey = pubkey
+		// Replace the relay tag with the public URL
+		// go-nostr sets this to relay.URL (internal), but we need the public URL
+		for i, tag := range event.Tags {
+			if len(tag) >= 2 && tag[0] == "relay" {
+				event.Tags[i] = nostr.Tag{"relay", publicURL}
+				break
+			}
+		}
 		return event.Sign(privateKey)
 	})
 	if err != nil {
 		return err
 	}
-	slog.Info("authenticated with relay", "url", relay.URL)
+	slog.Info("authenticated with relay", "url", relay.URL, "publicURL", publicURL)
 	return nil
 }
 
