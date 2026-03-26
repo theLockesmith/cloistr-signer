@@ -109,6 +109,7 @@ func (s *Selector) SelectRelays(ctx context.Context, input SelectionInput) []str
 	slog.Info("selected relays",
 		"mode", mode,
 		"discovery_hint", truncatePubkey(input.DiscoveryHint),
+		"fallback_count", len(s.fallbackRelays),
 		"total", len(result),
 	)
 
@@ -124,6 +125,7 @@ func deduplicateRelays(relays []string, max int) []string {
 		// Normalize URL (lowercase, trim trailing slash)
 		normalized := normalizeRelayURL(relay)
 		if normalized == "" {
+			slog.Debug("skipping invalid relay URL", "relay", relay)
 			continue
 		}
 
@@ -133,6 +135,8 @@ func deduplicateRelays(relays []string, max int) []string {
 			if len(result) >= max {
 				break
 			}
+		} else {
+			slog.Debug("skipping duplicate relay", "relay", relay, "normalized", normalized)
 		}
 	}
 
