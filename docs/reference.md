@@ -162,7 +162,19 @@ cd ~/Atlas && K8S_AUTH_KUBECONFIG=~/.kube/config ansible-playbook \
 | 6 | Signer Chaining | Done |
 | 7 | Per-Key Connections | Done |
 | 8 | FROST Threshold (API) | Done |
+| 9 | Distributed DKG | Done |
+
+### Phase 9: Distributed DKG (2026-03-25)
+
+Multi-party key generation over Nostr DMs:
+- Pedersen DKG with VSS verification
+- 3 rounds: commitment → share distribution → verification
+- NIP-04 encrypted communication via kind 24133 (ephemeral)
+- NIP-42 relay authentication support
+- Full test coverage (24 tests)
+
+**Next:** Distributed signing (coordinate partial signatures)
 
 ---
 
-**Last Updated:** 2026-03-11
+**Last Updated:** 2026-03-25

@@ -313,19 +313,49 @@ Our approach (signer chaining + FROST) solves the same problems without protocol
 
 ## Roadmap
 
-### Phase 13a: Research & Prototyping
-- [ ] Deep dive into FROSTR codebase
-- [ ] Prototype: cloistr-signer as FROST share holder
-- [ ] Prototype: cloistr-signer as FROST coordinator
-- [ ] Evaluate crypto libraries (Go vs calling into Rust)
+### Phase 13a: Research & Prototyping ✅ COMPLETE
+- [x] Deep dive into FROSTR codebase
+- [x] Prototype: cloistr-signer as FROST share holder
+- [x] Prototype: cloistr-signer as FROST coordinator
+- [x] Evaluate crypto libraries - **Decision:** bytemare/frost (native Go)
 
-### Phase 13b: Core Implementation
-- [ ] Share holder mode
-- [ ] Coordinator mode
-- [ ] DKG (trusted dealer first, distributed later)
-- [ ] Signing session protocol
+### Phase 13b: Core Implementation ✅ COMPLETE (DKG) / In Progress (Signing)
+- [x] Share holder mode (local FROST key storage)
+- [x] Coordinator mode (DKG initiation)
+- [x] **Distributed DKG via Nostr DMs** - Full implementation
+- [ ] Distributed signing session protocol
+
+#### Distributed DKG Implementation (2026-03-25)
+
+**Location:** `internal/frost/dkg_distributed.go`
+
+Implemented 3-round Pedersen DKG over Nostr ephemeral DMs (kind 24133):
+
+| Round | Purpose | Communication |
+|-------|---------|---------------|
+| 1 | Commitment Exchange | Broadcast polynomial commitments to all participants |
+| 2 | Share Distribution | Send encrypted evaluations to each participant |
+| 3 | Verification | Verify received shares against commitments |
+
+**Key Features:**
+- Pedersen VSS (Verifiable Secret Sharing) with commitment verification
+- NIP-04 encrypted DMs for share distribution
+- NIP-42 relay authentication support (required for DM subscriptions)
+- Multi-dealer share aggregation (each participant is a dealer)
+- Lagrange interpolation for threshold reconstruction
+
+**Tests:** `internal/frost/dkg_distributed_test.go` - 24 tests covering:
+- Polynomial evaluation
+- VSS verification
+- Commitment encoding/decoding
+- Multi-dealer share aggregation
+- Threshold reconstruction
+- Session state management
+
+**Status:** Deployed to production (`signer.cloistr.xyz`)
 
 ### Phase 13c: Integration
+- [ ] **Distributed signing** - Coordinate partial signatures across signers
 - [ ] Connect FROST to signer chaining layer
 - [ ] Web UI for FROST key management
 - [ ] Share rotation workflows
@@ -347,4 +377,4 @@ Our approach (signer chaining + FROST) solves the same problems without protocol
 
 ---
 
-**Last Updated:** 2026-02-22
+**Last Updated:** 2026-03-25
