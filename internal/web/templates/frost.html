@@ -1,0 +1,420 @@
+{{define "content"}}
+<div class="page-header">
+    <h1>FROST Threshold Keys</h1>
+    <div style="display: flex; gap: 8px;">
+        <button id="import-share-btn" class="btn btn-secondary">Import Share</button>
+        <button id="create-frost-btn" class="btn btn-primary">Create FROST Key</button>
+    </div>
+</div>
+
+<div class="info-box" style="margin-bottom: 1.5rem;">
+    <strong>What is FROST?</strong> Flexible Round-Optimized Schnorr Threshold signatures allow multiple parties to jointly control a key.
+    A <em>t-of-n</em> threshold means any <em>t</em> share holders can sign, but fewer cannot.
+</div>
+
+<div id="message" class="alert" style="display: none;"></div>
+
+<div class="table-container">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Public Key</th>
+                <th>Threshold</th>
+                <th>Local Shares</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .FrostKeys}}
+            <tr data-id="{{.ID}}">
+                <td>{{.Name}}</td>
+                <td class="pubkey">{{truncate .Pubkey 16}}...</td>
+                <td>{{.Threshold}}-of-{{.TotalShares}}</td>
+                <td>{{.LocalShares}} / {{.TotalShares}}</td>
+                <td>
+                    {{if .CanSign}}
+                        <span class="badge badge-success">Ready to Sign</span>
+                    {{else}}
+                        <span class="badge badge-warning">Need {{.Threshold}} shares</span>
+                    {{end}}
+                </td>
+                <td>{{.CreatedAt}}</td>
+                <td>
+                    <button class="btn btn-sm btn-primary shares-btn" data-id="{{.ID}}" data-name="{{.Name}}">Shares</button>
+                    <button class="btn btn-sm copy-btn" data-pubkey="{{.Pubkey}}">Copy Pubkey</button>
+                    <button class="btn btn-sm btn-danger delete-btn" data-id="{{.ID}}" data-name="{{.Name}}">Delete</button>
+                </td>
+            </tr>
+            {{else}}
+            <tr>
+                <td colspan="7" class="text-center text-muted">No FROST keys created yet</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+
+<!-- Create FROST Key Modal -->
+<div id="create-modal" class="modal" style="display: none;">
+    <div class="modal-content">
+        <h2>Create FROST Key</h2>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Generate a new threshold key. All shares will be stored locally - use "Export Share" to distribute to other signers.
+        </p>
+        <form id="create-form">
+            <div class="form-group">
+                <label for="frost-name">Key Name</label>
+                <input type="text" id="frost-name" name="name" required placeholder="e.g., Business Account">
+            </div>
+            <div class="form-group">
+                <label for="frost-threshold">Threshold (t)</label>
+                <input type="number" id="frost-threshold" name="threshold" required min="1" max="10" value="2">
+                <small>Number of shares required to sign</small>
+            </div>
+            <div class="form-group">
+                <label for="frost-total">Total Shares (n)</label>
+                <input type="number" id="frost-total" name="total_shares" required min="1" max="10" value="3">
+                <small>Total number of shares to create</small>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="cancel-create">Cancel</button>
+                <button type="submit" class="btn btn-primary">Create Key</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Import Share Modal -->
+<div id="import-modal" class="modal" style="display: none;">
+    <div class="modal-content modal-lg">
+        <h2>Import FROST Share</h2>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Paste a share bundle received from another signer to become a share holder for an existing FROST key.
+        </p>
+        <form id="import-form">
+            <div class="form-group">
+                <label for="import-bundle">Share Bundle (JSON)</label>
+                <textarea id="import-bundle" name="bundle" required rows="8" class="monospace"
+                    placeholder='{"frost_key_id": "...", "share_index": 1, "share_data": "...", ...}'></textarea>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="cancel-import">Cancel</button>
+                <button type="submit" class="btn btn-primary">Import Share</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Shares Modal -->
+<div id="shares-modal" class="modal" style="display: none;">
+    <div class="modal-content modal-lg">
+        <h2>Shares: <span id="shares-key-name"></span></h2>
+        <input type="hidden" id="shares-key-id">
+
+        <div id="shares-loading" style="text-align: center; padding: 20px;">
+            Loading...
+        </div>
+
+        <div id="shares-content" style="display: none;">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Index</th>
+                        <th>Location</th>
+                        <th>Holder</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="shares-list">
+                </tbody>
+            </table>
+        </div>
+
+        <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" id="close-shares">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Export Share Modal -->
+<div id="export-modal" class="modal" style="display: none;">
+    <div class="modal-content modal-lg">
+        <h2>Export Share</h2>
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Copy this share bundle and send it securely to another signer. They can import it to become a share holder.
+        </p>
+        <div class="form-group">
+            <label>Share Bundle</label>
+            <textarea id="export-bundle" readonly rows="10" class="monospace"></textarea>
+        </div>
+        <div class="modal-actions">
+            <button type="button" class="btn btn-secondary" id="close-export">Close</button>
+            <button type="button" class="btn btn-primary" id="copy-export">Copy Bundle</button>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const createBtn = document.getElementById('create-frost-btn');
+    const createModal = document.getElementById('create-modal');
+    const cancelCreate = document.getElementById('cancel-create');
+    const createForm = document.getElementById('create-form');
+    const messageDiv = document.getElementById('message');
+
+    // Global Esc key handler
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            document.querySelectorAll('.modal').forEach(m => {
+                if (m.style.display === 'flex') {
+                    m.style.display = 'none';
+                }
+            });
+        }
+    });
+
+    // Create modal
+    createBtn.addEventListener('click', () => createModal.style.display = 'flex');
+    cancelCreate.addEventListener('click', () => createModal.style.display = 'none');
+    createModal.addEventListener('click', function(e) {
+        if (e.target === createModal) createModal.style.display = 'none';
+    });
+
+    // Validate threshold <= total
+    const thresholdInput = document.getElementById('frost-threshold');
+    const totalInput = document.getElementById('frost-total');
+
+    function validateThreshold() {
+        const t = parseInt(thresholdInput.value) || 1;
+        const n = parseInt(totalInput.value) || 1;
+        if (t > n) {
+            thresholdInput.value = n;
+        }
+    }
+    thresholdInput.addEventListener('change', validateThreshold);
+    totalInput.addEventListener('change', validateThreshold);
+
+    createForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const submitBtn = createForm.querySelector('button[type="submit"]');
+        ButtonState.setLoading(submitBtn, 'Creating...');
+
+        const name = document.getElementById('frost-name').value;
+        const threshold = parseInt(document.getElementById('frost-threshold').value);
+        const totalShares = parseInt(document.getElementById('frost-total').value);
+
+        try {
+            const response = await fetch('/api/v1/frost/keys', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name, threshold, total_shares: totalShares})
+            });
+
+            if (response.ok) {
+                showMessage('FROST key created successfully', 'success');
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                const data = await response.json();
+                showMessage(data.error || 'Failed to create key', 'error');
+                ButtonState.reset(submitBtn);
+            }
+        } catch (err) {
+            showMessage('Failed to create key', 'error');
+            ButtonState.reset(submitBtn);
+        }
+        createModal.style.display = 'none';
+    });
+
+    // Import modal
+    const importBtn = document.getElementById('import-share-btn');
+    const importModal = document.getElementById('import-modal');
+    const cancelImport = document.getElementById('cancel-import');
+    const importForm = document.getElementById('import-form');
+
+    importBtn.addEventListener('click', () => importModal.style.display = 'flex');
+    cancelImport.addEventListener('click', () => importModal.style.display = 'none');
+    importModal.addEventListener('click', function(e) {
+        if (e.target === importModal) importModal.style.display = 'none';
+    });
+
+    importForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const submitBtn = importForm.querySelector('button[type="submit"]');
+        ButtonState.setLoading(submitBtn, 'Importing...');
+
+        const bundleText = document.getElementById('import-bundle').value.trim();
+
+        try {
+            const bundle = JSON.parse(bundleText);
+            const response = await fetch('/api/v1/frost/shares', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(bundle)
+            });
+
+            if (response.ok) {
+                showMessage('Share imported successfully', 'success');
+                setTimeout(() => location.reload(), 1000);
+            } else {
+                const data = await response.json();
+                showMessage(data.error || 'Failed to import share', 'error');
+                ButtonState.reset(submitBtn);
+            }
+        } catch (err) {
+            if (err instanceof SyntaxError) {
+                showMessage('Invalid JSON format', 'error');
+            } else {
+                showMessage('Failed to import share', 'error');
+            }
+            ButtonState.reset(submitBtn);
+        }
+        importModal.style.display = 'none';
+    });
+
+    // Shares modal
+    const sharesModal = document.getElementById('shares-modal');
+    const sharesLoading = document.getElementById('shares-loading');
+    const sharesContent = document.getElementById('shares-content');
+    const sharesList = document.getElementById('shares-list');
+    const sharesKeyName = document.getElementById('shares-key-name');
+    const sharesKeyId = document.getElementById('shares-key-id');
+    const closeShares = document.getElementById('close-shares');
+
+    closeShares.addEventListener('click', () => sharesModal.style.display = 'none');
+    sharesModal.addEventListener('click', function(e) {
+        if (e.target === sharesModal) sharesModal.style.display = 'none';
+    });
+
+    document.querySelectorAll('.shares-btn').forEach(btn => {
+        btn.addEventListener('click', async function() {
+            const keyId = this.dataset.id;
+            const keyName = this.dataset.name;
+
+            sharesKeyName.textContent = keyName;
+            sharesKeyId.value = keyId;
+            sharesLoading.style.display = 'block';
+            sharesContent.style.display = 'none';
+            sharesModal.style.display = 'flex';
+
+            try {
+                const response = await fetch(`/api/v1/frost/keys/${keyId}/shares`);
+                if (response.ok) {
+                    const shares = await response.json();
+                    sharesList.innerHTML = shares.map(share => `
+                        <tr>
+                            <td>${share.share_index}</td>
+                            <td>${share.is_local ? '<span class="badge badge-success">Local</span>' : '<span class="badge badge-info">Remote</span>'}</td>
+                            <td>${share.holder_pubkey ? share.holder_pubkey.substring(0, 16) + '...' : '<span class="text-muted">This signer</span>'}</td>
+                            <td>
+                                ${share.is_local ? `<button class="btn btn-sm btn-primary export-share-btn" data-key-id="${keyId}" data-index="${share.share_index}">Export</button>` : ''}
+                            </td>
+                        </tr>
+                    `).join('');
+
+                    // Attach export handlers
+                    sharesList.querySelectorAll('.export-share-btn').forEach(exportBtn => {
+                        exportBtn.addEventListener('click', handleExportShare);
+                    });
+
+                    sharesLoading.style.display = 'none';
+                    sharesContent.style.display = 'block';
+                } else {
+                    showMessage('Failed to load shares', 'error');
+                    sharesModal.style.display = 'none';
+                }
+            } catch (err) {
+                showMessage('Failed to load shares', 'error');
+                sharesModal.style.display = 'none';
+            }
+        });
+    });
+
+    // Export modal
+    const exportModal = document.getElementById('export-modal');
+    const exportBundle = document.getElementById('export-bundle');
+    const closeExport = document.getElementById('close-export');
+    const copyExport = document.getElementById('copy-export');
+
+    closeExport.addEventListener('click', () => exportModal.style.display = 'none');
+    exportModal.addEventListener('click', function(e) {
+        if (e.target === exportModal) exportModal.style.display = 'none';
+    });
+
+    copyExport.addEventListener('click', function() {
+        navigator.clipboard.writeText(exportBundle.value);
+        this.textContent = 'Copied!';
+        setTimeout(() => this.textContent = 'Copy Bundle', 1500);
+    });
+
+    async function handleExportShare() {
+        const keyId = this.dataset.keyId;
+        const shareIndex = this.dataset.index;
+
+        ButtonState.setLoading(this, 'Loading...');
+
+        try {
+            const response = await fetch(`/api/v1/frost/keys/${keyId}/export/${shareIndex}`);
+            if (response.ok) {
+                const bundle = await response.json();
+                exportBundle.value = JSON.stringify(bundle, null, 2);
+                sharesModal.style.display = 'none';
+                exportModal.style.display = 'flex';
+            } else {
+                const data = await response.json();
+                showMessage(data.error || 'Failed to export share', 'error');
+            }
+        } catch (err) {
+            showMessage('Failed to export share', 'error');
+        }
+        ButtonState.reset(this);
+    }
+
+    // Copy pubkey buttons
+    document.querySelectorAll('.copy-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            navigator.clipboard.writeText(this.dataset.pubkey);
+            this.textContent = 'Copied!';
+            setTimeout(() => this.textContent = 'Copy Pubkey', 1500);
+        });
+    });
+
+    // Delete buttons
+    document.querySelectorAll('.delete-btn').forEach(btn => {
+        btn.addEventListener('click', async function() {
+            const id = this.dataset.id;
+            const name = this.dataset.name;
+
+            if (!confirm(`Delete FROST key "${name}"? This will delete all shares and cannot be undone.`)) return;
+
+            ButtonState.setLoading(this, 'Deleting...');
+
+            try {
+                const response = await fetch(`/api/v1/frost/keys/${id}`, {method: 'DELETE'});
+                if (response.ok) {
+                    this.closest('tr').remove();
+                    showMessage('FROST key deleted', 'success');
+                } else {
+                    showMessage('Failed to delete key', 'error');
+                    ButtonState.reset(this);
+                }
+            } catch (err) {
+                showMessage('Failed to delete key', 'error');
+                ButtonState.reset(this);
+            }
+        });
+    });
+
+    function showMessage(text, type) {
+        messageDiv.textContent = text;
+        messageDiv.className = 'alert alert-' + type;
+        messageDiv.style.display = 'block';
+        setTimeout(() => messageDiv.style.display = 'none', 3000);
+    }
+});
+</script>
+{{end}}
+
+{{template "base" .}}

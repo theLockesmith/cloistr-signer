@@ -319,11 +319,11 @@ Our approach (signer chaining + FROST) solves the same problems without protocol
 - [x] Prototype: cloistr-signer as FROST coordinator
 - [x] Evaluate crypto libraries - **Decision:** bytemare/frost (native Go)
 
-### Phase 13b: Core Implementation ✅ COMPLETE (DKG) / In Progress (Signing)
+### Phase 13b: Core Implementation ✅ COMPLETE
 - [x] Share holder mode (local FROST key storage)
 - [x] Coordinator mode (DKG initiation)
 - [x] **Distributed DKG via Nostr DMs** - Full implementation
-- [ ] Distributed signing session protocol
+- [x] **Distributed signing API** - RemoteSigner wired to HTTP endpoint
 
 #### Distributed DKG Implementation (2026-03-25)
 
@@ -354,12 +354,13 @@ Implemented 3-round Pedersen DKG over Nostr ephemeral DMs (kind 24133):
 
 **Status:** Deployed to production (`signer.cloistr.xyz`)
 
-### Phase 13c: Integration
-- [ ] **Distributed signing** - Coordinate partial signatures across signers
-- [ ] Connect FROST to signer chaining layer
-- [ ] Web UI for FROST key management
+### Phase 13c: Integration ✅ MOSTLY COMPLETE
+- [x] **Distributed signing** - RemoteSigner coordinates partial signatures via Nostr DMs
+- [x] **Connect FROST to signer chaining** - Proxy keys can point to FROST keys
+- [x] **Share import/export API** - `/api/v1/frost/shares` and `/api/v1/frost/keys/{id}/export/{index}`
+- [x] **Web UI for FROST key management** - `/frost` page with create, view, export, import
 - [ ] Share rotation workflows
-- [ ] Documentation and guides
+- [ ] Distributed DKG initiation from Web UI
 
 ### Phase 13d: Production Hardening
 - [ ] Security audit
@@ -377,4 +378,11 @@ Implemented 3-round Pedersen DKG over Nostr ephemeral DMs (kind 24133):
 
 ---
 
-**Last Updated:** 2026-03-25
+**Last Updated:** 2026-03-31
+
+**Recent Changes (2026-03-31):**
+- Distributed signing API wired up (`RemoteSigner` integrated with HTTP handler)
+- Share import/export endpoints implemented
+- FROST + signer chaining integration (proxy keys can point to FROST keys)
+- Web UI for FROST key management (`/frost` page)
+- Pricing model documented (FROST is Team tier feature)

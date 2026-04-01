@@ -321,7 +321,7 @@ func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHa
 
 	// Create a map of page templates, each inheriting from base
 	templates := make(map[string]*template.Template)
-	pageFiles := []string{"home.html", "login.html", "register.html", "approval.html", "dashboard.html", "keys.html", "apps.html", "requests.html", "users.html"}
+	pageFiles := []string{"home.html", "login.html", "register.html", "approval.html", "dashboard.html", "keys.html", "frost.html", "apps.html", "requests.html", "users.html", "settings.html"}
 
 	for _, page := range pageFiles {
 		// Clone base template
@@ -372,6 +372,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Protected pages (require auth)
 	mux.HandleFunc("/dashboard", h.requireAuth(h.handleDashboard))
 	mux.HandleFunc("/keys", h.requireAuth(h.handleKeys))
+	mux.HandleFunc("/frost", h.requireAuth(h.handleFrost))
 	mux.HandleFunc("/apps", h.requireAuth(h.handleApps))
 	mux.HandleFunc("/requests", h.requireAuth(h.handleRequests))
 	mux.HandleFunc("/users", h.requireAuth(h.handleUsers))
@@ -551,6 +552,67 @@ func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
 		"Title": "Keys - Cloistr Signer",
 		"User":  user,
 		"Keys":  keys,
+	})
+}
+
+// FrostKeyView represents a FROST key for the web UI
+type FrostKeyView struct {
+	ID          string
+	Name        string
+	Pubkey      string
+	Threshold   int
+	TotalShares int
+	LocalShares int
+	CanSign     bool
+	CreatedAt   string
+}
+
+// FrostShareView represents a FROST share for the web UI
+type FrostShareView struct {
+	ID           string
+	ShareIndex   int
+	IsLocal      bool
+	HolderPubkey string
+}
+
+func (h *Handler) handleFrost(w http.ResponseWriter, r *http.Request) {
+	user := h.getCurrentUser(r)
+
+	// List FROST keys from storage
+	frostKeys, err := h.storage.ListFrostKeys(r.Context())
+	if err != nil {
+		slog.Error("failed to list FROST keys", "error", err)
+		frostKeys = []*storage.FrostKey{}
+	}
+
+	// Build view models with share info
+	keyViews := make([]FrostKeyView, 0, len(frostKeys))
+	for _, key := range frostKeys {
+		// Count local shares
+		shares, _ := h.storage.ListFrostShares(r.Context(), key.ID)
+		localCount := 0
+		for _, s := range shares {
+			if s.IsLocal {
+				localCount++
+			}
+		}
+
+		keyViews = append(keyViews, FrostKeyView{
+			ID:          key.ID,
+			Name:        key.Name,
+			Pubkey:      key.Pubkey,
+			Threshold:   key.Threshold,
+			TotalShares: key.TotalShares,
+			LocalShares: localCount,
+			CanSign:     localCount >= key.Threshold,
+			CreatedAt:   key.CreatedAt.Format("2006-01-02 15:04"),
+		})
+	}
+
+	h.render(w, "frost.html", map[string]interface{}{
+		"Title":     "FROST Keys - Cloistr Signer",
+		"User":      user,
+		"FrostKeys": keyViews,
 	})
 }
 

@@ -33,6 +33,7 @@ type Handler struct {
 	frostCoordinator *frost.Coordinator
 	frostKeyGen      *frost.KeyGenerator
 	distributedDKG   *frost.DistributedDKG
+	remoteSigner     *frost.RemoteSigner
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -81,6 +82,11 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 // SetDistributedDKG sets the distributed DKG coordinator (called after nostr client is ready)
 func (h *Handler) SetDistributedDKG(dkg *frost.DistributedDKG) {
 	h.distributedDKG = dkg
+}
+
+// SetRemoteSigner sets the remote signing coordinator (called after nostr client is ready)
+func (h *Handler) SetRemoteSigner(rs *frost.RemoteSigner) {
+	h.remoteSigner = rs
 }
 
 // RegisterRoutes registers all HTTP routes
@@ -2552,9 +2558,55 @@ func (h *Handler) handleFrostKeyShares(w http.ResponseWriter, r *http.Request, k
 }
 
 func (h *Handler) handleExportFrostShare(w http.ResponseWriter, r *http.Request, keyID string, shareIndexStr string) {
-	// This would export a share bundle for distribution to another signer
-	// For now, just return not implemented
-	h.errorResponse(w, http.StatusNotImplemented, "share export not yet implemented")
+	if r.Method != http.MethodGet {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	if h.frostKeyGen == nil {
+		h.errorResponse(w, http.StatusServiceUnavailable, "FROST not enabled")
+		return
+	}
+
+	// Parse share index
+	shareIndex, err := strconv.Atoi(shareIndexStr)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid share index")
+		return
+	}
+
+	// Get the FROST key
+	key, err := h.storage.GetFrostKey(r.Context(), keyID)
+	if err != nil {
+		if err == storage.ErrFrostKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "FROST key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Get the specific share
+	share, err := h.storage.GetFrostShareByKeyAndIndex(r.Context(), keyID, shareIndex)
+	if err != nil {
+		if err == storage.ErrFrostShareNotFound {
+			h.errorResponse(w, http.StatusNotFound, "share not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get share")
+		return
+	}
+
+	// Create the bundle
+	bundle, err := h.frostKeyGen.CreateShareBundle(key, share)
+	if err != nil {
+		slog.Error("failed to create share bundle", "error", err, "key_id", keyID, "share_index", shareIndex)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to create share bundle")
+		return
+	}
+
+	slog.Info("exported FROST share", "key_id", keyID, "share_index", shareIndex)
+	h.jsonResponse(w, http.StatusOK, bundle)
 }
 
 type FrostSignRequest struct {
@@ -2590,16 +2642,52 @@ func (h *Handler) handleFrostSign(w http.ResponseWriter, r *http.Request, keyID 
 		return
 	}
 
-	// Sign using FROST
-	signature, err := h.frostCoordinator.SignEvent(r.Context(), keyID, message)
-	if err != nil {
-		slog.Error("FROST signing failed", "error", err, "key_id", keyID)
-		if err == frost.ErrInsufficientShares {
-			h.errorResponse(w, http.StatusPreconditionFailed, "insufficient shares for signing")
+	var signature string
+
+	// First try local signing (fast path - all shares local)
+	canSignLocal, _ := h.frostCoordinator.CanSign(r.Context(), keyID)
+	if canSignLocal {
+		signature, err = h.frostCoordinator.SignEvent(r.Context(), keyID, message)
+		if err != nil {
+			slog.Error("FROST local signing failed", "error", err, "key_id", keyID)
+			h.errorResponse(w, http.StatusInternalServerError, "signing failed")
 			return
 		}
-		h.errorResponse(w, http.StatusInternalServerError, "signing failed")
-		return
+	} else {
+		// Need remote signing - check if RemoteSigner is available
+		if h.remoteSigner == nil {
+			h.errorResponse(w, http.StatusPreconditionFailed, "insufficient local shares and remote signing not enabled")
+			return
+		}
+
+		// Build remote holders map from non-local shares
+		shares, err := h.storage.ListFrostShares(r.Context(), keyID)
+		if err != nil {
+			h.errorResponse(w, http.StatusInternalServerError, "failed to list shares")
+			return
+		}
+
+		remoteHolders := make(map[int]string)
+		for _, share := range shares {
+			if !share.IsLocal && share.HolderPubkey != "" {
+				remoteHolders[share.ShareIndex] = share.HolderPubkey
+			}
+		}
+
+		if len(remoteHolders) == 0 {
+			h.errorResponse(w, http.StatusPreconditionFailed, "no remote share holders configured")
+			return
+		}
+
+		slog.Info("initiating distributed FROST signing", "key_id", keyID, "remote_holders", len(remoteHolders))
+
+		sigBytes, err := h.remoteSigner.SignWithRemoteShares(r.Context(), keyID, message, remoteHolders)
+		if err != nil {
+			slog.Error("FROST distributed signing failed", "error", err, "key_id", keyID)
+			h.errorResponse(w, http.StatusInternalServerError, "distributed signing failed: "+err.Error())
+			return
+		}
+		signature = hex.EncodeToString(sigBytes)
 	}
 
 	// Get the key to return the pubkey
@@ -2625,8 +2713,133 @@ func (h *Handler) handleFrostShares(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleImportFrostShare(w http.ResponseWriter, r *http.Request) {
-	// This would import a share bundle from another signer
-	h.errorResponse(w, http.StatusNotImplemented, "share import not yet implemented")
+	if h.frostKeyGen == nil {
+		h.errorResponse(w, http.StatusServiceUnavailable, "FROST not enabled")
+		return
+	}
+
+	var bundle frost.ShareBundle
+	if err := json.NewDecoder(r.Body).Decode(&bundle); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid share bundle")
+		return
+	}
+
+	// Validate required fields
+	if bundle.ShareData == "" {
+		h.errorResponse(w, http.StatusBadRequest, "share_data is required")
+		return
+	}
+	if bundle.GroupPublicKey == "" {
+		h.errorResponse(w, http.StatusBadRequest, "group_public_key is required")
+		return
+	}
+	if bundle.Threshold < 1 || bundle.TotalShares < bundle.Threshold {
+		h.errorResponse(w, http.StatusBadRequest, "invalid threshold configuration")
+		return
+	}
+	if bundle.ShareIndex < 1 || bundle.ShareIndex > bundle.TotalShares {
+		h.errorResponse(w, http.StatusBadRequest, "invalid share_index")
+		return
+	}
+
+	// Decode share data
+	shareData, err := hex.DecodeString(bundle.ShareData)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid share_data: must be hex encoded")
+		return
+	}
+
+	// Decode group public key
+	groupPubKey, err := hex.DecodeString(bundle.GroupPublicKey)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid group_public_key: must be hex encoded")
+		return
+	}
+
+	// Decode verification shares
+	var verificationShares []byte
+	if bundle.VerificationShares != "" {
+		verificationShares, err = hex.DecodeString(bundle.VerificationShares)
+		if err != nil {
+			h.errorResponse(w, http.StatusBadRequest, "invalid verification_shares: must be hex encoded")
+			return
+		}
+	}
+
+	// Calculate the Nostr pubkey from the group public key
+	pubkey := frost.HexEncode(groupPubKey)
+	if len(groupPubKey) == 33 {
+		// Compressed format - extract x-coordinate
+		pubkey = hex.EncodeToString(groupPubKey[1:])
+	}
+
+	// Check if the FROST key already exists (by pubkey)
+	existingKey, err := h.storage.GetFrostKeyByPubkey(r.Context(), pubkey)
+	var frostKeyID string
+
+	if err == nil && existingKey != nil {
+		// Key exists - use its ID
+		frostKeyID = existingKey.ID
+
+		// Check if share already exists
+		existingShare, err := h.storage.GetFrostShareByKeyAndIndex(r.Context(), frostKeyID, bundle.ShareIndex)
+		if err == nil && existingShare != nil {
+			h.errorResponse(w, http.StatusConflict, "share already exists for this key and index")
+			return
+		}
+	} else {
+		// Key doesn't exist - create it
+		frostKeyID = generateAPIID()
+		newKey := &storage.FrostKey{
+			ID:                 frostKeyID,
+			Name:               fmt.Sprintf("Imported %s", pubkey[:8]),
+			Pubkey:             pubkey,
+			Threshold:          bundle.Threshold,
+			TotalShares:        bundle.TotalShares,
+			GroupPublicKey:     groupPubKey,
+			VerificationShares: verificationShares,
+			CreatedAt:          time.Now(),
+			CreatedBy:          "import",
+		}
+
+		if err := h.storage.CreateFrostKey(r.Context(), newKey); err != nil {
+			slog.Error("failed to create FROST key", "error", err)
+			h.errorResponse(w, http.StatusInternalServerError, "failed to create FROST key")
+			return
+		}
+		slog.Info("created FROST key from import", "key_id", frostKeyID, "pubkey", pubkey[:16]+"...")
+	}
+
+	// Import the share
+	share, err := h.frostKeyGen.ImportShare(frostKeyID, bundle.ShareIndex, shareData, true)
+	if err != nil {
+		slog.Error("failed to import share", "error", err, "key_id", frostKeyID)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to import share: "+err.Error())
+		return
+	}
+
+	// Store the share
+	if err := h.storage.CreateFrostShare(r.Context(), share); err != nil {
+		slog.Error("failed to store share", "error", err, "key_id", frostKeyID)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to store share")
+		return
+	}
+
+	slog.Info("imported FROST share", "key_id", frostKeyID, "share_index", bundle.ShareIndex)
+	h.jsonResponse(w, http.StatusOK, FrostShareResponse{
+		ID:         share.ID,
+		FrostKeyID: frostKeyID,
+		ShareIndex: share.ShareIndex,
+		IsLocal:    share.IsLocal,
+		CreatedAt:  share.CreatedAt,
+	})
+}
+
+// generateAPIID creates a random 16-byte hex ID for API resources
+func generateAPIID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // Helper function for hex decoding

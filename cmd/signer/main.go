@@ -181,9 +181,11 @@ func main() {
 		slog.Warn("failed to start admin handler", "error", err)
 	}
 
-	// Initialize distributed DKG if encryption is enabled and we have a signer identity
+	// Initialize distributed DKG and remote signer if encryption is enabled and we have a signer identity
 	if encryptor != nil && signerPrivkey != "" {
 		frostEncAdapter := &frostEncryptorAdapter{enc: encryptor}
+
+		// Initialize distributed DKG
 		distributedDKG, err := frost.NewDistributedDKG(store, frostEncAdapter, relayClient, signerPrivkey)
 		if err != nil {
 			slog.Warn("failed to initialize distributed DKG", "error", err)
@@ -196,6 +198,21 @@ func main() {
 				}
 			}()
 			slog.Info("distributed DKG enabled", "pubkey", signerPubkey[:16]+"...")
+		}
+
+		// Initialize remote signer for distributed signing
+		remoteSigner, err := frost.NewRemoteSigner(store, frostEncAdapter, relayClient, signerPrivkey)
+		if err != nil {
+			slog.Warn("failed to initialize remote signer", "error", err)
+		} else {
+			apiHandler.SetRemoteSigner(remoteSigner)
+			// Start listening for signing messages
+			go func() {
+				if err := remoteSigner.StartListener(ctx); err != nil {
+					slog.Warn("remote signer listener stopped", "error", err)
+				}
+			}()
+			slog.Info("distributed FROST signing enabled", "pubkey", signerPubkey[:16]+"...")
 		}
 	}
 

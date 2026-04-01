@@ -2,6 +2,7 @@ package signer
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -994,6 +995,18 @@ func (s *Signer) handleProxyRequest(ctx context.Context, targetPubkey, privateKe
 		return s.handleInternalProxy(ctx, uri.SignerPubkey, upstreamPrivkey, targetPubkey, req, clientPubkey)
 	}
 
+	// Check if the upstream key is a FROST key (local threshold signing)
+	if frostKeyID, isFrost := s.frostKeys[uri.SignerPubkey]; isFrost {
+		slog.Info("internal proxy: handling via FROST",
+			"method", req.Method,
+			"proxy", targetPubkey[:16]+"...",
+			"upstream_frost", uri.SignerPubkey[:16]+"...",
+			"frost_key_id", frostKeyID[:16]+"...",
+			"original_client", clientPubkey[:16]+"...",
+		)
+		return s.handleFrostProxy(ctx, uri.SignerPubkey, frostKeyID, targetPubkey, req, clientPubkey)
+	}
+
 	// Get or create connection to upstream using the proxy key's persistent keypair
 	// This ensures permissions persist across restarts
 	conn, err := s.proxyClient.GetConnection(ctx, bunkerURI, privateKey, targetPubkey)
@@ -1049,6 +1062,75 @@ func (s *Signer) handleInternalProxy(ctx context.Context, upstreamPubkey, upstre
 	}
 }
 
+// handleFrostProxy handles proxy requests when the upstream key is a FROST threshold key.
+// FROST keys support signing but not encryption (no single private key for NIP-04/44).
+func (s *Signer) handleFrostProxy(ctx context.Context, upstreamPubkey, frostKeyID, proxyPubkey string, req *NIP46Request, originalClient string) (string, error) {
+	if s.frostCoordinator == nil {
+		return "", errors.New("FROST coordinator not available")
+	}
+
+	switch req.Method {
+	case "sign_event":
+		return s.handleFrostSignEvent(ctx, upstreamPubkey, frostKeyID, req.Params, originalClient)
+	case "get_public_key":
+		return upstreamPubkey, nil
+	default:
+		// FROST keys don't support encryption methods - no single private key
+		return "", fmt.Errorf("method %s not supported for FROST keys (no private key for encryption)", req.Method)
+	}
+}
+
+// handleFrostSignEvent signs an event using FROST threshold signatures
+func (s *Signer) handleFrostSignEvent(ctx context.Context, targetPubkey, frostKeyID string, params []string, originalClient string) (string, error) {
+	if len(params) < 1 {
+		return "", errors.New("missing event parameter")
+	}
+
+	var event nostr.Event
+	if err := json.Unmarshal([]byte(params[0]), &event); err != nil {
+		return "", fmt.Errorf("invalid event: %w", err)
+	}
+
+	// Set the pubkey
+	event.PubKey = targetPubkey
+
+	// Generate event ID (SHA256 hash of serialized event)
+	eventHash := event.GetID()
+	hashBytes, err := hex.DecodeString(eventHash)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode event hash: %w", err)
+	}
+
+	// Sign using FROST coordinator
+	signature, err := s.frostCoordinator.SignEvent(ctx, frostKeyID, hashBytes)
+	if err != nil {
+		slog.Error("FROST signing failed via proxy",
+			"error", err,
+			"frost_key_id", frostKeyID[:16]+"...",
+			"original_client", originalClient[:16]+"...",
+		)
+		return "", fmt.Errorf("FROST signing failed: %w", err)
+	}
+
+	// Set the signature on the event
+	event.ID = eventHash
+	event.Sig = signature
+
+	slog.Info("FROST signed event via proxy",
+		"event_id", eventHash[:16]+"...",
+		"kind", event.Kind,
+		"frost_key", targetPubkey[:16]+"...",
+		"original_client", originalClient[:16]+"...",
+	)
+
+	// Return signed event as JSON
+	data, err := json.Marshal(event)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 // getUpstreamPubkey retrieves the public key from the upstream signer
 func (s *Signer) getUpstreamPubkey(ctx context.Context, targetPubkey, privateKey, bunkerURI string) (string, error) {
 	// Parse the bunker URI to get the upstream pubkey
@@ -1057,9 +1139,15 @@ func (s *Signer) getUpstreamPubkey(ctx context.Context, targetPubkey, privateKey
 		return "", fmt.Errorf("failed to parse bunker URI: %w", err)
 	}
 
-	// If upstream is local, return the pubkey directly
+	// If upstream is local (regular key), return the pubkey directly
 	if _, isLocal := s.keys[uri.SignerPubkey]; isLocal {
 		slog.Debug("internal proxy: returning local upstream pubkey", "upstream", uri.SignerPubkey[:16]+"...")
+		return uri.SignerPubkey, nil
+	}
+
+	// If upstream is a FROST key, return the pubkey directly
+	if _, isFrost := s.frostKeys[uri.SignerPubkey]; isFrost {
+		slog.Debug("internal proxy: returning FROST upstream pubkey", "upstream", uri.SignerPubkey[:16]+"...")
 		return uri.SignerPubkey, nil
 	}
 
