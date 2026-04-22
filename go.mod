@@ -1,9 +1,9 @@
-module git.coldforge.xyz/coldforge/cloistr-signer
+module git.aegis-hq.xyz/coldforge/cloistr-signer
 
 go 1.25.0
 
 require (
-	git.coldforge.xyz/coldforge/cloistr-common v0.1.0
+	git.aegis-hq.xyz/coldforge/cloistr-common v0.1.0
 	github.com/bytemare/ecc v0.8.2
 	github.com/bytemare/frost v0.0.0-20241019112700-8c6db5b04145
 	github.com/bytemare/secret-sharing v0.7.0

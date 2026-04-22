@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/auth"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/signer"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/signer"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 // testHandler creates a handler with in-memory storage for testing

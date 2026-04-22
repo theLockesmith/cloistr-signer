@@ -9,10 +9,10 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip04"
-	"git.coldforge.xyz/coldforge/cloistr-common/relayprefs"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
-	relay "git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
+	"git.aegis-hq.xyz/coldforge/cloistr-common/relayprefs"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
+	relay "git.aegis-hq.xyz/coldforge/cloistr-signer/internal/nostr"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 const (

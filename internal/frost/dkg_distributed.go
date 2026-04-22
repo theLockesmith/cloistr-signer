@@ -11,7 +11,7 @@ import (
 
 	"github.com/bytemare/ecc"
 
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/nostr"
 )
 
 // DistributedDKG coordinates distributed key generation across multiple signers

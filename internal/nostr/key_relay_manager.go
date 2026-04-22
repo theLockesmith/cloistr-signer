@@ -9,7 +9,7 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip13"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/metrics"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/metrics"
 )
 
 // KeyRelayManager manages per-key relay connections.

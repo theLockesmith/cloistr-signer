@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"testing"
 
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 // testEncryptor is a simple encryptor for testing that just returns data as-is

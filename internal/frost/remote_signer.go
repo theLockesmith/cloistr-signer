@@ -12,7 +12,7 @@ import (
 	frostlib "github.com/bytemare/frost"
 	"github.com/bytemare/secret-sharing/keys"
 
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/nostr"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/nostr"
 )
 
 // RemoteSigner coordinates FROST signing with remote share holders

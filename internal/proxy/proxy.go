@@ -16,8 +16,8 @@ import (
 	"github.com/nbd-wtf/go-nostr/nip04"
 	"github.com/nbd-wtf/go-nostr/nip44"
 
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/bunker"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/bunker"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
 )
 
 const (

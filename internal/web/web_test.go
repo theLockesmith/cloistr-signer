@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/auth"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/discovery"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/discovery"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 // mockStatusProvider implements StatusProvider for testing

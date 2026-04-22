@@ -17,7 +17,7 @@ import (
 	frostlib "github.com/bytemare/frost"
 	"github.com/bytemare/secret-sharing/keys"
 
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 var (

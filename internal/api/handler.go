@@ -13,14 +13,14 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/audit"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/auth"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/bunker"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/frost"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/signer"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/audit"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/bunker"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/frost"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/signer"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 // Handler manages HTTP API endpoints

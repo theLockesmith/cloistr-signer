@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
 )
 
 var (

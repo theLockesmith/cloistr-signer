@@ -13,7 +13,7 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/nbd-wtf/go-nostr"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/crypto"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
 )
 
 // PostgresStorage implements Storage interface using PostgreSQL

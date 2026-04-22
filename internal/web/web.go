@@ -16,10 +16,10 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/auth"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/discovery"
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/storage"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/discovery"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 // EventPreview contains parsed event data for display in approval UI

@@ -3,7 +3,7 @@ package proxy
 import (
 	"testing"
 
-	"git.coldforge.xyz/coldforge/cloistr-signer/internal/config"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
 )
 
 func TestNewClient(t *testing.T) {
