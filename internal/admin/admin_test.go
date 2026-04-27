@@ -240,7 +240,7 @@ func TestHandler_processCommand_CreateKey(t *testing.T) {
 	}
 
 	// Verify key was created in storage
-	keys, _ := store.ListKeys(ctx)
+	keys, _ := store.ListAllKeys(ctx)
 	if len(keys) != 1 {
 		t.Errorf("storage should have 1 key, got %d", len(keys))
 	}
@@ -277,7 +277,7 @@ func TestHandler_processCommand_DeleteKey(t *testing.T) {
 		t.Error("delete_key should confirm deletion")
 	}
 
-	keys, _ := store.ListKeys(ctx)
+	keys, _ := store.ListAllKeys(ctx)
 	if len(keys) != 0 {
 		t.Error("key should be deleted from storage")
 	}

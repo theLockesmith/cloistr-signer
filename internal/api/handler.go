@@ -292,7 +292,15 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
-	keys, err := h.storage.ListKeys(r.Context())
+	// Get authenticated user
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	// List only keys owned by this user
+	keys, err := h.storage.ListKeys(r.Context(), claims.UserID)
 	if err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to list keys")
 		return
@@ -316,6 +324,13 @@ func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
+	// Get authenticated user
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	var req CreateKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -381,6 +396,7 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		KeyType:       storage.KeyTypeLocal,
 		EncryptedNsec: encryptedKey,
 		CreatedAt:     time.Now(),
+		OwnerID:       claims.UserID,
 	}
 
 	if err := h.storage.CreateKey(r.Context(), key); err != nil {
@@ -410,6 +426,13 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 
 // handleCreateProxyKey creates a proxy key that forwards to an upstream signer
 func (h *Handler) handleCreateProxyKey(w http.ResponseWriter, r *http.Request, req CreateKeyRequest) {
+	// Get authenticated user for ownership
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	if req.BunkerURI == "" {
 		h.errorResponse(w, http.StatusBadRequest, "bunker_uri is required for proxy keys")
 		return
@@ -451,6 +474,7 @@ func (h *Handler) handleCreateProxyKey(w http.ResponseWriter, r *http.Request, r
 		BunkerURI:      req.BunkerURI,
 		UpstreamPubkey: uri.SignerPubkey, // The upstream signer's pubkey
 		CreatedAt:      time.Now(),
+		OwnerID:        claims.UserID,
 	}
 
 	if err := h.storage.CreateKey(r.Context(), key); err != nil {
@@ -484,6 +508,13 @@ func (h *Handler) handleCreateProxyKey(w http.ResponseWriter, r *http.Request, r
 }
 
 func (h *Handler) handleGetKey(w http.ResponseWriter, r *http.Request, id string) {
+	// Get authenticated user for ownership check
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	key, err := h.storage.GetKey(r.Context(), id)
 	if err != nil {
 		if err == storage.ErrKeyNotFound {
@@ -491,6 +522,12 @@ func (h *Handler) handleGetKey(w http.ResponseWriter, r *http.Request, id string
 			return
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Verify ownership - user can only access their own keys
+	if key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusNotFound, "key not found")
 		return
 	}
 
@@ -513,6 +550,13 @@ type UpdateKeyRequest struct {
 }
 
 func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id string) {
+	// Get authenticated user for ownership check
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	var req UpdateKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -527,6 +571,12 @@ func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id str
 			return
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Verify ownership - user can only update their own keys
+	if key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusNotFound, "key not found")
 		return
 	}
 
@@ -560,16 +610,36 @@ func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id str
 }
 
 func (h *Handler) handleDeleteKey(w http.ResponseWriter, r *http.Request, id string) {
-	if err := h.storage.DeleteKey(r.Context(), id); err != nil {
+	// Get authenticated user for ownership check
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	// Get key to verify ownership before deletion
+	key, err := h.storage.GetKey(r.Context(), id)
+	if err != nil {
 		if err == storage.ErrKeyNotFound {
 			h.errorResponse(w, http.StatusNotFound, "key not found")
 			return
 		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Verify ownership - user can only delete their own keys
+	if key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusNotFound, "key not found")
+		return
+	}
+
+	if err := h.storage.DeleteKey(r.Context(), id); err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to delete key")
 		return
 	}
 
-	slog.Info("deleted key", "id", id)
+	slog.Info("deleted key", "id", id, "owner", claims.UserID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -590,6 +660,13 @@ type PermissionResponse struct {
 }
 
 func (h *Handler) handleListPermissions(w http.ResponseWriter, r *http.Request, keyID string) {
+	// Get authenticated user for ownership check
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	// Get the key to get the full pubkey
 	key, err := h.storage.GetKey(r.Context(), keyID)
 	if err != nil {
@@ -598,6 +675,12 @@ func (h *Handler) handleListPermissions(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Verify ownership
+	if key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusNotFound, "key not found")
 		return
 	}
 
@@ -622,6 +705,13 @@ func (h *Handler) handleListPermissions(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, keyID string) {
+	// Get authenticated user for ownership check
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	var req SetPermissionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -642,6 +732,12 @@ func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, ke
 			return
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Verify ownership
+	if key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusNotFound, "key not found")
 		return
 	}
 
@@ -673,6 +769,13 @@ func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, ke
 }
 
 func (h *Handler) handleDeletePermission(w http.ResponseWriter, r *http.Request, keyID, pubkey string) {
+	// Get authenticated user for ownership check
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	// Get key to verify it exists and get full pubkey
 	key, err := h.storage.GetKey(r.Context(), keyID)
 	if err != nil {
@@ -681,6 +784,12 @@ func (h *Handler) handleDeletePermission(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Verify ownership
+	if key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusNotFound, "key not found")
 		return
 	}
 
@@ -698,6 +807,13 @@ type UpdatePermissionNameRequest struct {
 }
 
 func (h *Handler) handleUpdatePermissionName(w http.ResponseWriter, r *http.Request, keyID, pubkey string) {
+	// Get authenticated user for ownership check
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	var req UpdatePermissionNameRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -712,6 +828,12 @@ func (h *Handler) handleUpdatePermissionName(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Verify ownership
+	if key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusNotFound, "key not found")
 		return
 	}
 
@@ -1948,6 +2070,13 @@ func (h *Handler) handleBunkerConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get authenticated user for ownership check
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	// Parse key ID from path: /api/v1/bunker/{keyID}
 	keyID := strings.TrimPrefix(r.URL.Path, "/api/v1/bunker/")
 	if keyID == "" {
@@ -1963,6 +2092,12 @@ func (h *Handler) handleBunkerConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Verify ownership - only allow bunker URI generation for owned keys
+	if key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusNotFound, "key not found")
 		return
 	}
 
@@ -2189,8 +2324,8 @@ func (h *Handler) handleNIP05(w http.ResponseWriter, r *http.Request) {
 		Relays: make(map[string][]string),
 	}
 
-	// Get all keys and create name mappings
-	keys, err := h.storage.ListKeys(r.Context())
+	// Get all keys and create name mappings (NIP-05 is public discovery)
+	keys, err := h.storage.ListAllKeys(r.Context())
 	if err != nil {
 		h.jsonResponse(w, http.StatusOK, response)
 		return

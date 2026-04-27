@@ -180,7 +180,10 @@ func TestPostgresStorage_ListKeys(t *testing.T) {
 	defer ps.Close()
 	ctx := context.Background()
 
-	keys, err := ps.ListKeys(ctx)
+	owner1 := "user1"
+	owner2 := "user2"
+
+	keys, err := ps.ListKeys(ctx, owner1)
 	if err != nil {
 		t.Fatalf("ListKeys() error = %v", err)
 	}
@@ -188,15 +191,35 @@ func TestPostgresStorage_ListKeys(t *testing.T) {
 		t.Errorf("ListKeys() empty storage = %d keys, want 0", len(keys))
 	}
 
-	ps.CreateKey(ctx, &Key{ID: "key1", Pubkey: "pub1", EncryptedNsec: "enc1", CreatedAt: time.Now()})
-	ps.CreateKey(ctx, &Key{ID: "key2", Pubkey: "pub2", EncryptedNsec: "enc2", CreatedAt: time.Now()})
+	ps.CreateKey(ctx, &Key{ID: "key1", Pubkey: "pub1", EncryptedNsec: "enc1", OwnerID: owner1, CreatedAt: time.Now()})
+	ps.CreateKey(ctx, &Key{ID: "key2", Pubkey: "pub2", EncryptedNsec: "enc2", OwnerID: owner1, CreatedAt: time.Now()})
+	ps.CreateKey(ctx, &Key{ID: "key3", Pubkey: "pub3", EncryptedNsec: "enc3", OwnerID: owner2, CreatedAt: time.Now()})
 
-	keys, err = ps.ListKeys(ctx)
+	// User 1 should only see their keys
+	keys, err = ps.ListKeys(ctx, owner1)
 	if err != nil {
 		t.Fatalf("ListKeys() error = %v", err)
 	}
 	if len(keys) != 2 {
-		t.Errorf("ListKeys() = %d keys, want 2", len(keys))
+		t.Errorf("ListKeys(owner1) = %d keys, want 2", len(keys))
+	}
+
+	// User 2 should only see their key
+	keys, err = ps.ListKeys(ctx, owner2)
+	if err != nil {
+		t.Fatalf("ListKeys() error = %v", err)
+	}
+	if len(keys) != 1 {
+		t.Errorf("ListKeys(owner2) = %d keys, want 1", len(keys))
+	}
+
+	// ListAllKeys should return all keys
+	allKeys, err := ps.ListAllKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListAllKeys() error = %v", err)
+	}
+	if len(allKeys) != 3 {
+		t.Errorf("ListAllKeys() = %d keys, want 3", len(allKeys))
 	}
 }
 

@@ -39,6 +39,24 @@ func testHandler(t *testing.T) (*Handler, *storage.MemoryStorage) {
 	return h, store
 }
 
+// testUserID is the user ID used in test auth tokens
+const testUserID = "test-user-123"
+
+// testAuthToken generates a valid auth token for testing
+func testAuthToken(t *testing.T, h *Handler) string {
+	token, _, err := auth.GenerateJWT(h.authConfig, testUserID, "testuser")
+	if err != nil {
+		t.Fatalf("failed to generate test auth token: %v", err)
+	}
+	return token
+}
+
+// addAuthHeader adds the Authorization header with a test token
+func addAuthHeader(t *testing.T, h *Handler, req *http.Request) {
+	token := testAuthToken(t, h)
+	req.Header.Set("Authorization", "Bearer "+token)
+}
+
 // TestNewHandler verifies handler creation
 func TestNewHandler(t *testing.T) {
 	cfg := &config.Config{
@@ -161,6 +179,7 @@ func TestHandleListKeys_Empty(t *testing.T) {
 	h, _ := testHandler(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/keys", nil)
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleKeys(rr, req)
@@ -185,6 +204,7 @@ func TestHandleCreateKey(t *testing.T) {
 	body := `{"name": "test-key"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/keys", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleKeys(rr, req)
@@ -219,6 +239,7 @@ func TestHandleCreateKey_WithNsec(t *testing.T) {
 	body := `{"name": "imported-key", "private_key": "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/keys", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleKeys(rr, req)
@@ -243,6 +264,7 @@ func TestHandleCreateKey_InvalidBody(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/keys", strings.NewReader("invalid json"))
 	req.Header.Set("Content-Type", "application/json")
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleKeys(rr, req)
@@ -256,16 +278,18 @@ func TestHandleGetKey(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	// Create a key first
+	// Create a key first with test user as owner
 	key := &storage.Key{
 		ID:        "testkey123456789",
 		Name:      "test-key",
 		Pubkey:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		OwnerID:   testUserID,
 		CreatedAt: time.Now(),
 	}
 	store.CreateKey(ctx, key)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/keys/testkey123456789", nil)
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleGetKey(rr, req, "testkey123456789")
@@ -288,6 +312,7 @@ func TestHandleGetKey_NotFound(t *testing.T) {
 	h, _ := testHandler(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/keys/nonexistent", nil)
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleGetKey(rr, req, "nonexistent")
@@ -301,16 +326,18 @@ func TestHandleDeleteKey(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	// Create a key first
+	// Create a key first with test user as owner
 	key := &storage.Key{
 		ID:        "todelete12345678",
 		Name:      "to-delete",
 		Pubkey:    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+		OwnerID:   testUserID,
 		CreatedAt: time.Now(),
 	}
 	store.CreateKey(ctx, key)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/keys/todelete12345678", nil)
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleDeleteKey(rr, req, "todelete12345678")
@@ -330,6 +357,7 @@ func TestHandleDeleteKey_NotFound(t *testing.T) {
 	h, _ := testHandler(t)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/keys/nonexistent", nil)
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleDeleteKey(rr, req, "nonexistent")
@@ -343,11 +371,12 @@ func TestHandleKeyByID_Routing(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	// Create a key
+	// Create a key with test user as owner
 	key := &storage.Key{
 		ID:        "routetest1234567",
 		Name:      "route-test",
 		Pubkey:    "1111111111111111111111111111111111111111111111111111111111111111",
+		OwnerID:   testUserID,
 		CreatedAt: time.Now(),
 	}
 	store.CreateKey(ctx, key)
@@ -370,6 +399,7 @@ func TestHandleKeyByID_Routing(t *testing.T) {
 
 			req := httptest.NewRequest(tt.method, tt.path, nil)
 			req.URL.Path = tt.path
+			addAuthHeader(t, h, req)
 			rr := httptest.NewRecorder()
 
 			h.handleKeyByID(rr, req)
@@ -387,12 +417,13 @@ func TestHandleListPermissions(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	// Create a key
+	// Create a key with test user as owner
 	pubkey := "2222222222222222222222222222222222222222222222222222222222222222"
 	key := &storage.Key{
 		ID:        "permtest12345678",
 		Name:      "perm-test",
 		Pubkey:    pubkey,
+		OwnerID:   testUserID,
 		CreatedAt: time.Now(),
 	}
 	store.CreateKey(ctx, key)
@@ -406,6 +437,7 @@ func TestHandleListPermissions(t *testing.T) {
 	store.SetPermission(ctx, perm)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/keys/permtest12345678/permissions", nil)
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleListPermissions(rr, req, "permtest12345678")
@@ -428,12 +460,13 @@ func TestHandleSetPermission(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	// Create a key
+	// Create a key with test user as owner
 	pubkey := "4444444444444444444444444444444444444444444444444444444444444444"
 	key := &storage.Key{
 		ID:        "setperm123456789",
 		Name:      "set-perm-test",
 		Pubkey:    pubkey,
+		OwnerID:   testUserID,
 		CreatedAt: time.Now(),
 	}
 	store.CreateKey(ctx, key)
@@ -444,6 +477,7 @@ func TestHandleSetPermission(t *testing.T) {
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/keys/setperm123456789/permissions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleSetPermission(rr, req, "setperm123456789")
@@ -466,11 +500,12 @@ func TestHandleSetPermission_InvalidPubkey(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	// Create a key
+	// Create a key with test user as owner
 	key := &storage.Key{
 		ID:        "badpubkey1234567",
 		Name:      "bad-pubkey-test",
 		Pubkey:    "6666666666666666666666666666666666666666666666666666666666666666",
+		OwnerID:   testUserID,
 		CreatedAt: time.Now(),
 	}
 	store.CreateKey(ctx, key)
@@ -481,6 +516,7 @@ func TestHandleSetPermission_InvalidPubkey(t *testing.T) {
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/keys/badpubkey1234567/permissions", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleSetPermission(rr, req, "badpubkey1234567")
@@ -494,7 +530,7 @@ func TestHandleDeletePermission(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	// Create a key and permission
+	// Create a key and permission with test user as owner
 	pubkey := "7777777777777777777777777777777777777777777777777777777777777777"
 	userPubkey := "8888888888888888888888888888888888888888888888888888888888888888"
 
@@ -502,6 +538,7 @@ func TestHandleDeletePermission(t *testing.T) {
 		ID:        "delperm123456789",
 		Name:      "del-perm-test",
 		Pubkey:    pubkey,
+		OwnerID:   testUserID,
 		CreatedAt: time.Now(),
 	}
 	store.CreateKey(ctx, key)
@@ -514,6 +551,7 @@ func TestHandleDeletePermission(t *testing.T) {
 	store.SetPermission(ctx, perm)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/keys/delperm123456789/permissions/"+userPubkey, nil)
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleDeletePermission(rr, req, "delperm123456789", userPubkey)
@@ -1274,6 +1312,7 @@ func TestHandleBunkerConnect_MissingKeyID(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/bunker/", nil)
 	req.URL.Path = "/api/v1/bunker/"
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleBunkerConnect(rr, req)
@@ -1288,6 +1327,7 @@ func TestHandleBunkerConnect_KeyNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/bunker/nonexistent", nil)
 	req.URL.Path = "/api/v1/bunker/nonexistent"
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleBunkerConnect(rr, req)
@@ -1305,12 +1345,14 @@ func TestHandleBunkerConnect_Success(t *testing.T) {
 		ID:        "bunkerkey1234567",
 		Name:      "bunker-key",
 		Pubkey:    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		OwnerID:   testUserID,
 		CreatedAt: time.Now(),
 	}
 	store.CreateKey(ctx, key)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/bunker/bunkerkey1234567", nil)
 	req.URL.Path = "/api/v1/bunker/bunkerkey1234567"
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleBunkerConnect(rr, req)

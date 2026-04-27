@@ -151,8 +151,8 @@ func (s *Signer) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to connect to relays: %w", err)
 	}
 
-	// Load keys from storage
-	keys, err := s.storage.ListKeys(s.ctx)
+	// Load keys from storage (all keys for internal signer operations)
+	keys, err := s.storage.ListAllKeys(s.ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load keys: %w", err)
 	}

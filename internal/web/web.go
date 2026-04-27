@@ -494,9 +494,9 @@ func (h *Handler) handleApproval(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get key name for display
+	// Get key name for display (approval requires admin view of all keys)
 	var keyName string
-	keys, _ := h.storage.ListKeys(r.Context())
+	keys, _ := h.storage.ListAllKeys(r.Context())
 	for _, key := range keys {
 		if key.Pubkey == req.KeyPubkey {
 			keyName = key.Name
@@ -519,8 +519,11 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	user := h.getCurrentUser(r)
 	status := h.status.GetStatus()
 
-	// Get counts
-	keys, _ := h.storage.ListKeys(r.Context())
+	// Get counts - filter keys by current user
+	var keys []*storage.Key
+	if user != nil {
+		keys, _ = h.storage.ListKeys(r.Context(), user.ID)
+	}
 	users, _ := h.storage.ListUsers(r.Context())
 	policies, _ := h.storage.ListPolicies(r.Context())
 
@@ -546,7 +549,10 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 // handleKeys serves the keys management page
 func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
 	user := h.getCurrentUser(r)
-	keys, _ := h.storage.ListKeys(r.Context())
+	var keys []*storage.Key
+	if user != nil {
+		keys, _ = h.storage.ListKeys(r.Context(), user.ID)
+	}
 
 	h.render(w, "keys.html", map[string]interface{}{
 		"Title": "Keys - Cloistr Signer",
@@ -646,7 +652,10 @@ type KeyApps struct {
 // handleApps serves the connected apps management page
 func (h *Handler) handleApps(w http.ResponseWriter, r *http.Request) {
 	user := h.getCurrentUser(r)
-	keys, _ := h.storage.ListKeys(r.Context())
+	var keys []*storage.Key
+	if user != nil {
+		keys, _ = h.storage.ListKeys(r.Context(), user.ID)
+	}
 
 	var keyApps []KeyApps
 	totalUnknown := 0
@@ -749,7 +758,10 @@ func groupPermissionsByApp(perms []*storage.Permission) []AppGroup {
 // handleRequests serves the pending requests page
 func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
 	user := h.getCurrentUser(r)
-	keys, _ := h.storage.ListKeys(r.Context())
+	var keys []*storage.Key
+	if user != nil {
+		keys, _ = h.storage.ListKeys(r.Context(), user.ID)
+	}
 
 	var allPending []*storage.PendingRequest
 	for _, key := range keys {

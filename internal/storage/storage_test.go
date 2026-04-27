@@ -130,7 +130,11 @@ func TestMemoryStorage_ListKeys(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryStorage()
 
-	keys, err := s.ListKeys(ctx)
+	// Test owner isolation
+	owner1 := "user1"
+	owner2 := "user2"
+
+	keys, err := s.ListKeys(ctx, owner1)
 	if err != nil {
 		t.Fatalf("ListKeys() error = %v", err)
 	}
@@ -138,15 +142,35 @@ func TestMemoryStorage_ListKeys(t *testing.T) {
 		t.Errorf("ListKeys() empty storage = %d keys, want 0", len(keys))
 	}
 
-	s.CreateKey(ctx, &Key{ID: "key1", Pubkey: "pub1"})
-	s.CreateKey(ctx, &Key{ID: "key2", Pubkey: "pub2"})
+	s.CreateKey(ctx, &Key{ID: "key1", Pubkey: "pub1", OwnerID: owner1})
+	s.CreateKey(ctx, &Key{ID: "key2", Pubkey: "pub2", OwnerID: owner1})
+	s.CreateKey(ctx, &Key{ID: "key3", Pubkey: "pub3", OwnerID: owner2})
 
-	keys, err = s.ListKeys(ctx)
+	// User 1 should only see their keys
+	keys, err = s.ListKeys(ctx, owner1)
 	if err != nil {
 		t.Fatalf("ListKeys() error = %v", err)
 	}
 	if len(keys) != 2 {
-		t.Errorf("ListKeys() = %d keys, want 2", len(keys))
+		t.Errorf("ListKeys(owner1) = %d keys, want 2", len(keys))
+	}
+
+	// User 2 should only see their keys
+	keys, err = s.ListKeys(ctx, owner2)
+	if err != nil {
+		t.Fatalf("ListKeys() error = %v", err)
+	}
+	if len(keys) != 1 {
+		t.Errorf("ListKeys(owner2) = %d keys, want 1", len(keys))
+	}
+
+	// ListAllKeys should return all keys
+	allKeys, err := s.ListAllKeys(ctx)
+	if err != nil {
+		t.Fatalf("ListAllKeys() error = %v", err)
+	}
+	if len(allKeys) != 3 {
+		t.Errorf("ListAllKeys() = %d keys, want 3", len(allKeys))
 	}
 }
 

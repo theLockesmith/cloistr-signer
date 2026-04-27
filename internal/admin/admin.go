@@ -301,7 +301,7 @@ func (h *Handler) cmdStatus(ctx context.Context) string {
 	}
 
 	// Get counts from storage
-	keys, _ := h.storage.ListKeys(ctx)
+	keys, _ := h.storage.ListAllKeys(ctx)
 	users, _ := h.storage.ListUsers(ctx)
 	policies, _ := h.storage.ListPolicies(ctx)
 
@@ -323,7 +323,7 @@ Connected Relays:
 }
 
 func (h *Handler) cmdGetKeys(ctx context.Context) string {
-	keys, err := h.storage.ListKeys(ctx)
+	keys, err := h.storage.ListAllKeys(ctx)
 	if err != nil {
 		return fmt.Sprintf("Error: %v", err)
 	}
@@ -432,7 +432,7 @@ func (h *Handler) cmdDeleteKey(ctx context.Context, id string) string {
 
 func (h *Handler) cmdListPending(ctx context.Context) string {
 	// Get all keys and list pending requests for each
-	keys, err := h.storage.ListKeys(ctx)
+	keys, err := h.storage.ListAllKeys(ctx)
 	if err != nil {
 		return fmt.Sprintf("Error: %v", err)
 	}
@@ -702,7 +702,7 @@ func (h *Handler) ProcessCommandHTTP(ctx context.Context, command string) AdminR
 
 // GetAdminStats returns admin-level statistics
 func (h *Handler) GetAdminStats(ctx context.Context) (map[string]interface{}, error) {
-	keys, err := h.storage.ListKeys(ctx)
+	keys, err := h.storage.ListAllKeys(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -54,6 +54,7 @@ type Key struct {
 	RelayMode       string    `json:"relay_mode,omitempty"` // Relay selection: "auto", "manual", "discovery"
 	CreatedAt       time.Time `json:"created_at"`
 	CreatedBy       string    `json:"created_by"`
+	OwnerID         string    `json:"owner_id"`          // User who owns this key (for multi-user isolation)
 }
 
 // IsProxy returns true if this is a proxy key
@@ -246,7 +247,8 @@ type Storage interface {
 	GetKey(ctx context.Context, id string) (*Key, error)
 	GetKeyByPubkey(ctx context.Context, pubkey string) (*Key, error)
 	GetKeyByName(ctx context.Context, name string) (*Key, error)
-	ListKeys(ctx context.Context) ([]*Key, error)
+	ListKeys(ctx context.Context, ownerID string) ([]*Key, error) // Filter by owner for user isolation
+	ListAllKeys(ctx context.Context) ([]*Key, error)              // Admin only - no owner filter
 	UpdateKey(ctx context.Context, key *Key) error
 	DeleteKey(ctx context.Context, id string) error
 
@@ -472,7 +474,20 @@ func (m *MemoryStorage) GetKeyByName(ctx context.Context, name string) (*Key, er
 	return key, nil
 }
 
-func (m *MemoryStorage) ListKeys(ctx context.Context) ([]*Key, error) {
+func (m *MemoryStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	keys := make([]*Key, 0)
+	for _, key := range m.keys {
+		if key.OwnerID == ownerID {
+			keys = append(keys, key)
+		}
+	}
+	return keys, nil
+}
+
+func (m *MemoryStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
