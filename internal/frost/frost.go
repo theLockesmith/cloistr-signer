@@ -17,6 +17,7 @@ import (
 	frostlib "github.com/bytemare/frost"
 	"github.com/bytemare/secret-sharing/keys"
 
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
@@ -116,6 +117,13 @@ type FrostStorage interface {
 type Encryptor interface {
 	Encrypt(plaintext []byte) ([]byte, error)
 	Decrypt(ciphertext []byte) ([]byte, error)
+}
+
+// NostrClient defines the interface for Nostr communication
+// This allows for testing without a real Nostr client
+type NostrClient interface {
+	SendEphemeralDM(ctx context.Context, privateKey, recipientPubkey string, message *nostr.DMMessage) error
+	SubscribeDMs(ctx context.Context, privateKey string, handler nostr.DMHandler) error
 }
 
 // pubkeyToHex converts a FROST group public key to hex string for Nostr

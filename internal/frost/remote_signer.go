@@ -19,7 +19,7 @@ import (
 type RemoteSigner struct {
 	storage     FrostStorage
 	encryptor   Encryptor
-	nostrClient *nostr.Client
+	nostrClient NostrClient
 	privateKey  string
 	pubkey      string
 

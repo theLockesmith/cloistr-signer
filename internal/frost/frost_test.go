@@ -3,8 +3,11 @@ package frost
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
+	"sync"
 	"testing"
 
+	internalNostr "git.aegis-hq.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
@@ -16,6 +19,26 @@ func (t *testEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
 }
 
 func (t *testEncryptor) Decrypt(ciphertext []byte) ([]byte, error) {
+	return ciphertext, nil
+}
+
+// failingEncryptor is an encryptor that can be configured to fail
+type failingEncryptor struct {
+	failEncrypt bool
+	failDecrypt bool
+}
+
+func (f *failingEncryptor) Encrypt(plaintext []byte) ([]byte, error) {
+	if f.failEncrypt {
+		return nil, fmt.Errorf("encryption failed")
+	}
+	return plaintext, nil
+}
+
+func (f *failingEncryptor) Decrypt(ciphertext []byte) ([]byte, error) {
+	if f.failDecrypt {
+		return nil, fmt.Errorf("decryption failed")
+	}
 	return ciphertext, nil
 }
 
@@ -117,6 +140,63 @@ func (s *testStorage) ListLocalFrostShares(ctx context.Context, frostKeyID strin
 
 func (s *testStorage) DeleteFrostShare(ctx context.Context, id string) error {
 	delete(s.frostShares, id)
+	return nil
+}
+
+// errorStorage is a storage implementation that returns errors for testing
+type errorStorage struct {
+	*testStorage
+	failListLocal bool
+	failListAll   bool
+}
+
+func (e *errorStorage) ListLocalFrostShares(ctx context.Context, frostKeyID string) ([]*storage.FrostShare, error) {
+	if e.failListLocal {
+		return nil, fmt.Errorf("storage error")
+	}
+	return e.testStorage.ListLocalFrostShares(ctx, frostKeyID)
+}
+
+func (e *errorStorage) ListFrostShares(ctx context.Context, frostKeyID string) ([]*storage.FrostShare, error) {
+	if e.failListAll {
+		return nil, fmt.Errorf("storage error")
+	}
+	return e.testStorage.ListFrostShares(ctx, frostKeyID)
+}
+
+// mockNostrClient implements NostrClient for testing
+type mockNostrClient struct {
+	sentMessages   []sentDM
+	subscribeCalls int
+	sendError      error
+	mu             sync.Mutex
+}
+
+type sentDM struct {
+	recipient string
+	message   *internalNostr.DMMessage
+}
+
+func newMockNostrClient() *mockNostrClient {
+	return &mockNostrClient{
+		sentMessages: make([]sentDM, 0),
+	}
+}
+
+func (m *mockNostrClient) SendEphemeralDM(ctx context.Context, privateKey, recipientPubkey string, message *internalNostr.DMMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sendError != nil {
+		return m.sendError
+	}
+	m.sentMessages = append(m.sentMessages, sentDM{recipient: recipientPubkey, message: message})
+	return nil
+}
+
+func (m *mockNostrClient) SubscribeDMs(ctx context.Context, privateKey string, handler internalNostr.DMHandler) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.subscribeCalls++
 	return nil
 }
 
@@ -553,6 +633,27 @@ func TestCoordinator_SignEvent_InvalidHash(t *testing.T) {
 	}
 }
 
+func TestCoordinator_SignEvent_SignMessageError(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStorage()
+	encryptor := &testEncryptor{}
+	kg := NewKeyGenerator(encryptor)
+
+	// Create key but don't store any shares - will cause SignMessage to fail
+	config := &KeyGenConfig{Threshold: 2, TotalShares: 3}
+	result, _ := kg.GenerateKey(config)
+	store.CreateFrostKey(ctx, result.FrostKey)
+	// Don't add shares - SignMessage will fail with insufficient shares
+
+	coord := NewCoordinator(store, encryptor)
+	eventHash := make([]byte, 32)
+
+	_, err := coord.SignEvent(ctx, result.FrostKey.ID, eventHash)
+	if err == nil {
+		t.Error("expected error when SignMessage fails")
+	}
+}
+
 func TestCoordinator_CanSign(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStorage()
@@ -755,6 +856,89 @@ func TestKeyGenerator_CreateShareBundle(t *testing.T) {
 	if bundle.VerificationShares == "" {
 		t.Error("Bundle VerificationShares is empty")
 	}
+}
+
+func TestKeyGenerator_CreateShareBundle_EdgeCases(t *testing.T) {
+	t.Run("decrypt error", func(t *testing.T) {
+		encryptor := &failingEncryptor{failDecrypt: true}
+		kg := NewKeyGenerator(encryptor)
+
+		frostKey := &FrostKey{
+			ID:              "test-key",
+			GroupPublicKey:  make([]byte, 33),
+			VerificationShares: make([]byte, 10),
+			Threshold:       2,
+			TotalShares:     3,
+		}
+		share := &FrostShare{
+			ID:             "test-share",
+			FrostKeyID:     "test-key",
+			ShareIndex:     1,
+			EncryptedShare: []byte("encrypted data"),
+			IsLocal:        true,
+		}
+
+		_, err := kg.CreateShareBundle(frostKey, share)
+		if err == nil {
+			t.Error("expected error for decrypt failure")
+		}
+	})
+
+	t.Run("non-local share passthrough", func(t *testing.T) {
+		encryptor := &testEncryptor{}
+		kg := NewKeyGenerator(encryptor)
+
+		frostKey := &FrostKey{
+			ID:              "test-key",
+			GroupPublicKey:  make([]byte, 33),
+			VerificationShares: make([]byte, 10),
+			Threshold:       2,
+			TotalShares:     3,
+		}
+		share := &FrostShare{
+			ID:             "test-share",
+			FrostKeyID:     "test-key",
+			ShareIndex:     2,
+			EncryptedShare: []byte("raw share data"),
+			IsLocal:        false, // Not local - should not decrypt
+		}
+
+		bundle, err := kg.CreateShareBundle(frostKey, share)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Share data should be hex-encoded raw data
+		if bundle.ShareData == "" {
+			t.Error("ShareData should not be empty")
+		}
+	})
+
+	t.Run("nil encryptor passthrough", func(t *testing.T) {
+		kg := NewKeyGenerator(nil)
+
+		frostKey := &FrostKey{
+			ID:              "test-key",
+			GroupPublicKey:  make([]byte, 33),
+			VerificationShares: make([]byte, 10),
+			Threshold:       2,
+			TotalShares:     3,
+		}
+		share := &FrostShare{
+			ID:             "test-share",
+			FrostKeyID:     "test-key",
+			ShareIndex:     1,
+			EncryptedShare: []byte("raw share data"),
+			IsLocal:        true,
+		}
+
+		bundle, err := kg.CreateShareBundle(frostKey, share)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if bundle.ShareData == "" {
+			t.Error("ShareData should not be empty")
+		}
+	})
 }
 
 func TestConvertToNostrSignature(t *testing.T) {
@@ -1111,5 +1295,420 @@ func BenchmarkVerification(b *testing.B) {
 		if err != nil {
 			b.Fatalf("VerifySignature error: %v", err)
 		}
+	}
+}
+
+func TestDecodePublicKeyShare(t *testing.T) {
+	group := DefaultCiphersuite.Group()
+
+	t.Run("valid public key", func(t *testing.T) {
+		// Generate a random public key
+		scalar := group.NewScalar().Random()
+		pubKey := group.Base().Multiply(scalar)
+		pubKeyBytes := pubKey.Encode()
+
+		// Decode it
+		pks, err := decodePublicKeyShare(pubKeyBytes, group, 1)
+		if err != nil {
+			t.Fatalf("decodePublicKeyShare error: %v", err)
+		}
+
+		if pks == nil {
+			t.Fatal("public key share is nil")
+		}
+		if pks.ID != 1 {
+			t.Errorf("ID = %d, want 1", pks.ID)
+		}
+		if !pks.PublicKey.Equal(pubKey) {
+			t.Error("public key mismatch")
+		}
+	})
+
+	t.Run("invalid data", func(t *testing.T) {
+		invalidData := []byte{0x00, 0x01, 0x02}
+		_, err := decodePublicKeyShare(invalidData, group, 1)
+		if err == nil {
+			t.Error("expected error for invalid data")
+		}
+	})
+
+	t.Run("different indices", func(t *testing.T) {
+		scalar := group.NewScalar().Random()
+		pubKey := group.Base().Multiply(scalar)
+		pubKeyBytes := pubKey.Encode()
+
+		for idx := 1; idx <= 5; idx++ {
+			pks, err := decodePublicKeyShare(pubKeyBytes, group, idx)
+			if err != nil {
+				t.Fatalf("decodePublicKeyShare error for index %d: %v", idx, err)
+			}
+			if pks.ID != uint16(idx) {
+				t.Errorf("ID = %d, want %d", pks.ID, idx)
+			}
+		}
+	})
+}
+
+func TestGetFrostConfiguration(t *testing.T) {
+	encryptor := &testEncryptor{}
+	kg := NewKeyGenerator(encryptor)
+
+	// Generate a key
+	config := &KeyGenConfig{
+		Name:        "config test",
+		Threshold:   2,
+		TotalShares: 3,
+	}
+
+	result, err := kg.GenerateKey(config)
+	if err != nil {
+		t.Fatalf("GenerateKey error: %v", err)
+	}
+
+	// Get FROST configuration (needs FrostKey and public key shares)
+	// For this test we pass empty public shares since we're testing the function exists
+	frostConfig, err := GetFrostConfiguration(result.FrostKey, nil)
+	if err != nil {
+		// Error is expected without public shares
+		t.Logf("GetFrostConfiguration returned error (expected without shares): %v", err)
+		return
+	}
+
+	if frostConfig == nil {
+		t.Fatal("frost configuration is nil")
+	}
+}
+
+func TestGetFrostConfiguration_Errors(t *testing.T) {
+	t.Run("invalid group public key", func(t *testing.T) {
+		key := &FrostKey{
+			ID:             "test",
+			Threshold:      2,
+			TotalShares:    3,
+			GroupPublicKey: []byte{0x01, 0x02, 0x03}, // Invalid
+		}
+
+		_, err := GetFrostConfiguration(key, nil)
+		if err == nil {
+			t.Error("expected error for invalid group public key")
+		}
+	})
+}
+
+func TestCoordinator_SignMessage_Errors(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStorage()
+	encryptor := &testEncryptor{}
+
+	coord := NewCoordinator(store, encryptor)
+
+	t.Run("key not found", func(t *testing.T) {
+		_, err := coord.SignMessage(ctx, "nonexistent-key", make([]byte, 32))
+		if err == nil {
+			t.Error("expected error for nonexistent key")
+		}
+	})
+
+	t.Run("no shares", func(t *testing.T) {
+		kg := NewKeyGenerator(encryptor)
+		config := &KeyGenConfig{Threshold: 2, TotalShares: 3}
+		result, _ := kg.GenerateKey(config)
+		store.CreateFrostKey(ctx, result.FrostKey)
+		// Don't add any shares
+
+		_, err := coord.SignMessage(ctx, result.FrostKey.ID, make([]byte, 32))
+		if err == nil {
+			t.Error("expected error for no shares")
+		}
+	})
+
+	t.Run("storage error listing shares", func(t *testing.T) {
+		kg := NewKeyGenerator(encryptor)
+		config := &KeyGenConfig{Threshold: 2, TotalShares: 3}
+		result, _ := kg.GenerateKey(config)
+
+		errStore := &errorStorage{
+			testStorage:   newTestStorage(),
+			failListLocal: true,
+		}
+		errStore.CreateFrostKey(ctx, result.FrostKey)
+
+		coord := NewCoordinator(errStore, encryptor)
+		_, err := coord.SignMessage(ctx, result.FrostKey.ID, make([]byte, 32))
+		if err == nil {
+			t.Error("expected storage error")
+		}
+	})
+
+	t.Run("decryption error", func(t *testing.T) {
+		kg := NewKeyGenerator(encryptor)
+		config := &KeyGenConfig{Threshold: 2, TotalShares: 3}
+		result, _ := kg.GenerateKey(config)
+
+		localStore := newTestStorage()
+		localStore.CreateFrostKey(ctx, result.FrostKey)
+		for _, share := range result.Shares {
+			localStore.CreateFrostShare(ctx, share)
+		}
+
+		// Use a failing encryptor
+		failEnc := &failingEncryptor{failDecrypt: true}
+		coord := NewCoordinator(localStore, failEnc)
+		_, err := coord.SignMessage(ctx, result.FrostKey.ID, make([]byte, 32))
+		if err == nil {
+			t.Error("expected decryption error")
+		}
+	})
+
+	t.Run("nil encryptor uses raw share data", func(t *testing.T) {
+		// When encryptor is nil, the coordinator uses the raw encrypted share data
+		// This tests the else branch in the decrypt logic
+		kg := NewKeyGenerator(encryptor)
+		config := &KeyGenConfig{Threshold: 2, TotalShares: 3}
+		result, _ := kg.GenerateKey(config)
+
+		localStore := newTestStorage()
+		localStore.CreateFrostKey(ctx, result.FrostKey)
+		for _, share := range result.Shares {
+			localStore.CreateFrostShare(ctx, share)
+		}
+
+		// Create coordinator with nil encryptor
+		coordNilEnc := NewCoordinator(localStore, nil)
+		// testEncryptor returns plaintext as-is, so this should work
+		sig, err := coordNilEnc.SignMessage(ctx, result.FrostKey.ID, make([]byte, 32))
+		if err != nil {
+			t.Errorf("unexpected error with nil encryptor: %v", err)
+		}
+		if len(sig) == 0 {
+			t.Error("expected signature with nil encryptor")
+		}
+	})
+
+	t.Run("invalid verification shares", func(t *testing.T) {
+		// Create a key with invalid verification shares
+		invalidKey := &FrostKey{
+			ID:                 "invalid-ver-shares-key",
+			Name:               "test",
+			Pubkey:             "deadbeef",
+			Threshold:          2,
+			TotalShares:        3,
+			GroupPublicKey:     make([]byte, 33),
+			VerificationShares: []byte{0x00, 0x01}, // Invalid
+		}
+		localStore := newTestStorage()
+		localStore.CreateFrostKey(ctx, invalidKey)
+
+		// Create local shares
+		for i := 1; i <= 3; i++ {
+			share := &FrostShare{
+				ID:             fmt.Sprintf("invalid-ver-share-%d", i),
+				FrostKeyID:     invalidKey.ID,
+				ShareIndex:     i,
+				EncryptedShare: make([]byte, 32),
+				IsLocal:        true,
+			}
+			localStore.CreateFrostShare(ctx, share)
+		}
+
+		coord := NewCoordinator(localStore, encryptor)
+		_, err := coord.SignMessage(ctx, invalidKey.ID, make([]byte, 32))
+		if err == nil {
+			t.Error("expected error for invalid verification shares")
+		}
+	})
+
+	t.Run("invalid key share data", func(t *testing.T) {
+		// Create a valid frost key with valid verification shares
+		kg := NewKeyGenerator(encryptor)
+		goodConfig := &KeyGenConfig{Threshold: 2, TotalShares: 3}
+		result, _ := kg.GenerateKey(goodConfig)
+
+		localStore := newTestStorage()
+		localStore.CreateFrostKey(ctx, result.FrostKey)
+
+		// Create shares with invalid encrypted data (too short to decode)
+		for i := 1; i <= 3; i++ {
+			share := &FrostShare{
+				ID:             fmt.Sprintf("bad-share-%d", i),
+				FrostKeyID:     result.FrostKey.ID,
+				ShareIndex:     i,
+				EncryptedShare: []byte{0x01, 0x02, 0x03}, // Invalid share data
+				IsLocal:        true,
+			}
+			localStore.CreateFrostShare(ctx, share)
+		}
+
+		coord := NewCoordinator(localStore, encryptor)
+		_, err := coord.SignMessage(ctx, result.FrostKey.ID, make([]byte, 32))
+		if err == nil {
+			t.Error("expected error for invalid key share data")
+		}
+	})
+}
+
+func TestCoordinator_VerifySignature_Errors(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStorage()
+	encryptor := &testEncryptor{}
+
+	coord := NewCoordinator(store, encryptor)
+
+	t.Run("key not found", func(t *testing.T) {
+		_, err := coord.VerifySignature(ctx, "nonexistent-key", make([]byte, 32), make([]byte, 64))
+		if err == nil {
+			t.Error("expected error for nonexistent key")
+		}
+	})
+
+	t.Run("invalid signature format", func(t *testing.T) {
+		kg := NewKeyGenerator(encryptor)
+		config := &KeyGenConfig{Threshold: 2, TotalShares: 3}
+		result, _ := kg.GenerateKey(config)
+		store.CreateFrostKey(ctx, result.FrostKey)
+
+		// Try to verify with invalid signature
+		valid, err := coord.VerifySignature(ctx, result.FrostKey.ID, make([]byte, 32), []byte{0x01})
+		if err == nil {
+			t.Error("expected error for invalid signature")
+		}
+		if valid {
+			t.Error("should not validate invalid signature")
+		}
+	})
+
+	t.Run("invalid group public key", func(t *testing.T) {
+		// Create a key with invalid group public key bytes
+		invalidKey := &storage.FrostKey{
+			ID:              "invalid-pubkey-key",
+			Name:            "test",
+			Pubkey:          "deadbeef",
+			Threshold:       2,
+			TotalShares:     3,
+			GroupPublicKey:  []byte{0x01, 0x02, 0x03}, // Invalid
+			VerificationShares: []byte{},
+		}
+		store.CreateFrostKey(ctx, invalidKey)
+
+		_, err := coord.VerifySignature(ctx, invalidKey.ID, make([]byte, 32), make([]byte, 64))
+		if err == nil {
+			t.Error("expected error for invalid group public key")
+		}
+	})
+}
+
+func TestCoordinator_CanSign_Errors(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStorage()
+	encryptor := &testEncryptor{}
+
+	coord := NewCoordinator(store, encryptor)
+
+	t.Run("key not found", func(t *testing.T) {
+		_, err := coord.CanSign(ctx, "nonexistent-key")
+		if err == nil {
+			t.Error("expected error for nonexistent key")
+		}
+	})
+}
+
+func TestCoordinator_StorageErrors(t *testing.T) {
+	ctx := context.Background()
+	encryptor := &testEncryptor{}
+	kg := NewKeyGenerator(encryptor)
+
+	// Generate a key first
+	config := &KeyGenConfig{Threshold: 2, TotalShares: 3}
+	result, _ := kg.GenerateKey(config)
+
+	t.Run("GetAvailableShareCount storage error", func(t *testing.T) {
+		errStore := &errorStorage{
+			testStorage:   newTestStorage(),
+			failListLocal: true,
+		}
+		// Store the key
+		errStore.CreateFrostKey(ctx, result.FrostKey)
+
+		coord := NewCoordinator(errStore, encryptor)
+		_, err := coord.GetAvailableShareCount(ctx, result.FrostKey.ID)
+		if err == nil {
+			t.Error("expected storage error")
+		}
+	})
+
+	t.Run("GetShareHolders storage error", func(t *testing.T) {
+		errStore := &errorStorage{
+			testStorage: newTestStorage(),
+			failListAll: true,
+		}
+		errStore.CreateFrostKey(ctx, result.FrostKey)
+
+		coord := NewCoordinator(errStore, encryptor)
+		_, err := coord.GetShareHolders(ctx, result.FrostKey.ID)
+		if err == nil {
+			t.Error("expected storage error")
+		}
+	})
+
+	t.Run("CanSign storage error from GetAvailableShareCount", func(t *testing.T) {
+		errStore := &errorStorage{
+			testStorage:   newTestStorage(),
+			failListLocal: true,
+		}
+		errStore.CreateFrostKey(ctx, result.FrostKey)
+
+		coord := NewCoordinator(errStore, encryptor)
+		_, err := coord.CanSign(ctx, result.FrostKey.ID)
+		if err == nil {
+			t.Error("expected storage error")
+		}
+	})
+}
+
+func TestPubkeyToHex_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []byte
+		expected int // expected hex length
+	}{
+		{
+			name:     "empty",
+			input:    []byte{},
+			expected: 0,
+		},
+		{
+			name:     "single byte fallback",
+			input:    []byte{0x02},
+			expected: 2, // fallback: hex encodes the full input
+		},
+		{
+			name:     "32 bytes x-only",
+			input:    make([]byte, 32),
+			expected: 64,
+		},
+		{
+			name:     "33 bytes compressed prefix 02",
+			input:    append([]byte{0x02}, make([]byte, 32)...),
+			expected: 64, // strips prefix
+		},
+		{
+			name:     "33 bytes compressed prefix 03",
+			input:    append([]byte{0x03}, make([]byte, 32)...),
+			expected: 64, // strips prefix
+		},
+		{
+			name:     "65 bytes uncompressed",
+			input:    append([]byte{0x04}, make([]byte, 64)...),
+			expected: 64, // extracts x-coordinate
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := pubkeyToHex(tt.input)
+			if len(result) != tt.expected {
+				t.Errorf("pubkeyToHex length = %d, want %d", len(result), tt.expected)
+			}
+		})
 	}
 }

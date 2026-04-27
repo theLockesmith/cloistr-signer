@@ -18,7 +18,7 @@ import (
 type DistributedDKG struct {
 	storage      FrostStorage
 	encryptor    Encryptor
-	nostrClient  *nostr.Client
+	nostrClient  NostrClient
 	privateKey   string // Our Nostr identity key (hex)
 	pubkey       string // Our Nostr pubkey (hex)
 
