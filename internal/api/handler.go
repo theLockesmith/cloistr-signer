@@ -2028,20 +2028,33 @@ func (h *Handler) handleUserSessions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// validateAuthHeader validates the Authorization header and returns JWT claims
+// validateAuthHeader validates the Authorization header or auth cookie and returns JWT claims
 func (h *Handler) validateAuthHeader(r *http.Request) (*auth.JWTClaims, error) {
+	var token string
+
+	// First try Authorization header (API clients)
 	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
+	if authHeader != "" {
+		// Expect "Bearer <token>"
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && parts[0] == "Bearer" {
+			token = parts[1]
+		}
+	}
+
+	// Fall back to auth_token cookie (web UI)
+	if token == "" {
+		cookie, err := r.Cookie("auth_token")
+		if err == nil && cookie.Value != "" {
+			token = cookie.Value
+		}
+	}
+
+	if token == "" {
 		return nil, auth.ErrInvalidToken
 	}
 
-	// Expect "Bearer <token>"
-	parts := strings.SplitN(authHeader, " ", 2)
-	if len(parts) != 2 || parts[0] != "Bearer" {
-		return nil, auth.ErrInvalidToken
-	}
-
-	return auth.ValidateJWT(h.authConfig, parts[1])
+	return auth.ValidateJWT(h.authConfig, token)
 }
 
 // Status endpoint
