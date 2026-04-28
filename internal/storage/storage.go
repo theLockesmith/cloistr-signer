@@ -42,19 +42,20 @@ const (
 
 // Key represents a stored signing key
 type Key struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	Pubkey          string    `json:"pubkey"`
-	KeyType         string    `json:"key_type"`          // "local" or "proxy" (default: local)
-	EncryptedNsec   string    `json:"-"`                 // For local keys: never exposed in JSON
-	BunkerURI       string    `json:"-"`                 // For proxy keys: bunker:// URI to upstream signer
-	UpstreamPubkey  string    `json:"upstream_pubkey,omitempty"` // For proxy keys: pubkey of the upstream signer
-	RequireApproval bool      `json:"require_approval"`  // If true, requests need manual approval
-	Relays          []string  `json:"relays,omitempty"`  // Custom relays for this key (nil = use global config)
-	RelayMode       string    `json:"relay_mode,omitempty"` // Relay selection: "auto", "manual", "discovery"
-	CreatedAt       time.Time `json:"created_at"`
-	CreatedBy       string    `json:"created_by"`
-	OwnerID         string    `json:"owner_id"`          // User who owns this key (for multi-user isolation)
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	Pubkey           string    `json:"pubkey"`
+	KeyType          string    `json:"key_type"`          // "local" or "proxy" (default: local)
+	EncryptedNsec    string    `json:"-"`                 // For local keys: never exposed in JSON
+	EncryptionMethod string    `json:"-"`                 // "local" (AES-GCM) or "vault" (Vault transit)
+	BunkerURI        string    `json:"-"`                 // For proxy keys: bunker:// URI to upstream signer
+	UpstreamPubkey   string    `json:"upstream_pubkey,omitempty"` // For proxy keys: pubkey of the upstream signer
+	RequireApproval  bool      `json:"require_approval"`  // If true, requests need manual approval
+	Relays           []string  `json:"relays,omitempty"`  // Custom relays for this key (nil = use global config)
+	RelayMode        string    `json:"relay_mode,omitempty"` // Relay selection: "auto", "manual", "discovery"
+	CreatedAt        time.Time `json:"created_at"`
+	CreatedBy        string    `json:"created_by"`
+	OwnerID          string    `json:"owner_id"`          // User who owns this key (for multi-user isolation)
 }
 
 // IsProxy returns true if this is a proxy key
@@ -194,6 +195,7 @@ type UserSession struct {
 	ID             string     `json:"id"`
 	UserID         string     `json:"user_id"`
 	Token          string     `json:"-"` // JWT token hash for revocation check
+	VaultToken     string     `json:"-"` // User's Vault token for key operations (encrypted at rest)
 	UserAgent      string     `json:"user_agent,omitempty"`
 	IPAddress      string     `json:"ip_address,omitempty"`
 	RememberDevice bool       `json:"remember_device"`            // If true, use extended expiry instead of inactivity timeout
@@ -224,6 +226,7 @@ type FrostKey struct {
 	VerificationShares []byte    `json:"-"`                    // Encoded verification shares (for verifying partial sigs)
 	CreatedAt          time.Time `json:"created_at"`
 	CreatedBy          string    `json:"created_by,omitempty"`
+	OwnerID            string    `json:"owner_id,omitempty"`   // User who owns this FROST key (for per-user encryption)
 }
 
 // FrostShare represents a single share of a FROST key
@@ -250,6 +253,7 @@ type Storage interface {
 	ListKeys(ctx context.Context, ownerID string) ([]*Key, error) // Filter by owner for user isolation
 	ListAllKeys(ctx context.Context) ([]*Key, error)              // Admin only - no owner filter
 	UpdateKey(ctx context.Context, key *Key) error
+	UpdateKeyEncryption(ctx context.Context, keyID, encryptedNsec, encryptionMethod string) error // For migration
 	DeleteKey(ctx context.Context, id string) error
 
 	// Permission management
@@ -335,6 +339,7 @@ type Storage interface {
 	GetFrostKey(ctx context.Context, id string) (*FrostKey, error)
 	GetFrostKeyByPubkey(ctx context.Context, pubkey string) (*FrostKey, error)
 	ListFrostKeys(ctx context.Context) ([]*FrostKey, error)
+	ListFrostKeysByOwner(ctx context.Context, ownerID string) ([]*FrostKey, error)
 	DeleteFrostKey(ctx context.Context, id string) error
 
 	// FROST share management
@@ -362,7 +367,12 @@ func New(cfg config.StorageConfig) (Storage, error) {
 		slog.Info("using PostgreSQL storage")
 		return NewPostgresStorage(cfg.DSN)
 	case "sqlite":
-		return nil, fmt.Errorf("sqlite storage not yet implemented")
+		path := cfg.DSN
+		if path == "" {
+			path = "cloistr-signer.db"
+		}
+		slog.Info("using SQLite storage", "path", path)
+		return NewSQLiteStorage(path)
 	default:
 		return nil, fmt.Errorf("unknown storage type: %s", cfg.Type)
 	}
@@ -519,6 +529,20 @@ func (m *MemoryStorage) UpdateKey(ctx context.Context, key *Key) error {
 
 	m.keys[key.ID] = key
 	m.keysByPubkey[key.Pubkey] = key
+	return nil
+}
+
+func (m *MemoryStorage) UpdateKeyEncryption(ctx context.Context, keyID, encryptedNsec, encryptionMethod string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key, exists := m.keys[keyID]
+	if !exists {
+		return ErrKeyNotFound
+	}
+
+	key.EncryptedNsec = encryptedNsec
+	key.EncryptionMethod = encryptionMethod
 	return nil
 }
 
@@ -1416,6 +1440,19 @@ func (m *MemoryStorage) ListFrostKeys(ctx context.Context) ([]*FrostKey, error) 
 	keys := make([]*FrostKey, 0, len(m.frostKeys))
 	for _, key := range m.frostKeys {
 		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+func (m *MemoryStorage) ListFrostKeysByOwner(ctx context.Context, ownerID string) ([]*FrostKey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	keys := make([]*FrostKey, 0)
+	for _, key := range m.frostKeys {
+		if key.OwnerID == ownerID {
+			keys = append(keys, key)
+		}
 	}
 	return keys, nil
 }

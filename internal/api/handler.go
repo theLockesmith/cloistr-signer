@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/frost"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/signer"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/vault"
 )
 
 // Handler manages HTTP API endpoints
@@ -30,6 +32,7 @@ type Handler struct {
 	storage          storage.Storage
 	authConfig       *auth.Config
 	encryptor        *crypto.Encryptor
+	vaultClient      *vault.Client // For per-user key encryption via Vault transit
 	frostCoordinator *frost.Coordinator
 	frostKeyGen      *frost.KeyGenerator
 	distributedDKG   *frost.DistributedDKG
@@ -50,7 +53,7 @@ func (a *frostEncryptorAdapter) Decrypt(ciphertext []byte) ([]byte, error) {
 }
 
 // NewHandler creates a new API handler
-func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage, encryptor *crypto.Encryptor) *Handler {
+func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage, encryptor *crypto.Encryptor, vaultClient *vault.Client) *Handler {
 	// Create FROST components if encryptor is available
 	var frostCoord *frost.Coordinator
 	var frostKG *frost.KeyGenerator
@@ -74,6 +77,7 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 			MFAIssuer:         cfg.Auth.MFAIssuer,
 		},
 		encryptor:        encryptor,
+		vaultClient:      vaultClient,
 		frostCoordinator: frostCoord,
 		frostKeyGen:      frostKG,
 	}
@@ -377,9 +381,24 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		pubkey = pk
 	}
 
-	// Encrypt the private key if encryptor is configured
+	// Encrypt the private key - prefer Vault if user has a valid session
 	encryptedKey := privateKey
-	if h.encryptor != nil {
+	encryptionMethod := "local"
+
+	// Try Vault encryption first (per-user keys)
+	vaultEncryptor := h.getUserVaultEncryptor(r.Context(), claims)
+	if vaultEncryptor != nil {
+		encrypted, err := vaultEncryptor.Encrypt(privateKey)
+		if err != nil {
+			slog.Error("failed to encrypt private key with vault", "error", err, "user_id", claims.UserID)
+			h.errorResponse(w, http.StatusInternalServerError, "failed to encrypt key")
+			return
+		}
+		encryptedKey = encrypted
+		encryptionMethod = "vault"
+		slog.Debug("encrypted key with vault transit", "user_id", claims.UserID)
+	} else if h.encryptor != nil {
+		// Fall back to local encryption
 		encrypted, err := h.encryptor.Encrypt(privateKey)
 		if err != nil {
 			slog.Error("failed to encrypt private key", "error", err)
@@ -390,13 +409,14 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := &storage.Key{
-		ID:            pubkey[:16],
-		Name:          req.Name,
-		Pubkey:        pubkey,
-		KeyType:       storage.KeyTypeLocal,
-		EncryptedNsec: encryptedKey,
-		CreatedAt:     time.Now(),
-		OwnerID:       claims.UserID,
+		ID:               pubkey[:16],
+		Name:             req.Name,
+		Pubkey:           pubkey,
+		KeyType:          storage.KeyTypeLocal,
+		EncryptedNsec:    encryptedKey,
+		EncryptionMethod: encryptionMethod,
+		CreatedAt:        time.Now(),
+		OwnerID:          claims.UserID,
 	}
 
 	if err := h.storage.CreateKey(r.Context(), key); err != nil {
@@ -453,9 +473,23 @@ func (h *Handler) handleCreateProxyKey(w http.ResponseWriter, r *http.Request, r
 		return
 	}
 
-	// Encrypt the local private key if encryptor is configured
+	// Encrypt the local private key - prefer Vault if user has a valid session
 	encryptedKey := localPrivateKey
-	if h.encryptor != nil {
+	encryptionMethod := "local"
+
+	// Try Vault encryption first (per-user keys)
+	vaultEncryptor := h.getUserVaultEncryptor(r.Context(), claims)
+	if vaultEncryptor != nil {
+		encrypted, err := vaultEncryptor.Encrypt(localPrivateKey)
+		if err != nil {
+			slog.Error("failed to encrypt private key with vault", "error", err, "user_id", claims.UserID)
+			h.errorResponse(w, http.StatusInternalServerError, "failed to encrypt key")
+			return
+		}
+		encryptedKey = encrypted
+		encryptionMethod = "vault"
+	} else if h.encryptor != nil {
+		// Fall back to local encryption
 		encrypted, err := h.encryptor.Encrypt(localPrivateKey)
 		if err != nil {
 			slog.Error("failed to encrypt private key", "error", err)
@@ -466,15 +500,16 @@ func (h *Handler) handleCreateProxyKey(w http.ResponseWriter, r *http.Request, r
 	}
 
 	key := &storage.Key{
-		ID:             localPubkey[:16],
-		Name:           req.Name,
-		Pubkey:         localPubkey, // Local pubkey for NIP-46 communication
-		KeyType:        storage.KeyTypeProxy,
-		EncryptedNsec:  encryptedKey,
-		BunkerURI:      req.BunkerURI,
-		UpstreamPubkey: uri.SignerPubkey, // The upstream signer's pubkey
-		CreatedAt:      time.Now(),
-		OwnerID:        claims.UserID,
+		ID:               localPubkey[:16],
+		Name:             req.Name,
+		Pubkey:           localPubkey, // Local pubkey for NIP-46 communication
+		KeyType:          storage.KeyTypeProxy,
+		EncryptedNsec:    encryptedKey,
+		EncryptionMethod: encryptionMethod,
+		BunkerURI:        req.BunkerURI,
+		UpstreamPubkey:   uri.SignerPubkey, // The upstream signer's pubkey
+		CreatedAt:        time.Now(),
+		OwnerID:          claims.UserID,
 	}
 
 	if err := h.storage.CreateKey(r.Context(), key); err != nil {
@@ -1651,6 +1686,18 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Provision Vault resources for the user (transit key, policy, userpass account)
+	// This enables per-user key encryption where only the user can decrypt their keys
+	if h.vaultClient != nil && h.config.Vault.Enabled {
+		if err := h.vaultClient.ProvisionUser(r.Context(), userID, req.Username, req.Password); err != nil {
+			// Log the error but don't fail registration - Vault can be provisioned later
+			// However, key operations will fail until Vault is properly set up
+			slog.Error("failed to provision vault user", "error", err, "user_id", userID)
+		} else {
+			slog.Info("vault user provisioned", "user_id", userID)
+		}
+	}
+
 	// Ensure platform user exists for cross-service authorization
 	if err := h.storage.EnsurePlatformUser(r.Context(), user.Pubkey); err != nil {
 		// Log but don't fail registration - platform linking is supplementary
@@ -1741,25 +1788,48 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// Reset failed login attempts
 	h.storage.ResetFailedLogins(r.Context(), user.ID)
 
-	// Generate JWT
-	token, expiresAt, err := auth.GenerateJWT(h.authConfig, user.ID, user.Username)
+	// Authenticate to Vault to get user's token for key operations
+	var vaultToken string
+	if h.vaultClient != nil && h.config.Vault.Enabled {
+		// Authenticate to Vault using user's credentials (userID is the Vault username)
+		vaultAuth, err := h.vaultClient.AuthenticateUserpass(r.Context(), user.ID, req.Password)
+		if err != nil {
+			// Log but don't fail login - user can still use the service
+			// Key operations requiring Vault will fail until this is resolved
+			slog.Warn("failed to authenticate to vault", "error", err, "user_id", user.ID)
+		} else {
+			vaultToken = vaultAuth.Token
+			slog.Debug("vault authentication successful", "user_id", user.ID, "lease_duration", vaultAuth.LeaseDuration)
+		}
+	}
+
+	// Generate session ID first (needed for JWT)
+	sessionID, _ := auth.GenerateSessionID()
+
+	// Generate JWT with session ID (so we can retrieve Vault token later)
+	token, expiresAt, err := auth.GenerateJWTWithSession(h.authConfig, user.ID, user.Username, sessionID)
 	if err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to generate token")
 		return
 	}
 
-	// Create session
-	sessionID, _ := auth.GenerateSessionID()
+	// Create session (with Vault token if available)
 	session := &storage.UserSession{
-		ID:        sessionID,
-		UserID:    user.ID,
-		Token:     token[:16], // Store prefix for revocation check
-		UserAgent: r.UserAgent(),
-		IPAddress: r.RemoteAddr,
-		ExpiresAt: expiresAt,
-		CreatedAt: time.Now(),
+		ID:         sessionID,
+		UserID:     user.ID,
+		Token:      token[:16], // Store prefix for revocation check
+		VaultToken: vaultToken, // Store Vault token for key operations
+		UserAgent:  r.UserAgent(),
+		IPAddress:  r.RemoteAddr,
+		ExpiresAt:  expiresAt,
+		CreatedAt:  time.Now(),
 	}
 	h.storage.CreateUserSession(r.Context(), session)
+
+	// Load user's Vault-encrypted keys into signer runtime
+	if vaultToken != "" {
+		h.loadUserVaultKeys(r.Context(), user.ID, vaultToken)
+	}
 
 	// Update last login
 	now := time.Now()
@@ -1796,7 +1866,24 @@ func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete all sessions for this user (or just the current one based on token)
+	// Unregister user's Vault-encrypted keys from signer runtime
+	h.unloadUserVaultKeys(r.Context(), claims.UserID)
+
+	// Revoke Vault tokens for all sessions before deleting them
+	if h.vaultClient != nil && h.config.Vault.Enabled {
+		sessions, err := h.storage.ListUserSessions(r.Context(), claims.UserID)
+		if err == nil {
+			for _, session := range sessions {
+				if session.VaultToken != "" {
+					if err := h.vaultClient.RevokeToken(r.Context(), session.VaultToken); err != nil {
+						slog.Warn("failed to revoke vault token", "error", err, "session_id", session.ID)
+					}
+				}
+			}
+		}
+	}
+
+	// Delete all sessions for this user
 	h.storage.DeleteUserSessions(r.Context(), claims.UserID)
 
 	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "logged out successfully"})
@@ -2055,6 +2142,106 @@ func (h *Handler) validateAuthHeader(r *http.Request) (*auth.JWTClaims, error) {
 	}
 
 	return auth.ValidateJWT(h.authConfig, token)
+}
+
+// getSessionVaultToken retrieves the Vault token from the user's session.
+// Returns empty string if Vault is disabled, session not found, or no token.
+func (h *Handler) getSessionVaultToken(ctx context.Context, claims *auth.JWTClaims) string {
+	if h.vaultClient == nil || !h.config.Vault.Enabled {
+		return ""
+	}
+	if claims.SessionID == "" {
+		return ""
+	}
+
+	session, err := h.storage.GetUserSession(ctx, claims.SessionID)
+	if err != nil {
+		slog.Debug("failed to get session for vault token", "error", err, "session_id", claims.SessionID)
+		return ""
+	}
+
+	return session.VaultToken
+}
+
+// getUserVaultEncryptor returns a VaultEncryptor for the user if Vault is enabled and they have a token.
+// Falls back to nil if Vault is not configured or user has no Vault token.
+func (h *Handler) getUserVaultEncryptor(ctx context.Context, claims *auth.JWTClaims) *crypto.VaultEncryptor {
+	vaultToken := h.getSessionVaultToken(ctx, claims)
+	if vaultToken == "" {
+		return nil
+	}
+	return crypto.NewVaultEncryptor(h.vaultClient, claims.UserID, vaultToken)
+}
+
+// loadUserVaultKeys loads and registers a user's Vault-encrypted keys into the signer runtime.
+// This is called when a user logs in to make their keys available for NIP-46 signing.
+func (h *Handler) loadUserVaultKeys(ctx context.Context, userID, vaultToken string) {
+	if h.vaultClient == nil || vaultToken == "" {
+		return
+	}
+
+	// Get user's keys
+	keys, err := h.storage.ListKeys(ctx, userID)
+	if err != nil {
+		slog.Error("failed to list user keys for vault loading", "error", err, "user_id", userID)
+		return
+	}
+
+	// Create Vault encryptor for this user
+	vaultEncryptor := crypto.NewVaultEncryptor(h.vaultClient, userID, vaultToken)
+
+	loadedCount := 0
+	for _, key := range keys {
+		// Only process Vault-encrypted keys
+		if !crypto.IsVaultEncrypted(key.EncryptedNsec) {
+			continue
+		}
+
+		// Decrypt the key
+		privateKey, err := vaultEncryptor.Decrypt(key.EncryptedNsec)
+		if err != nil {
+			slog.Error("failed to decrypt vault key", "error", err, "pubkey", key.Pubkey[:16]+"...")
+			continue
+		}
+
+		// Register with signer
+		if key.IsProxy() {
+			h.signer.RegisterProxyKey(key.Pubkey, privateKey, key.BunkerURI)
+		} else {
+			h.signer.RegisterKey(key.Pubkey, privateKey)
+		}
+		loadedCount++
+	}
+
+	if loadedCount > 0 {
+		slog.Info("loaded vault-encrypted keys for user", "user_id", userID, "count", loadedCount)
+	}
+}
+
+// unloadUserVaultKeys removes a user's Vault-encrypted keys from the signer runtime.
+// This is called when a user logs out to remove their keys from memory.
+func (h *Handler) unloadUserVaultKeys(ctx context.Context, userID string) {
+	// Get user's keys
+	keys, err := h.storage.ListKeys(ctx, userID)
+	if err != nil {
+		slog.Error("failed to list user keys for unloading", "error", err, "user_id", userID)
+		return
+	}
+
+	unloadedCount := 0
+	for _, key := range keys {
+		// Only unregister Vault-encrypted keys (local keys stay in memory)
+		if !crypto.IsVaultEncrypted(key.EncryptedNsec) {
+			continue
+		}
+
+		h.signer.UnregisterKey(key.Pubkey)
+		unloadedCount++
+	}
+
+	if unloadedCount > 0 {
+		slog.Info("unloaded vault-encrypted keys for user", "user_id", userID, "count", unloadedCount)
+	}
 }
 
 // Status endpoint
@@ -2488,7 +2675,15 @@ func (h *Handler) handleFrostKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleListFrostKeys(w http.ResponseWriter, r *http.Request) {
-	keys, err := h.storage.ListFrostKeys(r.Context())
+	// Get authenticated user for ownership filtering
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	// List only user's FROST keys
+	keys, err := h.storage.ListFrostKeysByOwner(r.Context(), claims.UserID)
 	if err != nil {
 		slog.Error("failed to list FROST keys", "error", err)
 		h.errorResponse(w, http.StatusInternalServerError, "failed to list FROST keys")
@@ -2511,6 +2706,13 @@ func (h *Handler) handleListFrostKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleCreateFrostKey(w http.ResponseWriter, r *http.Request) {
+	// Get authenticated user for ownership
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	var input CreateFrostKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -2539,6 +2741,9 @@ func (h *Handler) handleCreateFrostKey(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to generate FROST key")
 		return
 	}
+
+	// Set owner from authenticated user
+	result.FrostKey.OwnerID = claims.UserID
 
 	// Store the key
 	if err := h.storage.CreateFrostKey(r.Context(), result.FrostKey); err != nil {
@@ -2618,6 +2823,13 @@ func (h *Handler) handleFrostKeyByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleGetFrostKey(w http.ResponseWriter, r *http.Request, id string) {
+	// Get authenticated user for ownership verification
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	key, err := h.storage.GetFrostKey(r.Context(), id)
 	if err != nil {
 		if err == storage.ErrFrostKeyNotFound {
@@ -2625,6 +2837,12 @@ func (h *Handler) handleGetFrostKey(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to get FROST key")
+		return
+	}
+
+	// Verify ownership
+	if key.OwnerID != "" && key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusForbidden, "not authorized to access this FROST key")
 		return
 	}
 
@@ -2669,17 +2887,37 @@ func (h *Handler) handleGetFrostKey(w http.ResponseWriter, r *http.Request, id s
 }
 
 func (h *Handler) handleDeleteFrostKey(w http.ResponseWriter, r *http.Request, id string) {
-	err := h.storage.DeleteFrostKey(r.Context(), id)
+	// Get authenticated user for ownership verification
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	// Get key to verify ownership
+	key, err := h.storage.GetFrostKey(r.Context(), id)
 	if err != nil {
 		if err == storage.ErrFrostKeyNotFound {
 			h.errorResponse(w, http.StatusNotFound, "FROST key not found")
 			return
 		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get FROST key")
+		return
+	}
+
+	// Verify ownership
+	if key.OwnerID != "" && key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusForbidden, "not authorized to delete this FROST key")
+		return
+	}
+
+	err = h.storage.DeleteFrostKey(r.Context(), id)
+	if err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to delete FROST key")
 		return
 	}
 
-	slog.Info("deleted FROST key", "id", id)
+	slog.Info("deleted FROST key", "id", id, "user_id", claims.UserID)
 	h.jsonResponse(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 

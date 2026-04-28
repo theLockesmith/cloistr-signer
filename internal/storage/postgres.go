@@ -86,6 +86,9 @@ func (ps *PostgresStorage) migrate() error {
 	ALTER TABLE signer_keys ADD COLUMN IF NOT EXISTS owner_id TEXT REFERENCES signer_web_accounts(id) ON DELETE CASCADE;
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_owner ON signer_keys(owner_id);
 
+	-- Add encryption_method to track local vs vault encryption (Phase: Vault Integration)
+	ALTER TABLE signer_keys ADD COLUMN IF NOT EXISTS encryption_method TEXT DEFAULT 'local';
+
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_pubkey ON signer_keys(pubkey);
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_name ON signer_keys(name);
 
@@ -217,6 +220,8 @@ func (ps *PostgresStorage) migrate() error {
 	-- Add remember_device and last_activity columns if they don't exist (migration)
 	ALTER TABLE signer_web_sessions ADD COLUMN IF NOT EXISTS remember_device BOOLEAN NOT NULL DEFAULT FALSE;
 	ALTER TABLE signer_web_sessions ADD COLUMN IF NOT EXISTS last_activity TIMESTAMPTZ;
+	-- Add vault_token column for per-user Vault encryption (encrypted at rest)
+	ALTER TABLE signer_web_sessions ADD COLUMN IF NOT EXISTS vault_token TEXT;
 
 	CREATE INDEX IF NOT EXISTS idx_signer_web_sessions_user ON signer_web_sessions(user_id);
 	CREATE INDEX IF NOT EXISTS idx_signer_web_sessions_expires ON signer_web_sessions(expires_at);
@@ -250,10 +255,14 @@ func (ps *PostgresStorage) migrate() error {
 		group_public_key BYTEA NOT NULL,
 		verification_shares BYTEA NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		created_by TEXT
+		created_by TEXT,
+		owner_id TEXT REFERENCES signer_web_accounts(id)
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_signer_frost_keys_pubkey ON signer_frost_keys(pubkey);
+
+	-- Migration: Add owner_id column if it doesn't exist
+	ALTER TABLE signer_frost_keys ADD COLUMN IF NOT EXISTS owner_id TEXT REFERENCES signer_web_accounts(id);
 
 	CREATE TABLE IF NOT EXISTS signer_frost_shares (
 		id TEXT PRIMARY KEY,
@@ -291,10 +300,16 @@ func (ps *PostgresStorage) CreateKey(ctx context.Context, key *Key) error {
 		keyType = KeyTypeLocal
 	}
 
+	// Default to local encryption method if not specified
+	encryptionMethod := key.EncryptionMethod
+	if encryptionMethod == "" {
+		encryptionMethod = "local"
+	}
+
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO signer_keys (id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, relays, created_at, created_by, owner_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		key.ID, key.Name, key.Pubkey, keyType, nullString(key.EncryptedNsec), nullString(key.BunkerURI),
+		INSERT INTO signer_keys (id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, relays, created_at, created_by, owner_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		key.ID, key.Name, key.Pubkey, keyType, nullString(key.EncryptedNsec), encryptionMethod, nullString(key.BunkerURI),
 		nullString(key.UpstreamPubkey), pq.Array(key.Relays), key.CreatedAt, key.CreatedBy, nullString(key.OwnerID))
 	if err != nil {
 		if isDuplicateError(err) {
@@ -307,11 +322,11 @@ func (ps *PostgresStorage) CreateKey(ctx context.Context, key *Key) error {
 
 func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) {
 	key := &Key{}
-	var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
+	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, relays, created_at, created_by, owner_id
 		FROM signer_keys WHERE id = $1`, id).
-		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &bunkerURI, &upstreamPubkey,
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
 			&key.RequireApproval, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
@@ -321,6 +336,9 @@ func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) 
 	}
 	if encryptedNsec.Valid {
 		key.EncryptedNsec = encryptedNsec.String
+	}
+	if encryptionMethod.Valid {
+		key.EncryptionMethod = encryptionMethod.String
 	}
 	if bunkerURI.Valid {
 		key.BunkerURI = bunkerURI.String
@@ -336,11 +354,11 @@ func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) 
 
 func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*Key, error) {
 	key := &Key{}
-	var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
+	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, relays, created_at, created_by, owner_id
 		FROM signer_keys WHERE pubkey = $1`, pubkey).
-		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &bunkerURI, &upstreamPubkey,
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
 			&key.RequireApproval, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
@@ -350,6 +368,9 @@ func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*
 	}
 	if encryptedNsec.Valid {
 		key.EncryptedNsec = encryptedNsec.String
+	}
+	if encryptionMethod.Valid {
+		key.EncryptionMethod = encryptionMethod.String
 	}
 	if bunkerURI.Valid {
 		key.BunkerURI = bunkerURI.String
@@ -365,11 +386,11 @@ func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*
 
 func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key, error) {
 	key := &Key{}
-	var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
+	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, relays, created_at, created_by, owner_id
 		FROM signer_keys WHERE name = $1`, name).
-		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &bunkerURI, &upstreamPubkey,
+		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
 			&key.RequireApproval, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
@@ -379,6 +400,9 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 	}
 	if encryptedNsec.Valid {
 		key.EncryptedNsec = encryptedNsec.String
+	}
+	if encryptionMethod.Valid {
+		key.EncryptionMethod = encryptionMethod.String
 	}
 	if bunkerURI.Valid {
 		key.BunkerURI = bunkerURI.String
@@ -394,7 +418,7 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 
 func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, relays, created_at, created_by, owner_id, encryption_method
 		FROM signer_keys WHERE owner_id = $1 ORDER BY created_at DESC`, ownerID)
 	if err != nil {
 		return nil, err
@@ -404,9 +428,9 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key
 	var keys []*Key
 	for rows.Next() {
 		key := &Key{}
-		var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
+		var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull, encryptionMethod sql.NullString
 		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull); err != nil {
+			&key.RequireApproval, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod); err != nil {
 			return nil, err
 		}
 		if encryptedNsec.Valid {
@@ -421,6 +445,11 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key
 		if ownerIDNull.Valid {
 			key.OwnerID = ownerIDNull.String
 		}
+		if encryptionMethod.Valid {
+			key.EncryptionMethod = encryptionMethod.String
+		} else {
+			key.EncryptionMethod = "local"
+		}
 		keys = append(keys, key)
 	}
 	return keys, rows.Err()
@@ -428,7 +457,7 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key
 
 func (ps *PostgresStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, relays, created_at, created_by, owner_id, encryption_method
 		FROM signer_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -438,9 +467,9 @@ func (ps *PostgresStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 	var keys []*Key
 	for rows.Next() {
 		key := &Key{}
-		var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
+		var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull, encryptionMethod sql.NullString
 		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull); err != nil {
+			&key.RequireApproval, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod); err != nil {
 			return nil, err
 		}
 		if encryptedNsec.Valid {
@@ -454,6 +483,11 @@ func (ps *PostgresStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 		}
 		if ownerIDNull.Valid {
 			key.OwnerID = ownerIDNull.String
+		}
+		if encryptionMethod.Valid {
+			key.EncryptionMethod = encryptionMethod.String
+		} else {
+			key.EncryptionMethod = "local"
 		}
 		keys = append(keys, key)
 	}
@@ -467,6 +501,25 @@ func (ps *PostgresStorage) UpdateKey(ctx context.Context, key *Key) error {
 		WHERE id = $7`,
 		key.Name, key.RequireApproval, pq.Array(key.Relays),
 		key.KeyType, nullString(key.BunkerURI), nullString(key.UpstreamPubkey), key.ID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrKeyNotFound
+	}
+	return nil
+}
+
+// UpdateKeyEncryption updates only the encryption-related fields of a key (for migration)
+func (ps *PostgresStorage) UpdateKeyEncryption(ctx context.Context, keyID, encryptedNsec, encryptionMethod string) error {
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE signer_keys SET encrypted_nsec = $1, encryption_method = $2
+		WHERE id = $3`,
+		encryptedNsec, encryptionMethod, keyID)
 	if err != nil {
 		return err
 	}
@@ -1319,21 +1372,21 @@ func (ps *PostgresStorage) UnlockUser(ctx context.Context, userID string) error 
 
 func (ps *PostgresStorage) CreateUserSession(ctx context.Context, session *UserSession) error {
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO signer_web_sessions (id, user_id, token_hash, user_agent, ip_address, remember_device, last_activity, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		session.ID, session.UserID, nullString(session.Token), nullString(session.UserAgent),
+		INSERT INTO signer_web_sessions (id, user_id, token_hash, vault_token, user_agent, ip_address, remember_device, last_activity, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		session.ID, session.UserID, nullString(session.Token), nullString(session.VaultToken), nullString(session.UserAgent),
 		nullString(session.IPAddress), session.RememberDevice, session.LastActivity, session.ExpiresAt, session.CreatedAt)
 	return err
 }
 
 func (ps *PostgresStorage) GetUserSession(ctx context.Context, id string) (*UserSession, error) {
 	session := &UserSession{}
-	var tokenHash, userAgent, ipAddress sql.NullString
+	var tokenHash, vaultToken, userAgent, ipAddress sql.NullString
 	var lastActivity sql.NullTime
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, user_id, token_hash, user_agent, ip_address, remember_device, last_activity, expires_at, created_at
+		SELECT id, user_id, token_hash, vault_token, user_agent, ip_address, remember_device, last_activity, expires_at, created_at
 		FROM signer_web_sessions WHERE id = $1 AND expires_at > NOW()`, id).
-		Scan(&session.ID, &session.UserID, &tokenHash, &userAgent, &ipAddress, &session.RememberDevice, &lastActivity, &session.ExpiresAt, &session.CreatedAt)
+		Scan(&session.ID, &session.UserID, &tokenHash, &vaultToken, &userAgent, &ipAddress, &session.RememberDevice, &lastActivity, &session.ExpiresAt, &session.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
 	}
@@ -1343,6 +1396,9 @@ func (ps *PostgresStorage) GetUserSession(ctx context.Context, id string) (*User
 
 	if tokenHash.Valid {
 		session.Token = tokenHash.String
+	}
+	if vaultToken.Valid {
+		session.VaultToken = vaultToken.String
 	}
 	if userAgent.Valid {
 		session.UserAgent = userAgent.String
@@ -1358,7 +1414,7 @@ func (ps *PostgresStorage) GetUserSession(ctx context.Context, id string) (*User
 
 func (ps *PostgresStorage) ListUserSessions(ctx context.Context, userID string) ([]*UserSession, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, user_id, token_hash, user_agent, ip_address, remember_device, last_activity, expires_at, created_at
+		SELECT id, user_id, token_hash, vault_token, user_agent, ip_address, remember_device, last_activity, expires_at, created_at
 		FROM signer_web_sessions WHERE user_id = $1 AND expires_at > NOW()
 		ORDER BY created_at DESC`, userID)
 	if err != nil {
@@ -1369,13 +1425,16 @@ func (ps *PostgresStorage) ListUserSessions(ctx context.Context, userID string) 
 	var sessions []*UserSession
 	for rows.Next() {
 		session := &UserSession{}
-		var tokenHash, userAgent, ipAddress sql.NullString
+		var tokenHash, vaultToken, userAgent, ipAddress sql.NullString
 		var lastActivity sql.NullTime
-		if err := rows.Scan(&session.ID, &session.UserID, &tokenHash, &userAgent, &ipAddress, &session.RememberDevice, &lastActivity, &session.ExpiresAt, &session.CreatedAt); err != nil {
+		if err := rows.Scan(&session.ID, &session.UserID, &tokenHash, &vaultToken, &userAgent, &ipAddress, &session.RememberDevice, &lastActivity, &session.ExpiresAt, &session.CreatedAt); err != nil {
 			return nil, err
 		}
 		if tokenHash.Valid {
 			session.Token = tokenHash.String
+		}
+		if vaultToken.Valid {
+			session.VaultToken = vaultToken.String
 		}
 		if userAgent.Valid {
 			session.UserAgent = userAgent.String
@@ -1775,10 +1834,10 @@ func (ps *PostgresStorage) SetSetting(ctx context.Context, key, value string) er
 
 func (ps *PostgresStorage) CreateFrostKey(ctx context.Context, key *FrostKey) error {
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO signer_frost_keys (id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		INSERT INTO signer_frost_keys (id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by, owner_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		key.ID, nullString(key.Name), key.Pubkey, key.Threshold, key.TotalShares,
-		key.GroupPublicKey, key.VerificationShares, key.CreatedAt, nullString(key.CreatedBy))
+		key.GroupPublicKey, key.VerificationShares, key.CreatedAt, nullString(key.CreatedBy), nullString(key.OwnerID))
 	if err != nil {
 		if isDuplicateError(err) {
 			return ErrKeyExists
@@ -1790,12 +1849,12 @@ func (ps *PostgresStorage) CreateFrostKey(ctx context.Context, key *FrostKey) er
 
 func (ps *PostgresStorage) GetFrostKey(ctx context.Context, id string) (*FrostKey, error) {
 	key := &FrostKey{}
-	var name, createdBy sql.NullString
+	var name, createdBy, ownerID sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by
+		SELECT id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by, owner_id
 		FROM signer_frost_keys WHERE id = $1`, id).
 		Scan(&key.ID, &name, &key.Pubkey, &key.Threshold, &key.TotalShares,
-			&key.GroupPublicKey, &key.VerificationShares, &key.CreatedAt, &createdBy)
+			&key.GroupPublicKey, &key.VerificationShares, &key.CreatedAt, &createdBy, &ownerID)
 	if err == sql.ErrNoRows {
 		return nil, ErrFrostKeyNotFound
 	}
@@ -1807,18 +1866,21 @@ func (ps *PostgresStorage) GetFrostKey(ctx context.Context, id string) (*FrostKe
 	}
 	if createdBy.Valid {
 		key.CreatedBy = createdBy.String
+	}
+	if ownerID.Valid {
+		key.OwnerID = ownerID.String
 	}
 	return key, nil
 }
 
 func (ps *PostgresStorage) GetFrostKeyByPubkey(ctx context.Context, pubkey string) (*FrostKey, error) {
 	key := &FrostKey{}
-	var name, createdBy sql.NullString
+	var name, createdBy, ownerID sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by
+		SELECT id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by, owner_id
 		FROM signer_frost_keys WHERE pubkey = $1`, pubkey).
 		Scan(&key.ID, &name, &key.Pubkey, &key.Threshold, &key.TotalShares,
-			&key.GroupPublicKey, &key.VerificationShares, &key.CreatedAt, &createdBy)
+			&key.GroupPublicKey, &key.VerificationShares, &key.CreatedAt, &createdBy, &ownerID)
 	if err == sql.ErrNoRows {
 		return nil, ErrFrostKeyNotFound
 	}
@@ -1831,12 +1893,15 @@ func (ps *PostgresStorage) GetFrostKeyByPubkey(ctx context.Context, pubkey strin
 	if createdBy.Valid {
 		key.CreatedBy = createdBy.String
 	}
+	if ownerID.Valid {
+		key.OwnerID = ownerID.String
+	}
 	return key, nil
 }
 
 func (ps *PostgresStorage) ListFrostKeys(ctx context.Context) ([]*FrostKey, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by
+		SELECT id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by, owner_id
 		FROM signer_frost_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -1846,9 +1911,9 @@ func (ps *PostgresStorage) ListFrostKeys(ctx context.Context) ([]*FrostKey, erro
 	var keys []*FrostKey
 	for rows.Next() {
 		key := &FrostKey{}
-		var name, createdBy sql.NullString
+		var name, createdBy, ownerID sql.NullString
 		if err := rows.Scan(&key.ID, &name, &key.Pubkey, &key.Threshold, &key.TotalShares,
-			&key.GroupPublicKey, &key.VerificationShares, &key.CreatedAt, &createdBy); err != nil {
+			&key.GroupPublicKey, &key.VerificationShares, &key.CreatedAt, &createdBy, &ownerID); err != nil {
 			return nil, err
 		}
 		if name.Valid {
@@ -1856,6 +1921,41 @@ func (ps *PostgresStorage) ListFrostKeys(ctx context.Context) ([]*FrostKey, erro
 		}
 		if createdBy.Valid {
 			key.CreatedBy = createdBy.String
+		}
+		if ownerID.Valid {
+			key.OwnerID = ownerID.String
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+// ListFrostKeysByOwner returns FROST keys owned by a specific user
+func (ps *PostgresStorage) ListFrostKeysByOwner(ctx context.Context, ownerID string) ([]*FrostKey, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, name, pubkey, threshold, total_shares, group_public_key, verification_shares, created_at, created_by, owner_id
+		FROM signer_frost_keys WHERE owner_id = $1 ORDER BY created_at DESC`, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []*FrostKey
+	for rows.Next() {
+		key := &FrostKey{}
+		var name, createdBy, ownerIDNull sql.NullString
+		if err := rows.Scan(&key.ID, &name, &key.Pubkey, &key.Threshold, &key.TotalShares,
+			&key.GroupPublicKey, &key.VerificationShares, &key.CreatedAt, &createdBy, &ownerIDNull); err != nil {
+			return nil, err
+		}
+		if name.Valid {
+			key.Name = name.String
+		}
+		if createdBy.Valid {
+			key.CreatedBy = createdBy.String
+		}
+		if ownerIDNull.Valid {
+			key.OwnerID = ownerIDNull.String
 		}
 		keys = append(keys, key)
 	}

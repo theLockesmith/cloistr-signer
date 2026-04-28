@@ -158,11 +158,20 @@ func (s *Signer) Start(ctx context.Context) error {
 	}
 
 	// Load any existing keys into runtime map
+	// Note: Only locally-encrypted keys are loaded at startup
+	// Vault-encrypted keys require user login to decrypt
 	s.keysLock.Lock()
+	vaultKeyCount := 0
 	for _, key := range keys {
 		// Decrypt the local private key if needed (both local and proxy keys have this)
 		privateKey := key.EncryptedNsec
 		if privateKey != "" {
+			// Skip Vault-encrypted keys at startup - they're loaded when user logs in
+			if crypto.IsVaultEncrypted(privateKey) {
+				vaultKeyCount++
+				slog.Debug("skipping vault-encrypted key at startup", "pubkey", key.Pubkey[:16]+"...")
+				continue
+			}
 			if crypto.IsEncrypted(privateKey) && s.encryptor != nil {
 				decrypted, err := s.encryptor.Decrypt(privateKey)
 				if err != nil {
@@ -194,7 +203,15 @@ func (s *Signer) Start(ctx context.Context) error {
 	if len(keys) == 0 {
 		slog.Warn("no keys configured yet, will subscribe once keys are added via API")
 	} else {
-		slog.Info("loaded keys from storage", "count", len(keys))
+		loadedCount := len(keys) - vaultKeyCount
+		slog.Info("loaded keys from storage",
+			"total", len(keys),
+			"loaded", loadedCount,
+			"vault_pending", vaultKeyCount,
+		)
+		if vaultKeyCount > 0 {
+			slog.Info("vault-encrypted keys will be loaded when users log in", "count", vaultKeyCount)
+		}
 	}
 	metrics.SetKeysManaged(len(keys))
 

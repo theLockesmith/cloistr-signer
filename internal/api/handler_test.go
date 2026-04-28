@@ -35,7 +35,7 @@ func testHandler(t *testing.T) (*Handler, *storage.MemoryStorage) {
 	// signer methods should handle nil checks appropriately
 	s := signer.New(cfg, store, nil, nil, nil, nil, nil)
 
-	h := NewHandler(cfg, s, store, nil)
+	h := NewHandler(cfg, s, store, nil, nil)
 	return h, store
 }
 
@@ -71,7 +71,7 @@ func TestNewHandler(t *testing.T) {
 	store := storage.NewMemoryStorage()
 	s := signer.New(cfg, store, nil, nil, nil, nil, nil)
 
-	h := NewHandler(cfg, s, store, nil)
+	h := NewHandler(cfg, s, store, nil, nil)
 
 	if h == nil {
 		t.Fatal("NewHandler() returned nil")
@@ -1548,5 +1548,506 @@ func TestHandleMFADisable_NotEnabled(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("handleMFADisable() status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+// Key ownership and isolation tests
+
+func TestHandleListKeys_OwnerIsolation(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	// Create two users
+	user1ID := "user1-isolation"
+	user2ID := "user2-isolation"
+
+	// Create keys owned by user1
+	store.CreateKey(ctx, &storage.Key{
+		ID:        "key1-user1",
+		Name:      "user1-key-1",
+		Pubkey:    "1111111111111111111111111111111111111111111111111111111111111111",
+		OwnerID:   user1ID,
+		CreatedAt: time.Now(),
+	})
+	store.CreateKey(ctx, &storage.Key{
+		ID:        "key2-user1",
+		Name:      "user1-key-2",
+		Pubkey:    "2222222222222222222222222222222222222222222222222222222222222222",
+		OwnerID:   user1ID,
+		CreatedAt: time.Now(),
+	})
+
+	// Create key owned by user2
+	store.CreateKey(ctx, &storage.Key{
+		ID:        "key1-user2",
+		Name:      "user2-key-1",
+		Pubkey:    "3333333333333333333333333333333333333333333333333333333333333333",
+		OwnerID:   user2ID,
+		CreatedAt: time.Now(),
+	})
+
+	// User1 should only see their 2 keys
+	token1, _, _ := auth.GenerateJWT(h.authConfig, user1ID, "user1")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/keys", nil)
+	req.Header.Set("Authorization", "Bearer "+token1)
+	rr := httptest.NewRecorder()
+
+	h.handleKeys(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handleKeys() status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var keys []KeyResponse
+	if err := json.NewDecoder(rr.Body).Decode(&keys); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(keys) != 2 {
+		t.Errorf("user1 should see 2 keys, got %d", len(keys))
+	}
+
+	// User2 should only see their 1 key
+	token2, _, _ := auth.GenerateJWT(h.authConfig, user2ID, "user2")
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/keys", nil)
+	req.Header.Set("Authorization", "Bearer "+token2)
+	rr = httptest.NewRecorder()
+
+	h.handleKeys(rr, req)
+
+	if err := json.NewDecoder(rr.Body).Decode(&keys); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	if len(keys) != 1 {
+		t.Errorf("user2 should see 1 key, got %d", len(keys))
+	}
+}
+
+func TestHandleGetKey_OwnershipRequired(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	// Create key owned by user1
+	store.CreateKey(ctx, &storage.Key{
+		ID:        "owned-key-123",
+		Name:      "owned-key",
+		Pubkey:    "4444444444444444444444444444444444444444444444444444444444444444",
+		OwnerID:   "owner-user-id",
+		CreatedAt: time.Now(),
+	})
+
+	// Different user tries to access
+	token, _, _ := auth.GenerateJWT(h.authConfig, "different-user-id", "different")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/keys/owned-key-123", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.handleGetKey(rr, req, "owned-key-123")
+
+	// Should be forbidden or not found (depending on implementation - not found is more secure)
+	if rr.Code != http.StatusNotFound && rr.Code != http.StatusForbidden {
+		t.Errorf("non-owner access to key: status = %d, want 403 or 404", rr.Code)
+	}
+}
+
+func TestHandleDeleteKey_OwnershipRequired(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	// Create key owned by user1
+	store.CreateKey(ctx, &storage.Key{
+		ID:        "delete-owned-key",
+		Name:      "delete-owned",
+		Pubkey:    "5555555555555555555555555555555555555555555555555555555555555555",
+		OwnerID:   "owner-user-id",
+		CreatedAt: time.Now(),
+	})
+
+	// Different user tries to delete
+	token, _, _ := auth.GenerateJWT(h.authConfig, "attacker-user-id", "attacker")
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/keys/delete-owned-key", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.handleDeleteKey(rr, req, "delete-owned-key")
+
+	// Should be forbidden or not found
+	if rr.Code != http.StatusNotFound && rr.Code != http.StatusForbidden {
+		t.Errorf("non-owner delete of key: status = %d, want 403 or 404", rr.Code)
+	}
+
+	// Verify key still exists
+	_, err := store.GetKey(ctx, "delete-owned-key")
+	if err != nil {
+		t.Error("key should not be deleted by non-owner")
+	}
+}
+
+func TestHandleSetPermission_OwnershipRequired(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	// Create key owned by user1
+	store.CreateKey(ctx, &storage.Key{
+		ID:        "perm-owned-key",
+		Name:      "perm-owned",
+		Pubkey:    "6666666666666666666666666666666666666666666666666666666666666666",
+		OwnerID:   "owner-user-id",
+		CreatedAt: time.Now(),
+	})
+
+	// Different user tries to set permission
+	token, _, _ := auth.GenerateJWT(h.authConfig, "attacker-user-id", "attacker")
+	body := `{
+		"user_pubkey": "7777777777777777777777777777777777777777777777777777777777777777",
+		"methods": ["sign_event"]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/keys/perm-owned-key/permissions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.handleSetPermission(rr, req, "perm-owned-key")
+
+	// Should be forbidden or not found
+	if rr.Code != http.StatusNotFound && rr.Code != http.StatusForbidden {
+		t.Errorf("non-owner set permission: status = %d, want 403 or 404", rr.Code)
+	}
+}
+
+func TestHandleCreateKey_SetsOwner(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	// Create key as authenticated user
+	userID := "key-creator-user"
+	token, _, _ := auth.GenerateJWT(h.authConfig, userID, "keycreator")
+
+	body := `{"name": "my-new-key"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/keys", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.handleKeys(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("handleCreateKey() status = %d, want %d; body: %s", rr.Code, http.StatusCreated, rr.Body.String())
+	}
+
+	var keyResp KeyResponse
+	if err := json.NewDecoder(rr.Body).Decode(&keyResp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Verify owner is set correctly in storage
+	key, err := store.GetKey(ctx, keyResp.ID)
+	if err != nil {
+		t.Fatalf("failed to get created key: %v", err)
+	}
+
+	if key.OwnerID != userID {
+		t.Errorf("key.OwnerID = %q, want %q", key.OwnerID, userID)
+	}
+}
+
+// Session and Vault token tests
+
+func TestHandleUserLogin_CreatesSession(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	// Create user
+	hash, _ := auth.HashPassword("password123", auth.DefaultBcryptCost)
+	user := &storage.User{
+		ID:           "session-test-user",
+		Username:     "sessiontestuser",
+		PasswordHash: hash,
+		CreatedAt:    time.Now(),
+	}
+	store.CreateUser(ctx, user)
+
+	body := `{"username": "sessiontestuser", "password": "password123"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.handleUserLogin(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handleUserLogin() status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	// Verify session was created
+	sessions, err := store.ListUserSessions(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("failed to list sessions: %v", err)
+	}
+
+	if len(sessions) == 0 {
+		t.Error("login should create a session")
+	}
+}
+
+func TestHandleUserLogout_DeletesSessions(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	// Create user and session
+	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	user := &storage.User{
+		ID:           "logout-test-user",
+		Username:     "logouttestuser",
+		PasswordHash: hash,
+		CreatedAt:    time.Now(),
+	}
+	store.CreateUser(ctx, user)
+
+	session := &storage.UserSession{
+		ID:        "session-to-delete",
+		UserID:    user.ID,
+		Token:     "token-prefix",
+		ExpiresAt: time.Now().Add(time.Hour),
+		CreatedAt: time.Now(),
+	}
+	store.CreateUserSession(ctx, session)
+
+	// Generate token and logout
+	token, _, _ := auth.GenerateJWT(h.authConfig, user.ID, user.Username)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/logout", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.handleUserLogout(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handleUserLogout() status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	// Verify sessions were deleted
+	sessions, _ := store.ListUserSessions(ctx, user.ID)
+	if len(sessions) != 0 {
+		t.Errorf("logout should delete all sessions, got %d", len(sessions))
+	}
+}
+
+// Encryption method tracking
+
+func TestHandleCreateKey_TracksEncryptionMethod(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	// Create key without Vault (should use local encryption or none)
+	userID := "enc-method-user"
+	token, _, _ := auth.GenerateJWT(h.authConfig, userID, "encuser")
+
+	body := `{"name": "enc-method-key"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/keys", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.handleKeys(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("handleCreateKey() status = %d, want %d", rr.Code, http.StatusCreated)
+	}
+
+	var keyResp KeyResponse
+	if err := json.NewDecoder(rr.Body).Decode(&keyResp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Get key and check encryption method
+	key, _ := store.GetKey(ctx, keyResp.ID)
+	// Without Vault enabled, encryption method should be empty or "local"
+	// (depends on whether local encryption is configured)
+	if key.EncryptionMethod == "vault" {
+		t.Error("encryption method should not be 'vault' when Vault is not enabled")
+	}
+}
+
+// Bunker ownership tests
+
+func TestHandleBunkerConnect_OwnershipRequired(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	// Create key owned by user1
+	store.CreateKey(ctx, &storage.Key{
+		ID:        "bunker-owned-key",
+		Name:      "bunker-owned",
+		Pubkey:    "8888888888888888888888888888888888888888888888888888888888888888",
+		OwnerID:   "owner-user-id",
+		CreatedAt: time.Now(),
+	})
+
+	// Different user tries to get bunker URI
+	token, _, _ := auth.GenerateJWT(h.authConfig, "attacker-user-id", "attacker")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/bunker/bunker-owned-key", nil)
+	req.URL.Path = "/api/v1/bunker/bunker-owned-key"
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.handleBunkerConnect(rr, req)
+
+	// Should be forbidden or not found
+	if rr.Code != http.StatusNotFound && rr.Code != http.StatusForbidden {
+		t.Errorf("non-owner bunker connect: status = %d, want 403 or 404", rr.Code)
+	}
+}
+
+// FROST owner isolation tests
+
+func TestFrostKeyStorage_OwnerIsolation(t *testing.T) {
+	store := storage.NewMemoryStorage()
+	ctx := context.Background()
+
+	// Create FROST keys for different owners
+	err := store.CreateFrostKey(ctx, &storage.FrostKey{
+		ID:          "frost-user1-1",
+		Pubkey:      "frostpub1111111111111111111111111111111111111111111111111111111111",
+		Threshold:   2,
+		TotalShares: 3,
+		OwnerID:     "user1",
+		CreatedAt:   time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("CreateFrostKey() error = %v", err)
+	}
+
+	err = store.CreateFrostKey(ctx, &storage.FrostKey{
+		ID:          "frost-user1-2",
+		Pubkey:      "frostpub2222222222222222222222222222222222222222222222222222222222",
+		Threshold:   2,
+		TotalShares: 3,
+		OwnerID:     "user1",
+		CreatedAt:   time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("CreateFrostKey() error = %v", err)
+	}
+
+	err = store.CreateFrostKey(ctx, &storage.FrostKey{
+		ID:          "frost-user2-1",
+		Pubkey:      "frostpub3333333333333333333333333333333333333333333333333333333333",
+		Threshold:   2,
+		TotalShares: 3,
+		OwnerID:     "user2",
+		CreatedAt:   time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("CreateFrostKey() error = %v", err)
+	}
+
+	// User1 should see only their 2 keys
+	keys, err := store.ListFrostKeysByOwner(ctx, "user1")
+	if err != nil {
+		t.Fatalf("ListFrostKeysByOwner(user1) error = %v", err)
+	}
+	if len(keys) != 2 {
+		t.Errorf("ListFrostKeysByOwner(user1) = %d keys, want 2", len(keys))
+	}
+
+	// User2 should see only their 1 key
+	keys, err = store.ListFrostKeysByOwner(ctx, "user2")
+	if err != nil {
+		t.Fatalf("ListFrostKeysByOwner(user2) error = %v", err)
+	}
+	if len(keys) != 1 {
+		t.Errorf("ListFrostKeysByOwner(user2) = %d keys, want 1", len(keys))
+	}
+
+	// NonExistent user should see 0 keys
+	keys, err = store.ListFrostKeysByOwner(ctx, "user3")
+	if err != nil {
+		t.Fatalf("ListFrostKeysByOwner(user3) error = %v", err)
+	}
+	if len(keys) != 0 {
+		t.Errorf("ListFrostKeysByOwner(user3) = %d keys, want 0", len(keys))
+	}
+}
+
+func TestFrostKey_GetVerifiesOwnership(t *testing.T) {
+	store := storage.NewMemoryStorage()
+	ctx := context.Background()
+
+	// Create FROST key with owner
+	store.CreateFrostKey(ctx, &storage.FrostKey{
+		ID:          "frost-owned",
+		Pubkey:      "frostpubowned1111111111111111111111111111111111111111111111111111",
+		Threshold:   2,
+		TotalShares: 3,
+		OwnerID:     "owner-user",
+		CreatedAt:   time.Now(),
+	})
+
+	// GetFrostKey returns the key regardless of ownership (handler does the check)
+	key, err := store.GetFrostKey(ctx, "frost-owned")
+	if err != nil {
+		t.Fatalf("GetFrostKey() error = %v", err)
+	}
+	if key.OwnerID != "owner-user" {
+		t.Errorf("key.OwnerID = %q, want %q", key.OwnerID, "owner-user")
+	}
+}
+
+func TestFrostShare_EncryptionIsolation(t *testing.T) {
+	store := storage.NewMemoryStorage()
+	ctx := context.Background()
+
+	// Create FROST key
+	store.CreateFrostKey(ctx, &storage.FrostKey{
+		ID:          "frost-key-shares",
+		Pubkey:      "frostpubshares11111111111111111111111111111111111111111111111111",
+		Threshold:   2,
+		TotalShares: 3,
+		OwnerID:     "share-owner",
+		CreatedAt:   time.Now(),
+	})
+
+	// Create shares - local shares should have encrypted data
+	localShare := &storage.FrostShare{
+		ID:             "share-local",
+		FrostKeyID:     "frost-key-shares",
+		ShareIndex:     1,
+		EncryptedShare: []byte("encrypted-share-data"),
+		IsLocal:        true,
+		CreatedAt:      time.Now(),
+	}
+	store.CreateFrostShare(ctx, localShare)
+
+	// Create remote share - no encrypted data, has holder info
+	remoteShare := &storage.FrostShare{
+		ID:              "share-remote",
+		FrostKeyID:      "frost-key-shares",
+		ShareIndex:      2,
+		HolderPubkey:    "holder1111111111111111111111111111111111111111111111111111111111",
+		HolderBunkerURI: "bunker://holder@relay.example.com",
+		IsLocal:         false,
+		CreatedAt:       time.Now(),
+	}
+	store.CreateFrostShare(ctx, remoteShare)
+
+	// ListLocalFrostShares should only return local shares
+	localShares, err := store.ListLocalFrostShares(ctx, "frost-key-shares")
+	if err != nil {
+		t.Fatalf("ListLocalFrostShares() error = %v", err)
+	}
+	if len(localShares) != 1 {
+		t.Errorf("ListLocalFrostShares() = %d, want 1", len(localShares))
+	}
+	if !localShares[0].IsLocal {
+		t.Error("local share should have IsLocal=true")
+	}
+
+	// ListFrostShares should return all shares
+	allShares, err := store.ListFrostShares(ctx, "frost-key-shares")
+	if err != nil {
+		t.Fatalf("ListFrostShares() error = %v", err)
+	}
+	if len(allShares) != 2 {
+		t.Errorf("ListFrostShares() = %d, want 2", len(allShares))
 	}
 }

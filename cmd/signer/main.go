@@ -22,6 +22,7 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/signer"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/vault"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/web"
 )
 
@@ -120,11 +121,33 @@ func main() {
 		slog.Info("audit logging disabled")
 	}
 
+	// Initialize Vault client for per-user key encryption
+	var vaultClient *vault.Client
+	if cfg.Vault.Enabled && cfg.Vault.Address != "" {
+		var err error
+		vaultClient, err = vault.NewClient(&vault.Config{
+			Address:   cfg.Vault.Address,
+			Token:     cfg.Vault.Token,
+			MountPath: cfg.Vault.MountPath,
+		})
+		if err != nil {
+			slog.Error("failed to initialize vault client", "error", err)
+			os.Exit(1)
+		}
+		// Verify Vault is reachable
+		if err := vaultClient.HealthCheck(context.Background()); err != nil {
+			slog.Warn("vault health check failed - per-user key encryption unavailable", "error", err)
+			vaultClient = nil
+		} else {
+			slog.Info("vault client initialized", "address", cfg.Vault.Address)
+		}
+	}
+
 	// Initialize NIP-46 signer
 	nip46Signer := signer.New(cfg, store, relayClient, encryptor, relaySelector, relayPrefsClient, auditLogger)
 
 	// Initialize HTTP API
-	apiHandler := api.NewHandler(cfg, nip46Signer, store, encryptor)
+	apiHandler := api.NewHandler(cfg, nip46Signer, store, encryptor, vaultClient)
 
 	// Initialize Web UI
 	webHandler, err := web.New(cfg, store, nip46Signer, nip46Signer, discoveryClient)

@@ -158,3 +158,29 @@ func DeriveNostrKey(seedHex, identifier, context string) (string, error) {
 
 	return hex.EncodeToString(derivedKey), nil
 }
+
+// IsVaultEncrypted checks if a value was encrypted with Vault transit
+// Vault transit ciphertext starts with "vault:v1:" prefix
+func IsVaultEncrypted(value string) bool {
+	return strings.HasPrefix(value, "vault:")
+}
+
+// EncryptionMethod indicates how a key was encrypted
+type EncryptionMethod string
+
+const (
+	EncryptionMethodLocal EncryptionMethod = "local" // AES-256-GCM with local key
+	EncryptionMethodVault EncryptionMethod = "vault" // Vault transit
+)
+
+// DetectEncryptionMethod determines how a ciphertext was encrypted
+func DetectEncryptionMethod(ciphertext string) EncryptionMethod {
+	if IsVaultEncrypted(ciphertext) {
+		return EncryptionMethodVault
+	}
+	if IsEncrypted(ciphertext) {
+		return EncryptionMethodLocal
+	}
+	// Assume local if no prefix (legacy unencrypted or unknown)
+	return EncryptionMethodLocal
+}
