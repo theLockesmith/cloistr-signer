@@ -126,9 +126,10 @@ func main() {
 	if cfg.Vault.Enabled && cfg.Vault.Address != "" {
 		var err error
 		vaultClient, err = vault.NewClient(&vault.Config{
-			Address:   cfg.Vault.Address,
-			Token:     cfg.Vault.Token,
-			MountPath: cfg.Vault.MountPath,
+			Address:    cfg.Vault.Address,
+			Token:      cfg.Vault.Token,
+			MountPath:  cfg.Vault.MountPath,
+			SkipVerify: cfg.Vault.SkipVerify,
 		})
 		if err != nil {
 			slog.Error("failed to initialize vault client", "error", err)

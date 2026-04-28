@@ -69,10 +69,11 @@ type AuthConfig struct {
 
 // VaultConfig holds HashiCorp Vault configuration
 type VaultConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	Address   string `yaml:"address"`    // Vault address (e.g., http://vault:8200)
-	Token     string `yaml:"token"`      // Vault token
-	MountPath string `yaml:"mount_path"` // KV secrets mount path (default: secret)
+	Enabled    bool   `yaml:"enabled"`
+	Address    string `yaml:"address"`     // Vault address (e.g., http://vault:8200)
+	Token      string `yaml:"token"`       // Vault token
+	MountPath  string `yaml:"mount_path"`  // KV secrets mount path (default: secret)
+	SkipVerify bool   `yaml:"skip_verify"` // Skip TLS certificate verification
 }
 
 // AuditConfig holds audit logging configuration
@@ -261,6 +262,9 @@ func Load() (*Config, error) {
 	}
 	if vaultMount := os.Getenv("VAULT_MOUNT_PATH"); vaultMount != "" {
 		cfg.Vault.MountPath = vaultMount
+	}
+	if vaultSkipVerify := os.Getenv("VAULT_SKIP_VERIFY"); vaultSkipVerify == "true" || vaultSkipVerify == "1" {
+		cfg.Vault.SkipVerify = true
 	}
 
 	// Audit configuration

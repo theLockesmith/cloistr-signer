@@ -77,9 +77,10 @@ func main() {
 
 	// Initialize Vault client (with service account token)
 	vaultClient, err := vault.NewClient(&vault.Config{
-		Address:   cfg.Vault.Address,
-		Token:     cfg.Vault.Token, // Service account token
-		MountPath: cfg.Vault.MountPath,
+		Address:    cfg.Vault.Address,
+		Token:      cfg.Vault.Token, // Service account token
+		MountPath:  cfg.Vault.MountPath,
+		SkipVerify: cfg.Vault.SkipVerify,
 	})
 	if err != nil {
 		slog.Error("failed to initialize vault client", "error", err)

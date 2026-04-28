@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,9 +21,10 @@ type Client struct {
 
 // Config holds Vault configuration
 type Config struct {
-	Address   string // Vault address (e.g., http://vault:8200)
-	Token     string // Vault token for authentication
-	MountPath string // KV secrets engine mount path (default: secret)
+	Address    string // Vault address (e.g., http://vault:8200)
+	Token      string // Vault token for authentication
+	MountPath  string // KV secrets engine mount path (default: secret)
+	SkipVerify bool   // Skip TLS certificate verification
 }
 
 // NewClient creates a new Vault client
@@ -36,13 +38,23 @@ func NewClient(cfg *Config) (*Client, error) {
 		mountPath = "secret"
 	}
 
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	if cfg.SkipVerify {
+		httpClient.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec // User explicitly requested TLS skip verify
+			},
+		}
+	}
+
 	return &Client{
-		address:   strings.TrimSuffix(cfg.Address, "/"),
-		token:     cfg.Token,
-		mountPath: mountPath,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		address:    strings.TrimSuffix(cfg.Address, "/"),
+		token:      cfg.Token,
+		mountPath:  mountPath,
+		httpClient: httpClient,
 	}, nil
 }
 
