@@ -12,8 +12,9 @@ RUN go mod download
 # Copy source
 COPY . .
 
-# Build
+# Build signer and migrate binaries
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /signer ./cmd/signer
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /migrate ./cmd/migrate
 
 # Runtime stage
 FROM alpine:3.20
@@ -31,6 +32,7 @@ USER signer
 WORKDIR /app
 
 COPY --from=builder /signer /app/signer
+COPY --from=builder /migrate /app/migrate
 
 EXPOSE 7777
 
