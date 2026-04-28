@@ -39,15 +39,15 @@ For quick start and essential info, see [CLAUDE.md](../CLAUDE.md).
 | `DATABASE_URL` | - | PostgreSQL DSN |
 | `ENCRYPTION_KEY` | - | Key encryption master key (32 bytes hex) |
 
-### HashiCorp Vault
+### HashiCorp Vault (Per-User Key Encryption)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `VAULT_ENABLED` | `false` | Enable Vault integration |
 | `VAULT_ADDR` | - | Vault server URL |
-| `VAULT_TOKEN` | - | Vault access token |
-| `VAULT_MOUNT_PATH` | `secret` | KV secrets mount |
-| `VAULT_URL` | - | Alternative to VAULT_ADDR |
+| `VAULT_TOKEN` | - | Service account token (for user provisioning) |
+| `VAULT_MOUNT_PATH` | `transit` | Transit secrets engine mount |
+| `VAULT_SKIP_VERIFY` | `false` | Skip TLS certificate verification |
 
 ### Authentication
 
@@ -150,7 +150,7 @@ cd ~/Atlas && K8S_AUTH_KUBECONFIG=~/.kube/config ansible-playbook \
 
 ---
 
-## Development Phases (Completed)
+## Development Phases
 
 | Phase | Focus | Status |
 |-------|-------|--------|
@@ -161,20 +161,42 @@ cd ~/Atlas && K8S_AUTH_KUBECONFIG=~/.kube/config ansible-playbook \
 | 5 | bunker:// + nostrconnect:// | Done |
 | 6 | Signer Chaining | Done |
 | 7 | Per-Key Connections | Done |
-| 8 | FROST Threshold (API) | Done |
+| 8 | FROST Threshold (API + Web UI) | Done |
 | 9 | Distributed DKG | Done |
+| 10 | Distributed Signing | Done |
+| 11 | Multi-User Key Isolation | Done |
+| 12 | Vault Per-User Encryption | Done |
 
-### Phase 9: Distributed DKG (2026-03-25)
+### Phase 12: Vault Per-User Encryption (2026-04-28)
 
-Multi-party key generation over Nostr DMs:
-- Pedersen DKG with VSS verification
-- 3 rounds: commitment → share distribution → verification
-- NIP-04 encrypted communication via kind 24133 (ephemeral)
-- NIP-42 relay authentication support
-- Full test coverage (24 tests)
-
-**Next:** Distributed signing (coordinate partial signatures)
+HashiCorp Vault integration for true per-user key encryption:
+- Each user gets dedicated Vault transit key
+- Operator cannot decrypt user keys - only user's Vault token can
+- Automatic user provisioning (userpass auth + transit key + policy)
+- Falls back to shared encryption key if Vault unavailable
+- Full test coverage (19 packages, 109 FROST tests)
 
 ---
 
-**Last Updated:** 2026-03-25
+## Feature Coverage
+
+| Feature | Code | Tests | Web UI | Notes |
+|---------|------|-------|--------|-------|
+| Core NIP-46 | ✓ | ✓ | N/A | Protocol layer |
+| PostgreSQL + Encryption | ✓ | ✓ | N/A | Storage backend |
+| User Auth (MFA, backup codes) | ✓ | ✓ | ✓ | /login, /register, /settings |
+| Admin DM Commands | ✓ | ✓ | N/A | By design - via Nostr DMs |
+| bunker:// + nostrconnect:// | ✓ | ✓ | ✓ | /keys shows URIs |
+| Signer Chaining | ✓ | ✓ | ✓ | Proxy key modal in /keys |
+| Per-Key Connections | ✓ | ✓ | N/A | Automatic |
+| FROST Local Signing | ✓ | ✓ | ✓ | /frost page |
+| Distributed DKG | ✓ | ✓ | N/A | Ceremony via Nostr DMs |
+| Distributed Signing | ✓ | ✓ | N/A | Coordination via Nostr DMs |
+| Multi-User Key Isolation | ✓ | ✓ | ✓ | Users see only their keys |
+| Vault Per-User Encryption | ✓ | ✓ | N/A | Transparent to users |
+
+**N/A** = Feature doesn't need Web UI (backend/protocol/by-design)
+
+---
+
+**Last Updated:** 2026-04-28
