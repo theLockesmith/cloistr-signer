@@ -23,9 +23,10 @@ All 12 original phases are complete. This document outlines the next evolution o
    - Define test scenarios: signing throughput, concurrent sessions, FROST ceremonies
    - Establish baseline metrics
 
-2. **Batch Signing** (see [Batch Signing Design](#batch-signing-design) below)
-   - Reduce relay round-trips from N to 1
-   - Critical for avoiding relay rate limits
+2. **Batch Signing** ✅ ALREADY IMPLEMENTED
+   - Method: `batch_sign` (Cloistr extension)
+   - Reduces relay round-trips from N to 1
+   - See [Batch Signing](#batch-signing-implemented) for usage
 
 3. **Connection Pooling**
    - Audit relay connection lifecycle
@@ -45,7 +46,7 @@ All 12 original phases are complete. This document outlines the next evolution o
 - [ ] Handle 100 concurrent signing sessions
 - [ ] Sign 50 events/second sustained
 - [ ] P99 latency under 500ms for single sign
-- [ ] Batch signing reduces 4-event signing from 4 round-trips to 1
+- [x] Batch signing reduces N-event signing from N round-trips to 1 (implemented)
 
 ---
 
@@ -362,64 +363,57 @@ We can implement extensions as **non-standard methods** that only work with Cloi
 
 ---
 
-## Batch Signing Design
+## Batch Signing (Implemented)
 
-### Current Problem
+### The Problem
 
 When publishing to multiple relays or signing multiple events, clients make sequential NIP-46 requests. Relays like nostr.wine rate limit at ~10 req/min, causing failures.
 
-### Implementation Plan
+### Solution: `batch_sign` Method
 
-#### Phase 1: Server-Side Support (No NIP change)
+**Status: ✅ IMPLEMENTED** (Cloistr extension, `internal/signer/signer.go:1224`)
 
-Add `sign_events` method to cloistr-signer:
+The `batch_sign` method signs multiple events in a single request-response round-trip.
 
-```go
-case "sign_events":
-    var events []string
-    if err := json.Unmarshal(params, &events); err != nil {
-        return nil, err
-    }
-    signatures := make([]string, len(events))
-    for i, eventJSON := range events {
-        sig, err := s.signEvent(ctx, eventJSON)
-        if err != nil {
-            // Return partial results with errors
-        }
-        signatures[i] = sig
-    }
-    return signatures, nil
-```
-
-#### Phase 2: Client Support
-
-Update Cloistr clients (web, mobile) to:
-1. Detect if signer supports `sign_events`
-2. Batch pending sign requests
-3. Fall back to sequential if unsupported
-
-#### Phase 3: NIP Proposal
-
-If batch signing proves valuable:
-1. Write NIP-46 amendment
-2. Include our implementation experience
-3. Propose to nostr-protocol/nips
-
-### Parallel Signing (Interim Solution)
-
-Even without batching, we can improve throughput:
-
-```javascript
-// Before: Sequential
-for (const event of events) {
-  await signer.sign(event);
+**Request:**
+```json
+{
+  "method": "batch_sign",
+  "params": [
+    "{\"kind\":1,\"content\":\"hello\",\"tags\":[],\"created_at\":1234567890}",
+    "{\"kind\":1,\"content\":\"world\",\"tags\":[],\"created_at\":1234567891}",
+    "{\"kind\":1,\"content\":\"test\",\"tags\":[],\"created_at\":1234567892}"
+  ]
 }
-
-// After: Parallel
-await Promise.all(events.map(e => signer.sign(e)));
 ```
 
-This doesn't reduce message count but improves latency by ~4x for 4 events.
+**Response:**
+```json
+{
+  "result": "[{\"id\":\"...\",\"sig\":\"...\"},{\"id\":\"...\",\"sig\":\"...\"},{\"id\":\"...\",\"sig\":\"...\"}]"
+}
+```
+
+### Features
+
+- Signs all events in one round-trip (N events = 2 messages instead of 2N)
+- Respects `AllowedKinds` permission checks per event
+- Returns signed events in same order as input
+- Fails fast if any event is invalid or disallowed
+- Full test coverage (`internal/signer/signer_test.go:447`)
+
+### Client Adoption Needed
+
+Cloistr clients (web, mobile) should:
+1. Use `batch_sign` when signing multiple events
+2. Fall back to sequential `sign_event` if signer doesn't support it
+
+### Future: NIP Proposal
+
+Once we have production usage data:
+1. Write NIP-46 amendment proposing `batch_sign` or `sign_events`
+2. Include performance metrics from real-world usage
+3. Propose to nostr-protocol/nips
 
 ---
 
@@ -447,7 +441,7 @@ This doesn't reduce message count but improves latency by ~4x for 4 events.
 
 **Immediate Actions**:
 1. Set up load testing infrastructure
-2. Implement batch signing (`sign_events`)
+2. Update clients to use `batch_sign` (server-side already implemented)
 3. Begin mobile app scaffolding
 
 ---
