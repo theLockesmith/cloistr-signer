@@ -1041,3 +1041,309 @@ a:hover {
 .allowed-kinds-cell .kind-tag {
     margin: 0.1rem;
 }
+
+/* Info Icons and Tooltips */
+.info-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    margin-left: 0.35rem;
+    border-radius: 50%;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 600;
+    cursor: help;
+    vertical-align: middle;
+    transition: all 0.2s;
+}
+
+.info-icon:hover {
+    background: var(--accent-primary);
+    border-color: var(--accent-primary);
+    color: #fff;
+}
+
+.info-icon::before {
+    content: '?';
+}
+
+/* Tooltip container */
+.has-tooltip {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.tooltip {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 0.75rem 1rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.8125rem;
+    font-weight: 400;
+    line-height: 1.5;
+    white-space: normal;
+    width: max-content;
+    max-width: 280px;
+    z-index: 1000;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.2s, visibility 0.2s;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.tooltip::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: var(--border-color);
+}
+
+.has-tooltip:hover .tooltip,
+.info-icon:hover + .tooltip,
+.has-tooltip:focus-within .tooltip {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* Tooltip positioning variants */
+.tooltip.tooltip-right {
+    left: calc(100% + 8px);
+    bottom: auto;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+.tooltip.tooltip-right::after {
+    left: -6px;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 6px solid transparent;
+    border-right-color: var(--border-color);
+}
+
+.tooltip.tooltip-left {
+    right: calc(100% + 8px);
+    left: auto;
+    bottom: auto;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+.tooltip.tooltip-left::after {
+    right: -6px;
+    left: auto;
+    top: 50%;
+    transform: translateY(-50%);
+    border: 6px solid transparent;
+    border-left-color: var(--border-color);
+}
+
+.tooltip.tooltip-bottom {
+    top: calc(100% + 8px);
+    bottom: auto;
+}
+
+.tooltip.tooltip-bottom::after {
+    bottom: 100%;
+    top: auto;
+    border: 6px solid transparent;
+    border-bottom-color: var(--border-color);
+}
+
+/* Label with info icon */
+.label-with-info {
+    display: inline-flex;
+    align-items: center;
+}
+
+/* Shepherd.js Tour Overrides */
+.shepherd-element {
+    background: var(--bg-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px !important;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4) !important;
+    max-width: 360px !important;
+}
+
+.shepherd-content {
+    padding: 0 !important;
+}
+
+.shepherd-header {
+    background: var(--bg-tertiary) !important;
+    padding: 1rem 1.25rem !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    border-radius: 8px 8px 0 0 !important;
+}
+
+.shepherd-title {
+    color: var(--text-primary) !important;
+    font-size: 1rem !important;
+    font-weight: 600 !important;
+}
+
+.shepherd-cancel-icon {
+    color: var(--text-muted) !important;
+    font-size: 1.5rem !important;
+}
+
+.shepherd-cancel-icon:hover {
+    color: var(--text-primary) !important;
+}
+
+.shepherd-text {
+    color: var(--text-secondary) !important;
+    padding: 1rem 1.25rem !important;
+    font-size: 0.9rem !important;
+    line-height: 1.6 !important;
+}
+
+.shepherd-footer {
+    padding: 0.75rem 1.25rem 1rem !important;
+    border-top: none !important;
+}
+
+.shepherd-button {
+    background: var(--bg-tertiary) !important;
+    border: 1px solid var(--border-color) !important;
+    color: var(--text-primary) !important;
+    border-radius: 6px !important;
+    padding: 0.5rem 1rem !important;
+    font-size: 0.875rem !important;
+    cursor: pointer !important;
+    transition: all 0.2s !important;
+}
+
+.shepherd-button:hover {
+    background: var(--border-color) !important;
+}
+
+.shepherd-button.shepherd-button-primary {
+    background: var(--accent-primary) !important;
+    border-color: var(--accent-primary) !important;
+    color: #fff !important;
+}
+
+.shepherd-button.shepherd-button-primary:hover {
+    background: #4393e4 !important;
+}
+
+.shepherd-arrow::before {
+    background: var(--bg-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+.shepherd-modal-overlay-container {
+    fill: rgba(0, 0, 0, 0.6) !important;
+}
+
+/* Tour progress indicator */
+.shepherd-progress {
+    display: flex;
+    gap: 4px;
+    justify-content: center;
+    padding: 0.5rem 0;
+}
+
+.shepherd-progress-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--border-color);
+}
+
+.shepherd-progress-dot.active {
+    background: var(--accent-primary);
+}
+
+/* Help button for starting tutorials */
+.help-btn {
+    position: fixed;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--accent-primary);
+    border: none;
+    color: #fff;
+    font-size: 1.25rem;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(88, 166, 255, 0.3);
+    transition: all 0.2s;
+    z-index: 900;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.help-btn:hover {
+    transform: scale(1.1);
+    box-shadow: 0 6px 16px rgba(88, 166, 255, 0.4);
+}
+
+.help-btn::before {
+    content: '?';
+    font-weight: 700;
+}
+
+/* Help menu dropdown */
+.help-menu {
+    position: fixed;
+    bottom: 5rem;
+    right: 1.5rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.5rem;
+    min-width: 200px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    z-index: 901;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(10px);
+    transition: all 0.2s;
+}
+
+.help-menu.visible {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+.help-menu-item {
+    display: block;
+    width: 100%;
+    padding: 0.75rem 1rem;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.2s;
+}
+
+.help-menu-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.help-menu-divider {
+    height: 1px;
+    background: var(--border-color);
+    margin: 0.5rem 0;
+}

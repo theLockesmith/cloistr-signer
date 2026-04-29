@@ -2,9 +2,9 @@
 <div class="page-header">
     <h1>Signing Keys</h1>
     <div style="display: flex; gap: 8px;">
-        <button id="connect-app-btn" class="btn btn-secondary">Connect to App</button>
+        <button id="connect-app-btn" class="btn btn-secondary" data-tooltip="connect-to-app">Connect to App</button>
         <button id="import-key-btn" class="btn btn-secondary">Import Key</button>
-        <button id="add-proxy-btn" class="btn btn-secondary">Add Proxy Key</button>
+        <button id="add-proxy-btn" class="btn btn-secondary" data-tooltip="proxy-key">Add Proxy Key</button>
         <button id="create-key-btn" class="btn btn-primary">Create Key</button>
     </div>
 </div>
@@ -19,7 +19,7 @@
                 <th>Type</th>
                 <th>Public Key</th>
                 <th>Relays</th>
-                <th>Approval</th>
+                <th data-tooltip="approval-toggle">Approval</th>
                 <th>Created</th>
                 <th>Actions</th>
             </tr>
@@ -52,7 +52,7 @@
                 <td>{{formatTime .CreatedAt}}</td>
                 <td>
                     <button class="btn btn-sm btn-primary connect-btn" data-id="{{.ID}}" data-name="{{.Name}}">Connect</button>
-                    <button class="btn btn-sm btn-success grant-btn" data-id="{{.ID}}" data-pubkey="{{.Pubkey}}" data-name="{{.Name}}" title="Grant signing access to another pubkey">Grant Access</button>
+                    <button class="btn btn-sm btn-success grant-btn" data-id="{{.ID}}" data-pubkey="{{.Pubkey}}" data-name="{{.Name}}" data-tooltip="grant-access">Grant Access</button>
                     <button class="btn btn-sm edit-btn" data-id="{{.ID}}" data-name="{{.Name}}" data-relays="{{range $i, $r := .Relays}}{{if $i}},{{end}}{{$r}}{{end}}">Edit</button>
                     <button class="btn btn-sm copy-btn" data-pubkey="{{.Pubkey}}">Copy Pubkey</button>
                     <button class="btn btn-sm btn-danger delete-btn" data-id="{{.ID}}" data-name="{{.Name}}">Delete</button>
@@ -128,7 +128,7 @@
 
             <div id="connect-content" style="display: none;">
                 <div class="form-group">
-                    <label>Bunker URI</label>
+                    <label data-tooltip="bunker-uri">Bunker URI</label>
                     <div class="input-group">
                         <input type="text" id="bunker-uri" readonly class="monospace">
                         <button type="button" class="btn btn-primary" id="copy-bunker-uri">Copy</button>
@@ -268,7 +268,7 @@
                 <input type="text" id="edit-name" name="name" placeholder="e.g., Main Key">
             </div>
             <div class="form-group">
-                <label for="edit-relays">Custom Relays</label>
+                <label for="edit-relays" data-tooltip="custom-relays">Custom Relays</label>
                 <textarea id="edit-relays" name="relays" rows="3"
                     placeholder="wss://relay1.example.com&#10;wss://relay2.example.com" class="monospace"></textarea>
                 <small>One relay per line. Leave empty to use default relays from config.</small>
