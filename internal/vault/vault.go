@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/metrics"
 )
 
 // Client is a HashiCorp Vault client for key storage
@@ -60,6 +62,11 @@ func NewClient(cfg *Config) (*Client, error) {
 
 // StoreKey stores an encrypted key in Vault
 func (c *Client) StoreKey(ctx context.Context, keyID string, data map[string]interface{}) error {
+	start := time.Now()
+	defer func() {
+		metrics.RecordVaultLatency("store_key", time.Since(start))
+	}()
+
 	path := fmt.Sprintf("%s/data/coldforge-signer/keys/%s", c.mountPath, keyID)
 
 	payload := map[string]interface{}{
@@ -95,6 +102,11 @@ func (c *Client) StoreKey(ctx context.Context, keyID string, data map[string]int
 
 // GetKey retrieves a key from Vault
 func (c *Client) GetKey(ctx context.Context, keyID string) (map[string]interface{}, error) {
+	start := time.Now()
+	defer func() {
+		metrics.RecordVaultLatency("get_key", time.Since(start))
+	}()
+
 	path := fmt.Sprintf("%s/data/coldforge-signer/keys/%s", c.mountPath, keyID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", c.address+"/v1/"+path, nil)
@@ -134,6 +146,11 @@ func (c *Client) GetKey(ctx context.Context, keyID string) (map[string]interface
 
 // DeleteKey deletes a key from Vault
 func (c *Client) DeleteKey(ctx context.Context, keyID string) error {
+	start := time.Now()
+	defer func() {
+		metrics.RecordVaultLatency("delete_key", time.Since(start))
+	}()
+
 	path := fmt.Sprintf("%s/metadata/coldforge-signer/keys/%s", c.mountPath, keyID)
 
 	req, err := http.NewRequestWithContext(ctx, "DELETE", c.address+"/v1/"+path, nil)
@@ -159,6 +176,11 @@ func (c *Client) DeleteKey(ctx context.Context, keyID string) error {
 
 // ListKeys lists all key IDs in Vault
 func (c *Client) ListKeys(ctx context.Context) ([]string, error) {
+	start := time.Now()
+	defer func() {
+		metrics.RecordVaultLatency("list_keys", time.Since(start))
+	}()
+
 	path := fmt.Sprintf("%s/metadata/coldforge-signer/keys", c.mountPath)
 
 	req, err := http.NewRequestWithContext(ctx, "LIST", c.address+"/v1/"+path, nil)
@@ -225,6 +247,11 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 
 // TransitEncrypt encrypts data using Vault's transit secrets engine
 func (c *Client) TransitEncrypt(ctx context.Context, keyName, plaintext string) (string, error) {
+	start := time.Now()
+	defer func() {
+		metrics.RecordVaultLatency("transit_encrypt", time.Since(start))
+	}()
+
 	path := fmt.Sprintf("transit/encrypt/%s", keyName)
 
 	payload := map[string]interface{}{
@@ -270,6 +297,11 @@ func (c *Client) TransitEncrypt(ctx context.Context, keyName, plaintext string) 
 
 // TransitDecrypt decrypts data using Vault's transit secrets engine
 func (c *Client) TransitDecrypt(ctx context.Context, keyName, ciphertext string) (string, error) {
+	start := time.Now()
+	defer func() {
+		metrics.RecordVaultLatency("transit_decrypt", time.Since(start))
+	}()
+
 	path := fmt.Sprintf("transit/decrypt/%s", keyName)
 
 	payload := map[string]interface{}{
@@ -315,6 +347,11 @@ func (c *Client) TransitDecrypt(ctx context.Context, keyName, ciphertext string)
 
 // TransitDecryptWithToken decrypts using a specific user's Vault token
 func (c *Client) TransitDecryptWithToken(ctx context.Context, token, keyName, ciphertext string) (string, error) {
+	start := time.Now()
+	defer func() {
+		metrics.RecordVaultLatency("transit_decrypt", time.Since(start))
+	}()
+
 	path := fmt.Sprintf("transit/decrypt/%s", keyName)
 
 	payload := map[string]interface{}{
@@ -360,6 +397,11 @@ func (c *Client) TransitDecryptWithToken(ctx context.Context, token, keyName, ci
 
 // TransitEncryptWithToken encrypts using a specific user's Vault token
 func (c *Client) TransitEncryptWithToken(ctx context.Context, token, keyName, plaintext string) (string, error) {
+	start := time.Now()
+	defer func() {
+		metrics.RecordVaultLatency("transit_encrypt", time.Since(start))
+	}()
+
 	path := fmt.Sprintf("transit/encrypt/%s", keyName)
 
 	payload := map[string]interface{}{

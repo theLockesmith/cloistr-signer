@@ -830,9 +830,17 @@ func (s *Signer) checkPolicyUsage(ctx context.Context, policyID, method string) 
 }
 
 func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey string, req *NIP46Request, perm *storage.Permission) (result string, err error) {
+	// Record timing for latency metrics
+	start := time.Now()
+
 	// Record metrics on completion
 	defer func() {
 		metrics.RecordSigningRequest(req.Method, err == nil)
+		// Record latency for methods that do actual work
+		switch req.Method {
+		case "sign_event", "batch_sign", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt":
+			metrics.RecordSigningLatency(req.Method, time.Since(start))
+		}
 	}()
 
 	// Audit logging on completion (for methods that warrant it)
@@ -1269,6 +1277,9 @@ func (s *Signer) handleBatchSign(ctx context.Context, targetPubkey, privateKey s
 	if err != nil {
 		return "", err
 	}
+
+	// Record batch size for performance metrics
+	metrics.RecordBatchSignSize(len(signedEvents))
 
 	slog.Info("batch signed events", "count", len(signedEvents))
 	return string(result), nil

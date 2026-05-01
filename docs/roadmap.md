@@ -8,7 +8,7 @@ All 12 original phases are complete. This document outlines the next evolution o
 
 ## Phase 13: Performance Optimization & Load Testing
 
-**Priority: HIGH** | **Status: Not Started**
+**Priority: HIGH** | **Status: In Progress**
 
 ### Goals
 - Establish performance baselines
@@ -18,35 +18,60 @@ All 12 original phases are complete. This document outlines the next evolution o
 
 ### Tasks
 
-1. **Load Testing Infrastructure**
-   - Set up k6 or Locust test suite
-   - Define test scenarios: signing throughput, concurrent sessions, FROST ceremonies
-   - Establish baseline metrics
+1. **Load Testing Infrastructure** ✅ DONE
+   - k6 test suite created in `load-test/`
+   - Scenarios: api-health, api-endpoints, sign-event, batch-sign, concurrent
+   - See [load-test/README.md](../load-test/README.md) for usage
 
 2. **Batch Signing** ✅ ALREADY IMPLEMENTED
    - Method: `batch_sign` (Cloistr extension)
    - Reduces relay round-trips from N to 1
    - See [Batch Signing](#batch-signing-implemented) for usage
 
-3. **Connection Pooling**
-   - Audit relay connection lifecycle
-   - Implement connection reuse where possible
+3. **Connection Pooling** ✅ ALREADY IMPLEMENTED
+   - Per-key relay caching via `KeyRelayManager`
+   - Connections reused across requests for same pubkey
+   - See `internal/nostr/key_relay_manager.go`
 
-4. **Caching Layer**
-   - Cache Vault tokens (with appropriate TTL)
-   - Cache user policies
-   - Cache relay metadata
+4. **Caching Analysis** ⚠️ NOT NEEDED
+   - **Finding**: Keys are loaded into memory at login and used directly for signing
+   - Vault is only called during key creation and user login, not the signing hot path
+   - Signing uses in-memory keys (no Vault latency)
+   - No additional caching needed for current architecture
 
-5. **Metrics & Profiling**
-   - Add detailed timing metrics
-   - Profile hot paths (signing, encryption)
-   - Identify memory allocation patterns
+5. **Metrics & Profiling** ✅ DONE
+   - Added Prometheus histograms: `SigningLatency`, `VaultLatency`, `BatchSignSize`
+   - Added counters: `VaultCacheHits` (for future use)
+   - Added gauges: `ActiveNIP46Sessions`, `RelayConnectionsPerKey`
+   - Instrumented `signer.go` and `vault.go` with latency recording
+
+6. **Benchmark Tests** ✅ DONE
+   - Created `internal/signer/signer_bench_test.go`
+   - Benchmarks: `BenchmarkSignEvent`, `BenchmarkBatchSign`, `BenchmarkConcurrentSigning`
+   - Benchmarks: `BenchmarkNIP44Operations`, `BenchmarkBatchVsSequential`
+   - Run with: `go test -bench=. -benchmem ./internal/signer/...`
+
+### Architecture Insight
+
+The signer caches decrypted private keys in memory (in the `Signer.keys` map). The flow:
+1. User logs in → Vault token obtained
+2. Keys decrypted via Vault Transit → stored in memory
+3. NIP-46 sign requests use in-memory keys (no Vault call)
+4. User logs out → keys removed from memory
+
+This means **Vault is not in the signing hot path**. Performance optimizations should focus on:
+- Relay message handling (already optimized with per-key connections)
+- JSON parsing/serialization
+- Concurrent request handling
 
 ### Success Criteria
-- [ ] Handle 100 concurrent signing sessions
-- [ ] Sign 50 events/second sustained
-- [ ] P99 latency under 500ms for single sign
+- [ ] Handle 100 concurrent signing sessions (use k6: `k6 run load-test/scenarios/concurrent.js`)
+- [ ] Sign 50 events/second sustained (use k6: `k6 run load-test/scenarios/sign-event.js`)
+- [ ] P99 latency under 500ms for single sign (verify via `/metrics` endpoint)
 - [x] Batch signing reduces N-event signing from N round-trips to 1 (implemented)
+- [x] Load testing infrastructure (k6 suite created)
+- [x] Enhanced metrics and instrumentation (Prometheus histograms)
+- [x] Benchmark tests (Go benchmarks)
 
 ---
 
