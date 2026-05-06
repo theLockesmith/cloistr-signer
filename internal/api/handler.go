@@ -1794,9 +1794,22 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		// Authenticate to Vault using user's credentials (userID is the Vault username)
 		vaultAuth, err := h.vaultClient.AuthenticateUserpass(r.Context(), user.ID, req.Password)
 		if err != nil {
-			// Log but don't fail login - user can still use the service
-			// Key operations requiring Vault will fail until this is resolved
-			slog.Warn("failed to authenticate to vault", "error", err, "user_id", user.ID)
+			// User may exist in signer DB but not have Vault userpass account
+			// (e.g., migrated from pre-Vault or registration failed to provision)
+			// Try to provision and retry auth
+			slog.Info("vault auth failed, attempting to provision userpass account", "user_id", user.ID, "error", err)
+			if provisionErr := h.vaultClient.ProvisionUser(r.Context(), user.ID, user.Username, req.Password); provisionErr != nil {
+				slog.Warn("failed to provision vault user on login", "error", provisionErr, "user_id", user.ID)
+			} else {
+				// Retry auth after provisioning
+				vaultAuth, err = h.vaultClient.AuthenticateUserpass(r.Context(), user.ID, req.Password)
+				if err != nil {
+					slog.Warn("vault auth still failed after provisioning", "error", err, "user_id", user.ID)
+				} else {
+					vaultToken = vaultAuth.Token
+					slog.Info("vault auth successful after provisioning", "user_id", user.ID)
+				}
+			}
 		} else {
 			vaultToken = vaultAuth.Token
 			slog.Debug("vault authentication successful", "user_id", user.ID, "lease_duration", vaultAuth.LeaseDuration)

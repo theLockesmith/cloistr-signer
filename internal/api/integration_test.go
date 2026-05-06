@@ -9,6 +9,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
@@ -497,6 +500,140 @@ func TestIntegration_FullFlow_WithVault(t *testing.T) {
 	})
 
 	_ = userID // Mark as used
+}
+
+// TestIntegration_VaultAutoProvision tests that users without Vault userpass accounts
+// get auto-provisioned on login (for users migrated from pre-Vault or failed registrations)
+func TestIntegration_VaultAutoProvision(t *testing.T) {
+	// Track if userpass was provisioned during login
+	userpassProvisioned := false
+	loginAttempts := 0
+
+	// Mock Vault server that rejects first login, accepts after provisioning
+	vaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		token := r.Header.Get("X-Vault-Token")
+
+		// Health check
+		if path == "/v1/sys/health" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"initialized": true, "sealed": false})
+			return
+		}
+
+		// Service token operations
+		if token == "service-token" {
+			// Transit key creation
+			if strings.Contains(path, "/transit/keys/") && r.Method == http.MethodPost {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			// Policy creation
+			if strings.Contains(path, "/sys/policies/acl/") && r.Method == http.MethodPut {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			// Create userpass account
+			if strings.Contains(path, "/auth/userpass/users/") && r.Method == http.MethodPost {
+				userpassProvisioned = true
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(map[string]interface{}{})
+				return
+			}
+		}
+
+		// Userpass login
+		if strings.Contains(path, "/auth/userpass/login/") && r.Method == http.MethodPost {
+			loginAttempts++
+			// First attempt fails (user not provisioned), second succeeds
+			if !userpassProvisioned {
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"errors": []string{"invalid username or password"},
+				})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"auth": map[string]interface{}{
+					"client_token":   "user-vault-token-autoprov",
+					"lease_duration": 3600,
+					"renewable":      true,
+				},
+			})
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer vaultServer.Close()
+
+	store := storage.NewMemoryStorage()
+	cfg := &config.Config{
+		Auth: config.AuthConfig{
+			JWTSecret:                "integration-test-secret-32chars!!",
+			JWTExpiry:                24,
+			SessionInactivityMinutes: 1440,
+		},
+		Vault: config.VaultConfig{
+			Enabled:   true,
+			Address:   vaultServer.URL,
+			Token:     "service-token",
+			MountPath: "transit",
+		},
+		Server: config.ServerConfig{Address: ":8080"},
+		Relays: []string{"wss://relay.example.com"},
+	}
+
+	// Create Vault client
+	vaultClient, err := vault.NewClient(&vault.Config{
+		Address: vaultServer.URL,
+		Token:   "service-token",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create Vault client: %v", err)
+	}
+
+	// Local encryptor as fallback
+	encryptor, _ := crypto.NewEncryptor("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+	// Create signer with nil components
+	s := signer.New(cfg, store, nil, encryptor, nil, nil, nil)
+	handler := NewHandler(cfg, s, store, encryptor, vaultClient)
+
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	// Create user directly in storage (simulating pre-Vault user)
+	userID := "migrated-user-123"
+	hashedPass, _ := bcrypt.GenerateFromPassword([]byte("MigratedPass123!"), bcrypt.DefaultCost)
+	user := &storage.User{
+		ID:           userID,
+		Username:     "migrateduser",
+		Email:        "migrated@test.com",
+		PasswordHash: string(hashedPass),
+		Pubkey:       "abcd1234" + strings.Repeat("0", 56),
+		CreatedAt:    time.Now(),
+	}
+	store.CreateUser(context.Background(), user)
+
+	// Login - should auto-provision and succeed
+	req := httptest.NewRequest("POST", "/api/v1/users/login", strings.NewReader(`{"username":"migrateduser","password":"MigratedPass123!"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("Login failed: %d - %s", w.Code, w.Body.String())
+	}
+
+	if !userpassProvisioned {
+		t.Error("Expected userpass to be auto-provisioned during login")
+	}
+
+	if loginAttempts != 2 {
+		t.Errorf("Expected 2 login attempts (fail then retry), got %d", loginAttempts)
+	}
+
+	t.Log("Auto-provisioning on login successful")
 }
 
 // TestIntegration_MFA tests the MFA enrollment flow
