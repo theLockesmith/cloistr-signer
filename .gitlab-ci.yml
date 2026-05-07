@@ -3,6 +3,8 @@ stages:
 
 build:
   stage: build
+  tags:
+    - local
   image:
     name: gcr.io/kaniko-project/executor:debug
     entrypoint: [""]
