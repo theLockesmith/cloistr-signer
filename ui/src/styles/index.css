@@ -546,6 +546,260 @@ a:hover {
 }
 
 /* ==========================================
+   Signer Header
+   ========================================== */
+
+.signer-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--header-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-lg);
+  background: var(--signer-bg-secondary);
+  border-bottom: 1px solid var(--signer-border);
+  z-index: 1000;
+}
+
+.signer-header-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+}
+
+.signer-header-logo {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  color: var(--signer-text-heading);
+  text-decoration: none;
+}
+
+.signer-header-logo:hover {
+  text-decoration: none;
+}
+
+.signer-header-brand {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.signer-service-menu {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.signer-service-link {
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-md);
+  color: var(--signer-text-muted);
+  text-decoration: none;
+  font-size: 14px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.signer-service-link:hover {
+  color: var(--signer-text);
+  background: var(--signer-bg-tertiary);
+  text-decoration: none;
+}
+
+.signer-service-active {
+  color: var(--signer-primary);
+  font-weight: 500;
+}
+
+.signer-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.signer-user-menu {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.signer-username {
+  color: var(--signer-text);
+  font-weight: 500;
+}
+
+/* ==========================================
+   Welcome Screen
+   ========================================== */
+
+.welcome-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100vh - var(--header-height) - var(--footer-height) - var(--space-xl) * 2);
+}
+
+.welcome-content {
+  text-align: center;
+  max-width: 500px;
+}
+
+.welcome-content h1 {
+  font-size: 36px;
+  font-weight: 700;
+  color: var(--signer-text-heading);
+  margin: 0 0 var(--space-md);
+}
+
+.welcome-content p {
+  font-size: 18px;
+  color: var(--signer-text-muted);
+  margin: 0 0 var(--space-xl);
+  line-height: 1.6;
+}
+
+/* ==========================================
+   Modal
+   ========================================== */
+
+.modal-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: var(--space-lg);
+}
+
+.modal {
+  background: var(--signer-bg-secondary);
+  border: 1px solid var(--signer-border);
+  border-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 480px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-lg);
+  border-bottom: 1px solid var(--signer-border);
+}
+
+.modal-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--signer-text-heading);
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 24px;
+  color: var(--signer-text-muted);
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+
+.modal-close:hover {
+  color: var(--signer-text);
+}
+
+.modal-body {
+  padding: var(--space-lg);
+}
+
+/* ==========================================
+   Form Inputs
+   ========================================== */
+
+.input,
+input.input {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--signer-bg);
+  border: 1px solid var(--signer-border);
+  border-radius: var(--radius-md);
+  color: var(--signer-text);
+  font-size: 14px;
+  transition: border-color 0.15s;
+}
+
+.input:focus,
+input.input:focus {
+  outline: none;
+  border-color: var(--signer-primary);
+}
+
+label {
+  display: block;
+  margin-bottom: var(--space-xs);
+  font-weight: 500;
+  color: var(--signer-text);
+}
+
+small {
+  display: block;
+  margin-top: var(--space-xs);
+  font-size: 12px;
+}
+
+/* ==========================================
+   Alerts
+   ========================================== */
+
+.alert {
+  padding: var(--space-md);
+  border-radius: var(--radius-md);
+  font-size: 14px;
+}
+
+.alert-error {
+  background: rgba(248, 81, 73, 0.1);
+  border: 1px solid var(--signer-danger);
+  color: var(--signer-danger);
+}
+
+.alert-success {
+  background: rgba(63, 185, 80, 0.1);
+  border: 1px solid var(--signer-success);
+  color: var(--signer-success);
+}
+
+/* ==========================================
+   Button Sizes
+   ========================================== */
+
+.btn-sm {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 13px;
+}
+
+.btn-lg {
+  padding: var(--space-md) var(--space-xl);
+  font-size: 16px;
+}
+
+/* ==========================================
+   No Sidebar Layout
+   ========================================== */
+
+.app-main:not(:has(.sidebar)) .app-content {
+  margin-left: 0;
+}
+
+/* ==========================================
    Responsive
    ========================================== */
 
@@ -560,5 +814,17 @@ a:hover {
 
   .stats-grid {
     grid-template-columns: 1fr;
+  }
+
+  .signer-service-menu {
+    display: none;
+  }
+
+  .welcome-content h1 {
+    font-size: 28px;
+  }
+
+  .welcome-content p {
+    font-size: 16px;
   }
 }

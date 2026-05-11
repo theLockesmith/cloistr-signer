@@ -1,5 +1,3 @@
-export { LoginPage } from './Login';
-export { RegisterPage } from './Register';
 export { DashboardPage } from './Dashboard';
 export { KeysPage } from './Keys';
 export { RequestsPage } from './Requests';

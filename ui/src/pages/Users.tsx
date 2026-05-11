@@ -1,11 +1,11 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiClient from '../api/client';
-import { useAuth } from '../hooks/useAuth';
+import { useSignerAuth } from '../hooks/useSignerAuth';
 import type { User } from '../types/api';
 
 export function UsersPage() {
   const queryClient = useQueryClient();
-  const { user: currentUser } = useAuth();
+  const { user: currentUser } = useSignerAuth();
 
   const { data: users, isLoading } = useQuery({
     queryKey: ['users'],

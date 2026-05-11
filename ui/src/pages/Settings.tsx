@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
-import { useAuth } from '../hooks/useAuth';
+import { useSignerAuth } from '../hooks/useSignerAuth';
 import apiClient from '../api/client';
 
 export function SettingsPage() {
-  const { user, logout } = useAuth();
+  const { user, logout } = useSignerAuth();
 
   return (
     <div>

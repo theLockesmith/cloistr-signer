@@ -1,10 +1,14 @@
 /**
- * Signer authentication hook and context
+ * Signer authentication hook
  *
  * Combines:
- * 1. Password-based JWT auth (existing signer flow)
- * 2. Nostr-based auth (NIP-07/NIP-46 via cloistr-ui)
- * 3. Cross-domain SSO (shared session cookies)
+ * 1. Nostr auth from SharedAuthProvider (NIP-07/NIP-46)
+ * 2. Signer backend JWT auth (for API access)
+ *
+ * Flow:
+ * - User authenticates via Nostr OR username/password
+ * - Signer backend issues JWT for API access
+ * - JWT stored in localStorage
  */
 
 import {
@@ -16,49 +20,49 @@ import {
   useMemo,
   type ReactNode,
 } from 'react';
+import { useNostrAuth } from '@cloistr/collab-common';
 import apiClient from '../api/client';
 import type { User, LoginRequest, RegisterRequest } from '../types/api';
-
-// Check if NIP-07 extension is available
-function isNip07Available(): boolean {
-  return typeof window !== 'undefined' && 'nostr' in window;
-}
 
 // ============================================
 // Types
 // ============================================
 
-export interface AuthState {
+export interface SignerAuthState {
+  /** Authenticated user from signer backend */
   user: User | null;
+  /** JWT token for API access */
   token: string | null;
+  /** Loading state */
   loading: boolean;
+  /** Error message */
   error: string | null;
 }
 
-export interface AuthContextValue extends AuthState {
+export interface SignerAuthContextValue extends SignerAuthState {
   /** Login with username and password */
   loginWithPassword: (data: LoginRequest) => Promise<void>;
-  /** Register new account */
+  /** Register new account with username/password */
   register: (data: RegisterRequest) => Promise<void>;
-  /** Login with NIP-07 browser extension */
-  loginWithExtension: () => Promise<void>;
-  /** Login with NIP-46 bunker URL */
-  loginWithBunker: (bunkerUrl: string) => Promise<void>;
   /** Logout and clear session */
   logout: () => Promise<void>;
-  /** Whether user is authenticated */
+  /** Whether user is authenticated with signer backend */
   isAuthenticated: boolean;
-  /** Whether NIP-07 extension is available */
-  extensionAvailable: boolean;
   /** Clear error state */
   clearError: () => void;
+  /** Show login modal */
+  showLoginModal: () => void;
+  /** Hide login modal */
+  hideLoginModal: () => void;
+  /** Whether login modal is visible */
+  loginModalOpen: boolean;
 }
 
 // ============================================
 // Context
 // ============================================
 
-const AuthContext = createContext<AuthContextValue | null>(null);
+const SignerAuthContext = createContext<SignerAuthContextValue | null>(null);
 
 // ============================================
 // Storage keys
@@ -74,21 +78,19 @@ const STORAGE_KEYS = {
 // Provider
 // ============================================
 
-interface AuthProviderProps {
+interface SignerAuthProviderProps {
   children: ReactNode;
 }
 
-export function SignerAuthProvider({ children }: AuthProviderProps) {
+export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [extensionAvailable, setExtensionAvailable] = useState(false);
+  const [loginModalOpen, setLoginModalOpen] = useState(false);
 
-  // Check for NIP-07 extension on mount
-  useEffect(() => {
-    setExtensionAvailable(isNip07Available());
-  }, []);
+  // Nostr auth from SharedAuthProvider
+  const { authState: nostrAuth } = useNostrAuth();
 
   // ==========================================
   // Token management
@@ -101,6 +103,7 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
     setToken(newToken);
     setUser(newUser);
     apiClient.setToken(newToken);
+    setLoginModalOpen(false);
   }, []);
 
   const clearAuthState = useCallback(() => {
@@ -148,43 +151,6 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
     }
   }, [saveAuthState]);
 
-  const loginWithExtension = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      // TODO: Implement NIP-07 login
-      // 1. Get pubkey from window.nostr.getPublicKey()
-      // 2. Request challenge from backend
-      // 3. Sign challenge with window.nostr.signEvent()
-      // 4. Send signed challenge to backend for JWT
-
-      throw new Error('NIP-07 login not yet implemented - use password login');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Extension login failed';
-      setError(message);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const loginWithBunker = useCallback(async (_bunkerUrl: string) => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      // TODO: Implement NIP-46 bunker login
-      throw new Error('NIP-46 login not yet implemented - use password login');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Bunker login failed';
-      setError(message);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
   const logout = useCallback(async () => {
     try {
       await apiClient.logout();
@@ -197,6 +163,33 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
   const clearError = useCallback(() => {
     setError(null);
   }, []);
+
+  const showLoginModal = useCallback(() => {
+    setLoginModalOpen(true);
+  }, []);
+
+  const hideLoginModal = useCallback(() => {
+    setLoginModalOpen(false);
+    setError(null);
+  }, []);
+
+  // ==========================================
+  // Sync Nostr auth to signer backend
+  // ==========================================
+
+  useEffect(() => {
+    // When user connects via Nostr, try to authenticate with signer backend
+    if (nostrAuth.isConnected && nostrAuth.pubkey && !token) {
+      // TODO: Implement Nostr -> Signer JWT exchange
+      // This requires a backend endpoint that:
+      // 1. Accepts a signed challenge (NIP-98 style)
+      // 2. Creates/finds user by pubkey
+      // 3. Returns JWT
+      //
+      // For now, we still require password login
+      // The Nostr connection can be used for key operations
+    }
+  }, [nostrAuth.isConnected, nostrAuth.pubkey, token]);
 
   // ==========================================
   // Initialize from storage
@@ -245,19 +238,19 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
   // Context value
   // ==========================================
 
-  const value = useMemo<AuthContextValue>(() => ({
+  const value = useMemo<SignerAuthContextValue>(() => ({
     user,
     token,
     loading,
     error,
     loginWithPassword,
     register,
-    loginWithExtension,
-    loginWithBunker,
     logout,
     isAuthenticated: !!token && !!user,
-    extensionAvailable,
     clearError,
+    showLoginModal,
+    hideLoginModal,
+    loginModalOpen,
   }), [
     user,
     token,
@@ -265,17 +258,17 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
     error,
     loginWithPassword,
     register,
-    loginWithExtension,
-    loginWithBunker,
     logout,
-    extensionAvailable,
     clearError,
+    showLoginModal,
+    hideLoginModal,
+    loginModalOpen,
   ]);
 
   return (
-    <AuthContext.Provider value={value}>
+    <SignerAuthContext.Provider value={value}>
       {children}
-    </AuthContext.Provider>
+    </SignerAuthContext.Provider>
   );
 }
 
@@ -283,10 +276,10 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
 // Hook
 // ============================================
 
-export function useAuth(): AuthContextValue {
-  const context = useContext(AuthContext);
+export function useSignerAuth(): SignerAuthContextValue {
+  const context = useContext(SignerAuthContext);
   if (!context) {
-    throw new Error('useAuth must be used within SignerAuthProvider');
+    throw new Error('useSignerAuth must be used within SignerAuthProvider');
   }
   return context;
 }
