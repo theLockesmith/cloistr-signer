@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,13 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/discovery"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
+
+// TestMain sets up test environment - forces template mode so tests work against Go templates
+func TestMain(m *testing.M) {
+	// Force template mode for tests (bypasses SPA detection)
+	SetForceTemplateMode(true)
+	os.Exit(m.Run())
+}
 
 // mockStatusProvider implements StatusProvider for testing
 type mockStatusProvider struct {

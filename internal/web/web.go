@@ -357,7 +357,50 @@ func New(cfg *config.Config, store storage.Storage, status StatusProvider, reqHa
 }
 
 // RegisterRoutes registers web UI routes
+// If the React SPA build exists, it will be served for UI routes
+// Otherwise, falls back to Go templates
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
+	// Check if SPA is available
+	if IsSPAEnabled() {
+		h.registerSPARoutes(mux)
+		return
+	}
+
+	// Fall back to Go templates
+	h.registerTemplateRoutes(mux)
+}
+
+// registerSPARoutes registers routes when serving the React SPA
+func (h *Handler) registerSPARoutes(mux *http.ServeMux) {
+	slog.Info("serving React SPA for web UI")
+
+	// Create SPA handler
+	spa := NewSPAHandler(DevSPAPath())
+
+	// Legacy web API endpoints (for backward compatibility with existing clients)
+	mux.HandleFunc("/web/api/login", h.handleAPILogin)
+	mux.HandleFunc("/web/api/login/nip07", h.handleAPINIP07Login)
+	mux.HandleFunc("/web/api/register", h.handleAPIRegister)
+	mux.HandleFunc("/web/api/approve", h.handleAPIApprove)
+	mux.HandleFunc("/web/api/deny", h.handleAPIDeny)
+	mux.HandleFunc("/web/api/settings/pubkey", h.requireAuth(h.handleAPISettingsPubkey))
+	mux.HandleFunc("/web/api/relay/check", h.requireAuth(h.handleAPIRelayCheck))
+
+	// Logout endpoint (clears cookie)
+	mux.HandleFunc("/logout", h.handleLogout)
+
+	// Keep legacy /static/ route for any hardcoded references
+	mux.HandleFunc("/static/", h.handleStatic)
+
+	// Serve SPA for all other routes (assets, pages, etc.)
+	// The SPA handles client-side routing for /login, /dashboard, /keys, etc.
+	mux.Handle("/", spa)
+}
+
+// registerTemplateRoutes registers routes for Go template-based UI (legacy)
+func (h *Handler) registerTemplateRoutes(mux *http.ServeMux) {
+	slog.Info("serving Go templates for web UI")
+
 	// Static files
 	mux.HandleFunc("/static/", h.handleStatic)
 

@@ -5,3 +5,7 @@ config.yaml
 cloistr-signer
 
 signer
+
+# Node
+node_modules/
+ui/node_modules/
