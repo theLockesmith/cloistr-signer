@@ -16,9 +16,13 @@ import {
   useMemo,
   type ReactNode,
 } from 'react';
-import { useNostrAuth, useAuthHelpers } from '@cloistr/collab-common';
 import apiClient from '../api/client';
 import type { User, LoginRequest, RegisterRequest } from '../types/api';
+
+// Check if NIP-07 extension is available
+function isNip07Available(): boolean {
+  return typeof window !== 'undefined' && 'nostr' in window;
+}
 
 // ============================================
 // Types
@@ -79,10 +83,12 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [extensionAvailable, setExtensionAvailable] = useState(false);
 
-  // Nostr auth from cloistr-collab-common
-  const { connectNip07, connectNip46 } = useNostrAuth();
-  const { isNip07Available } = useAuthHelpers();
+  // Check for NIP-07 extension on mount
+  useEffect(() => {
+    setExtensionAvailable(isNip07Available());
+  }, []);
 
   // ==========================================
   // Token management
@@ -147,14 +153,12 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
     setError(null);
 
     try {
-      // Connect NIP-07
-      await connectNip07();
+      // TODO: Implement NIP-07 login
+      // 1. Get pubkey from window.nostr.getPublicKey()
+      // 2. Request challenge from backend
+      // 3. Sign challenge with window.nostr.signEvent()
+      // 4. Send signed challenge to backend for JWT
 
-      // TODO: Send signed challenge to backend for JWT
-      // For now, just use the Nostr pubkey directly
-      // This requires backend support for NIP-98 style auth
-
-      // Placeholder until backend supports challenge-response
       throw new Error('NIP-07 login not yet implemented - use password login');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Extension login failed';
@@ -163,17 +167,14 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
     } finally {
       setLoading(false);
     }
-  }, [connectNip07]);
+  }, []);
 
-  const loginWithBunker = useCallback(async (bunkerUrl: string) => {
+  const loginWithBunker = useCallback(async (_bunkerUrl: string) => {
     setLoading(true);
     setError(null);
 
     try {
-      // Connect NIP-46
-      await connectNip46({ bunkerUrl });
-
-      // TODO: Send signed challenge to backend for JWT
+      // TODO: Implement NIP-46 bunker login
       throw new Error('NIP-46 login not yet implemented - use password login');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Bunker login failed';
@@ -182,7 +183,7 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
     } finally {
       setLoading(false);
     }
-  }, [connectNip46]);
+  }, []);
 
   const logout = useCallback(async () => {
     try {
@@ -255,7 +256,7 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
     loginWithBunker,
     logout,
     isAuthenticated: !!token && !!user,
-    extensionAvailable: isNip07Available,
+    extensionAvailable,
     clearError,
   }), [
     user,
@@ -267,7 +268,7 @@ export function SignerAuthProvider({ children }: AuthProviderProps) {
     loginWithExtension,
     loginWithBunker,
     logout,
-    isNip07Available,
+    extensionAvailable,
     clearError,
   ]);
 
