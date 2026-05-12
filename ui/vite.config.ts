@@ -4,6 +4,9 @@ import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    dedupe: ['react', 'react-dom', '@cloistr/collab-common'],
+  },
   build: {
     outDir: path.resolve(__dirname, '../internal/web/dist'),
     emptyDirOnBuild: true,
