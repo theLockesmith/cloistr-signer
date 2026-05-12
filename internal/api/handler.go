@@ -1839,11 +1839,6 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	h.storage.CreateUserSession(r.Context(), session)
 
-	// Load user's Vault-encrypted keys into signer runtime
-	if vaultToken != "" {
-		h.loadUserVaultKeys(r.Context(), user.ID, vaultToken)
-	}
-
 	// Update last login
 	now := time.Now()
 	user.LastLoginAt = &now
@@ -1864,6 +1859,13 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 			LastLogin:  user.LastLoginAt,
 		},
 	})
+
+	// Load user's Vault-encrypted keys into signer runtime asynchronously.
+	// Uses context.Background() so the load is not canceled when the HTTP
+	// request completes. Keys lazy-load on first signing request anyway.
+	if vaultToken != "" {
+		go h.loadUserVaultKeys(context.Background(), user.ID, vaultToken)
+	}
 }
 
 func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
