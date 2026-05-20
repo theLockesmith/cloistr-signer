@@ -2287,6 +2287,9 @@ func (h *Handler) RestoreVaultKeysOnStartup(ctx context.Context) {
 
 // loadUserVaultKeysCount is loadUserVaultKeys but returns the count of keys
 // registered so callers can aggregate (used by RestoreVaultKeysOnStartup).
+// Verifies the decrypted private key derives the expected pubkey before
+// registering, so a corrupt decrypt does not silently register a key that
+// will then fail every signing request.
 func (h *Handler) loadUserVaultKeysCount(ctx context.Context, userID, vaultToken string) int {
 	if h.vaultClient == nil || vaultToken == "" {
 		return 0
@@ -2310,6 +2313,19 @@ func (h *Handler) loadUserVaultKeysCount(ctx context.Context, userID, vaultToken
 				"error", err, "user_id", userID, "pubkey", key.Pubkey[:16]+"...")
 			continue
 		}
+
+		derivedPubkey, derr := nostr.GetPublicKey(privateKey)
+		if derr != nil || derivedPubkey != key.Pubkey {
+			slog.Error("decrypted vault key does not match stored pubkey - skipping",
+				"user_id", userID,
+				"stored_pubkey", key.Pubkey[:16]+"...",
+				"derived_pubkey_prefix", safeShortPrefix(derivedPubkey),
+				"privkey_length", len(privateKey),
+				"derive_error", derr,
+			)
+			continue
+		}
+
 		if key.IsProxy() {
 			h.signer.RegisterProxyKey(key.Pubkey, privateKey, key.BunkerURI)
 		} else {
@@ -2322,6 +2338,19 @@ func (h *Handler) loadUserVaultKeysCount(ctx context.Context, userID, vaultToken
 			"user_id", userID, "count", loaded)
 	}
 	return loaded
+}
+
+// safeShortPrefix returns the first 16 chars of s, or "<empty>" / "<short:N>"
+// when the input is too short or empty - used to safely log diagnostics
+// without leaking key material.
+func safeShortPrefix(s string) string {
+	if s == "" {
+		return "<empty>"
+	}
+	if len(s) < 16 {
+		return fmt.Sprintf("<short:%d>", len(s))
+	}
+	return s[:16] + "..."
 }
 
 // unloadUserVaultKeys removes a user's Vault-encrypted keys from the signer runtime.
