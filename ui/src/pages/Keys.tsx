@@ -6,6 +6,7 @@ import type { Key, CreateKeyRequest } from '../types/api';
 export function KeysPage() {
   const queryClient = useQueryClient();
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [keyToDelete, setKeyToDelete] = useState<Key | null>(null);
 
   const { data: keys, isLoading } = useQuery({
     queryKey: ['keys'],
@@ -24,6 +25,7 @@ export function KeysPage() {
     mutationFn: (id: string) => apiClient.deleteKey(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['keys'] });
+      setKeyToDelete(null);
     },
   });
 
@@ -46,7 +48,7 @@ export function KeysPage() {
             <KeyCard
               key={key.id}
               keyData={key}
-              onDelete={() => deleteMutation.mutate(key.id)}
+              onDelete={() => setKeyToDelete(key)}
             />
           ))}
         </div>
@@ -71,6 +73,73 @@ export function KeysPage() {
           error={createMutation.error?.message}
         />
       )}
+
+      {keyToDelete && (
+        <DeleteKeyModal
+          keyData={keyToDelete}
+          onCancel={() => {
+            if (!deleteMutation.isPending) setKeyToDelete(null);
+          }}
+          onConfirm={() => deleteMutation.mutate(keyToDelete.id)}
+          loading={deleteMutation.isPending}
+          error={deleteMutation.error?.message}
+        />
+      )}
+    </div>
+  );
+}
+
+function DeleteKeyModal({
+  keyData,
+  onCancel,
+  onConfirm,
+  loading,
+  error,
+}: {
+  keyData: Key;
+  onCancel: () => void;
+  onConfirm: () => void;
+  loading: boolean;
+  error?: string;
+}) {
+  const pubkeyShort = `${keyData.pubkey.slice(0, 12)}…${keyData.pubkey.slice(-12)}`;
+  return (
+    <div
+      className="cloistr-modal-backdrop"
+      onClick={(e) => e.target === e.currentTarget && !loading && onCancel()}
+    >
+      <div className="cloistr-modal" style={{ maxWidth: '440px' }}>
+        <div className="cloistr-modal-header">
+          <h2>Delete Key</h2>
+          <button className="cloistr-modal-close" onClick={onCancel} disabled={loading}>×</button>
+        </div>
+        <div className="cloistr-modal-content">
+          {error && <div className="auth-error">{error}</div>}
+          <p style={{ marginTop: 0 }}>
+            Delete <strong>{keyData.name}</strong>? Any apps connected to this key will stop working,
+            and the key material will be permanently removed from the signer. This cannot be undone.
+          </p>
+          <div style={{
+            fontFamily: 'monospace',
+            fontSize: '12px',
+            color: 'var(--signer-text-muted)',
+            background: 'var(--signer-bg)',
+            padding: '8px 10px',
+            borderRadius: '4px',
+            wordBreak: 'break-all',
+          }}>
+            {pubkeyShort}
+          </div>
+          <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end', marginTop: '20px' }}>
+            <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+              Cancel
+            </button>
+            <button type="button" className="btn btn-danger" onClick={onConfirm} disabled={loading}>
+              {loading ? 'Deleting…' : 'Delete Key'}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -78,20 +147,34 @@ export function KeysPage() {
 function KeyCard({ keyData, onDelete }: { keyData: Key; onDelete: () => void }) {
   const [showBunkerUrl, setShowBunkerUrl] = useState(false);
   const [bunkerUrl, setBunkerUrl] = useState<string | null>(null);
+  const [bunkerError, setBunkerError] = useState<string | null>(null);
+  const [bunkerLoading, setBunkerLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const handleGetBunkerUrl = async () => {
+    setBunkerError(null);
+    setBunkerLoading(true);
     try {
       const result = await apiClient.getBunkerUrl(keyData.id);
-      setBunkerUrl(result.bunker_url);
+      setBunkerUrl(result.bunker_uri);
       setShowBunkerUrl(true);
     } catch (err) {
-      console.error('Failed to get bunker URL:', err);
+      const msg = err instanceof Error ? err.message : 'Failed to get bunker URL';
+      setBunkerError(msg);
+      setShowBunkerUrl(true);
+    } finally {
+      setBunkerLoading(false);
     }
   };
 
-  const copyBunkerUrl = () => {
-    if (bunkerUrl) {
-      navigator.clipboard.writeText(bunkerUrl);
+  const copyBunkerUrl = async () => {
+    if (!bunkerUrl) return;
+    try {
+      await navigator.clipboard.writeText(bunkerUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setBunkerError('Failed to copy to clipboard');
     }
   };
 
@@ -105,10 +188,10 @@ function KeyCard({ keyData, onDelete }: { keyData: Key; onDelete: () => void }) 
           <div className="key-pubkey">{pubkeyShort}</div>
         </div>
         <div className="key-actions">
-          <button className="btn btn-secondary" onClick={handleGetBunkerUrl}>
-            🔗 Connect
+          <button className="btn btn-secondary" onClick={handleGetBunkerUrl} disabled={bunkerLoading}>
+            {bunkerLoading ? '⏳ Generating…' : '🔗 Connect'}
           </button>
-          <button className="btn btn-danger" onClick={onDelete}>
+          <button className="btn btn-danger" onClick={onDelete} aria-label="Delete key">
             🗑️
           </button>
         </div>
@@ -124,12 +207,16 @@ function KeyCard({ keyData, onDelete }: { keyData: Key; onDelete: () => void }) 
         {keyData.nip05 && <span>📧 {keyData.nip05}</span>}
       </div>
 
+      {showBunkerUrl && bunkerError && (
+        <div className="auth-error" style={{ marginTop: '16px' }}>{bunkerError}</div>
+      )}
+
       {showBunkerUrl && bunkerUrl && (
         <div style={{ marginTop: '16px', padding: '12px', background: 'var(--signer-bg)', borderRadius: '6px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
             <span style={{ fontWeight: 500 }}>Bunker URL</span>
             <button className="btn btn-secondary" onClick={copyBunkerUrl} style={{ padding: '4px 8px' }}>
-              📋 Copy
+              {copied ? '✓ Copied' : '📋 Copy'}
             </button>
           </div>
           <code style={{ fontSize: '12px', wordBreak: 'break-all', color: 'var(--signer-primary)' }}>

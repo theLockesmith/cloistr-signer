@@ -4,20 +4,19 @@ import apiClient from '../api/client';
 import type { Key, PendingRequest } from '../types/api';
 
 export function DashboardPage() {
-  const { data: stats, isLoading: statsLoading } = useQuery({
-    queryKey: ['stats'],
-    queryFn: () => apiClient.getDashboardStats(),
-  });
-
-  const { data: keys } = useQuery({
+  const { data: keys, isLoading: keysLoading } = useQuery({
     queryKey: ['keys'],
     queryFn: () => apiClient.listKeys(),
   });
 
-  const { data: requests } = useQuery({
+  const { data: requests, isLoading: requestsLoading } = useQuery({
     queryKey: ['requests'],
     queryFn: () => apiClient.listRequests(),
   });
+
+  const totalKeys = keys?.length ?? 0;
+  const activeKeys = keys?.filter((k) => k.is_active).length ?? 0;
+  const pendingRequests = requests?.length ?? 0;
 
   return (
     <div>
@@ -28,29 +27,23 @@ export function DashboardPage() {
       {/* Stats Grid */}
       <div className="stats-grid">
         <StatCard
-          value={stats?.total_keys ?? 0}
+          value={totalKeys}
           label="Total Keys"
           icon="🔑"
-          loading={statsLoading}
+          loading={keysLoading}
         />
         <StatCard
-          value={stats?.pending_requests ?? 0}
+          value={activeKeys}
+          label="Active Keys"
+          icon="✅"
+          loading={keysLoading}
+        />
+        <StatCard
+          value={pendingRequests}
           label="Pending Requests"
           icon="📋"
-          loading={statsLoading}
-          highlight={stats?.pending_requests ? true : false}
-        />
-        <StatCard
-          value={stats?.total_apps ?? 0}
-          label="Connected Apps"
-          icon="📱"
-          loading={statsLoading}
-        />
-        <StatCard
-          value={stats?.active_sessions ?? 0}
-          label="Active Sessions"
-          icon="⚡"
-          loading={statsLoading}
+          loading={requestsLoading}
+          highlight={pendingRequests > 0}
         />
       </div>
 

@@ -124,7 +124,7 @@ class ApiClient {
     });
   }
 
-  async getBunkerUrl(id: string): Promise<{ bunker_url: string }> {
+  async getBunkerUrl(id: string): Promise<{ bunker_uri: string; signer_pubkey: string; relays: string[]; secret?: string }> {
     return this.fetch(`/bunker/${id}`);
   }
 
