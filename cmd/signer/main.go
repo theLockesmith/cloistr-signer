@@ -185,6 +185,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Restore Vault-encrypted keys for users with active sessions. Without
+	// this, a pod restart wipes the in-memory key map and signing silently
+	// breaks for every user until they each log out and back in.
+	go apiHandler.RestoreVaultKeysOnStartup(context.Background())
+
 	// Initialize admin handler for DM-based management
 	adminHandler := admin.New(cfg, store, relayClient, relayPrefsClient, nip46Signer, nip46Signer)
 

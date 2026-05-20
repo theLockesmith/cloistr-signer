@@ -2233,6 +2233,97 @@ func (h *Handler) loadUserVaultKeys(ctx context.Context, userID, vaultToken stri
 	}
 }
 
+// RestoreVaultKeysOnStartup walks every user, picks their most recent active
+// session, and loads that user's Vault-encrypted keys into the signer runtime
+// using the stored Vault token. Without this, a pod restart leaves every
+// user's keys un-subscribed at the relay layer until each user re-logs-in,
+// silently breaking NIP-46 signing.
+func (h *Handler) RestoreVaultKeysOnStartup(ctx context.Context) {
+	if h.vaultClient == nil {
+		return
+	}
+
+	users, err := h.storage.ListUsers(ctx)
+	if err != nil {
+		slog.Error("startup vault restore: failed to list users", "error", err)
+		return
+	}
+
+	usersRestored := 0
+	keysRestored := 0
+	for _, user := range users {
+		sessions, err := h.storage.ListUserSessions(ctx, user.ID)
+		if err != nil {
+			slog.Warn("startup vault restore: failed to list sessions", "user_id", user.ID, "error", err)
+			continue
+		}
+
+		// Sessions come back ordered by created_at DESC and filtered to
+		// non-expired. Pick the newest one that actually has a Vault token.
+		var vaultToken string
+		for _, sess := range sessions {
+			if sess.VaultToken != "" {
+				vaultToken = sess.VaultToken
+				break
+			}
+		}
+		if vaultToken == "" {
+			continue
+		}
+
+		loaded := h.loadUserVaultKeysCount(ctx, user.ID, vaultToken)
+		if loaded > 0 {
+			usersRestored++
+			keysRestored += loaded
+		}
+	}
+
+	slog.Info("startup vault restore complete",
+		"users_restored", usersRestored,
+		"keys_restored", keysRestored,
+		"users_total", len(users),
+	)
+}
+
+// loadUserVaultKeysCount is loadUserVaultKeys but returns the count of keys
+// registered so callers can aggregate (used by RestoreVaultKeysOnStartup).
+func (h *Handler) loadUserVaultKeysCount(ctx context.Context, userID, vaultToken string) int {
+	if h.vaultClient == nil || vaultToken == "" {
+		return 0
+	}
+
+	keys, err := h.storage.ListKeys(ctx, userID)
+	if err != nil {
+		slog.Error("failed to list user keys for vault loading", "error", err, "user_id", userID)
+		return 0
+	}
+
+	vaultEncryptor := crypto.NewVaultEncryptor(h.vaultClient, userID, vaultToken)
+	loaded := 0
+	for _, key := range keys {
+		if !crypto.IsVaultEncrypted(key.EncryptedNsec) {
+			continue
+		}
+		privateKey, err := vaultEncryptor.Decrypt(key.EncryptedNsec)
+		if err != nil {
+			slog.Error("failed to decrypt vault key on startup",
+				"error", err, "user_id", userID, "pubkey", key.Pubkey[:16]+"...")
+			continue
+		}
+		if key.IsProxy() {
+			h.signer.RegisterProxyKey(key.Pubkey, privateKey, key.BunkerURI)
+		} else {
+			h.signer.RegisterKey(key.Pubkey, privateKey)
+		}
+		loaded++
+	}
+	if loaded > 0 {
+		slog.Info("startup vault restore: loaded keys for user",
+			"user_id", userID, "count", loaded)
+	}
+	return loaded
+}
+
 // unloadUserVaultKeys removes a user's Vault-encrypted keys from the signer runtime.
 // This is called when a user logs out to remove their keys from memory.
 func (h *Handler) unloadUserVaultKeys(ctx context.Context, userID string) {
