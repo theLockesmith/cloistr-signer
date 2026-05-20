@@ -2212,10 +2212,8 @@ func (h *Handler) loadUserVaultKeys(ctx context.Context, userID, vaultToken stri
 			continue
 		}
 
-		// Decrypt the key
-		privateKey, err := vaultEncryptor.Decrypt(key.EncryptedNsec)
-		if err != nil {
-			slog.Error("failed to decrypt vault key", "error", err, "pubkey", key.Pubkey[:16]+"...")
+		privateKey, ok := decryptAndVerifyVaultKey(ctx, vaultEncryptor, key)
+		if !ok {
 			continue
 		}
 
@@ -2307,25 +2305,10 @@ func (h *Handler) loadUserVaultKeysCount(ctx context.Context, userID, vaultToken
 		if !crypto.IsVaultEncrypted(key.EncryptedNsec) {
 			continue
 		}
-		privateKey, err := vaultEncryptor.Decrypt(key.EncryptedNsec)
-		if err != nil {
-			slog.Error("failed to decrypt vault key on startup",
-				"error", err, "user_id", userID, "pubkey", key.Pubkey[:16]+"...")
+		privateKey, ok := decryptAndVerifyVaultKey(ctx, vaultEncryptor, key)
+		if !ok {
 			continue
 		}
-
-		derivedPubkey, derr := nostr.GetPublicKey(privateKey)
-		if derr != nil || derivedPubkey != key.Pubkey {
-			slog.Error("decrypted vault key does not match stored pubkey - skipping",
-				"user_id", userID,
-				"stored_pubkey", key.Pubkey[:16]+"...",
-				"derived_pubkey_prefix", safeShortPrefix(derivedPubkey),
-				"privkey_length", len(privateKey),
-				"derive_error", derr,
-			)
-			continue
-		}
-
 		if key.IsProxy() {
 			h.signer.RegisterProxyKey(key.Pubkey, privateKey, key.BunkerURI)
 		} else {
@@ -2338,6 +2321,45 @@ func (h *Handler) loadUserVaultKeysCount(ctx context.Context, userID, vaultToken
 			"user_id", userID, "count", loaded)
 	}
 	return loaded
+}
+
+// decryptAndVerifyVaultKey decrypts a vault-encrypted key and verifies that
+// the resulting private key derives the stored pubkey. A first generation of
+// cmd/migrate sent the raw hex private key as Vault's `plaintext` field
+// without base64-wrapping it; Vault stored and returns those keys verbatim,
+// so the standard base64-decoding path produces garbage. For those keys we
+// fall back to reading Vault's plaintext field directly. Returns
+// (privateKeyHex, true) on success.
+func decryptAndVerifyVaultKey(ctx context.Context, enc *crypto.VaultEncryptor, key *storage.Key) (string, bool) {
+	// Standard path: Vault plaintext is base64-encoded.
+	privateKey, err := enc.DecryptWithContext(ctx, key.EncryptedNsec)
+	if err == nil {
+		if derived, derr := nostr.GetPublicKey(privateKey); derr == nil && derived == key.Pubkey {
+			return privateKey, true
+		}
+	}
+
+	// Fallback: legacy cmd/migrate stored the raw hex string as Vault's
+	// plaintext field. Read it back without base64-decoding.
+	rawPrivateKey, rerr := enc.DecryptRawWithContext(ctx, key.EncryptedNsec)
+	if rerr != nil {
+		slog.Error("failed to decrypt vault key (raw fallback also failed)",
+			"pubkey", key.Pubkey[:16]+"...", "primary_error", err, "raw_error", rerr)
+		return "", false
+	}
+	if derived, derr := nostr.GetPublicKey(rawPrivateKey); derr == nil && derived == key.Pubkey {
+		slog.Warn("recovered vault key via legacy raw-plaintext path (cmd/migrate format)",
+			"pubkey", key.Pubkey[:16]+"...")
+		return rawPrivateKey, true
+	}
+
+	slog.Error("decrypted vault key does not derive expected pubkey",
+		"stored_pubkey", key.Pubkey[:16]+"...",
+		"std_privkey_len", len(privateKey),
+		"raw_privkey_len", len(rawPrivateKey),
+		"std_err", err,
+	)
+	return "", false
 }
 
 // safeShortPrefix returns the first 16 chars of s, or "<empty>" / "<short:N>"

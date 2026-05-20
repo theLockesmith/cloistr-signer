@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -196,9 +197,15 @@ func main() {
 				continue
 			}
 
-			// Re-encrypt with Vault transit
+			// Re-encrypt with Vault transit. Vault transit expects the
+			// `plaintext` field to be base64-encoded; sending the raw
+			// hex string here would corrupt the key (Vault stores it
+			// verbatim and returns it un-base64 on decrypt, so the
+			// VaultEncryptor.Decrypt path would base64-decode it into
+			// garbage).
 			transitKeyName := vault.UserTransitKeyName(user.ID)
-			encrypted, err := vaultClient.TransitEncrypt(ctx, transitKeyName, decrypted)
+			b64Plaintext := base64.StdEncoding.EncodeToString([]byte(decrypted))
+			encrypted, err := vaultClient.TransitEncrypt(ctx, transitKeyName, b64Plaintext)
 			if err != nil {
 				slog.Error("failed to encrypt with vault", "error", err, "key_id", key.ID)
 				stats.errors++

@@ -70,6 +70,25 @@ func (v *VaultEncryptor) DecryptWithContext(ctx context.Context, ciphertext stri
 	return string(plaintext), nil
 }
 
+// DecryptRawWithContext returns Vault's plaintext field directly without
+// base64-decoding. Used to recover keys encrypted by an early version of
+// cmd/migrate that sent the raw hex private key as the Vault `plaintext`
+// field (not base64-wrapped). Vault then stored and returns it verbatim,
+// so the application must NOT base64-decode the response for those keys.
+func (v *VaultEncryptor) DecryptRawWithContext(ctx context.Context, ciphertext string) (string, error) {
+	keyName := vault.UserTransitKeyName(v.userID)
+	plaintext, err := v.client.TransitDecryptWithToken(ctx, v.token, keyName, ciphertext)
+	if err != nil {
+		return "", fmt.Errorf("vault decrypt failed: %w", err)
+	}
+	return plaintext, nil
+}
+
+// DecryptRaw is the no-context version of DecryptRawWithContext.
+func (v *VaultEncryptor) DecryptRaw(ciphertext string) (string, error) {
+	return v.DecryptRawWithContext(context.Background(), ciphertext)
+}
+
 // EncryptBytes encrypts raw bytes using the user's Vault transit key.
 func (v *VaultEncryptor) EncryptBytes(plaintext []byte) ([]byte, error) {
 	return v.EncryptBytesWithContext(context.Background(), plaintext)
