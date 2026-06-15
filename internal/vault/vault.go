@@ -445,6 +445,106 @@ func (c *Client) TransitEncryptWithToken(ctx context.Context, token, keyName, pl
 	return result.Data.Ciphertext, nil
 }
 
+// TransitRotateKey rotates a transit key, creating a new version. Existing
+// ciphertext continues to decrypt with its embedded version; subsequent
+// encrypts use the new version. Pair with TransitRewrap (or
+// TransitRewrapWithToken) to bring existing ciphertext forward without
+// exposing plaintext to the caller.
+//
+// Uses the admin token (c.token). Requires update capability on
+// `transit/keys/{name}/rotate`.
+func (c *Client) TransitRotateKey(ctx context.Context, keyName string) error {
+	start := time.Now()
+	defer func() {
+		metrics.RecordVaultLatency("transit_rotate", time.Since(start))
+	}()
+
+	path := fmt.Sprintf("transit/keys/%s/rotate", keyName)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.address+"/v1/"+path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Vault-Token", c.token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to rotate transit key: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("vault error (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	return nil
+}
+
+// TransitRewrap re-encrypts ciphertext using the current version of the
+// transit key. Used after TransitRotateKey to migrate ciphertext to the
+// new key version. Plaintext is never exposed to the caller (the operation
+// happens entirely inside Vault).
+//
+// Uses the admin token (c.token). Requires update capability on
+// `transit/rewrap/{name}`.
+func (c *Client) TransitRewrap(ctx context.Context, keyName, ciphertext string) (string, error) {
+	return c.TransitRewrapWithToken(ctx, c.token, keyName, ciphertext)
+}
+
+// TransitRewrapWithToken re-encrypts ciphertext using the supplied token's
+// access to the transit key. Lets a user rewrap their own ciphertext using
+// their user token, without ever exposing plaintext.
+func (c *Client) TransitRewrapWithToken(ctx context.Context, token, keyName, ciphertext string) (string, error) {
+	start := time.Now()
+	defer func() {
+		metrics.RecordVaultLatency("transit_rewrap", time.Since(start))
+	}()
+
+	path := fmt.Sprintf("transit/rewrap/%s", keyName)
+
+	payload := map[string]interface{}{
+		"ciphertext": ciphertext,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.address+"/v1/"+path, strings.NewReader(string(body)))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("X-Vault-Token", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to rewrap: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("vault error (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result struct {
+		Data struct {
+			Ciphertext string `json:"ciphertext"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return result.Data.Ciphertext, nil
+}
+
 // CreateTransitKey creates a new transit encryption key for a user
 func (c *Client) CreateTransitKey(ctx context.Context, keyName string) error {
 	path := fmt.Sprintf("transit/keys/%s", keyName)
@@ -705,7 +805,9 @@ func GenerateUserPolicy(userID string) string {
 	keyName := UserTransitKeyName(userID)
 	return fmt.Sprintf(`
 # Policy for user %s
-# Allows encrypt/decrypt with their own transit key only
+# Allows encrypt/decrypt/rewrap with their own transit key only.
+# Rewrap lets the user refresh their own ciphertext to the latest key
+# version after an admin-driven rotation, without ever exposing plaintext.
 
 path "transit/encrypt/%s" {
   capabilities = ["update"]
@@ -714,7 +816,11 @@ path "transit/encrypt/%s" {
 path "transit/decrypt/%s" {
   capabilities = ["update"]
 }
-`, userID, keyName, keyName)
+
+path "transit/rewrap/%s" {
+  capabilities = ["update"]
+}
+`, userID, keyName, keyName, keyName)
 }
 
 // ProvisionUser creates all Vault resources for a new user:

@@ -89,6 +89,25 @@ func (v *VaultEncryptor) DecryptRaw(ciphertext string) (string, error) {
 	return v.DecryptRawWithContext(context.Background(), ciphertext)
 }
 
+// Rewrap re-encrypts ciphertext using the current version of the user's
+// transit key. Plaintext is never exposed to the caller — the operation
+// happens entirely inside Vault. Use after an admin-driven key rotation
+// (see vault.Client.TransitRotateKey) to migrate stored ciphertext to the
+// new key version.
+func (v *VaultEncryptor) Rewrap(ciphertext string) (string, error) {
+	return v.RewrapWithContext(context.Background(), ciphertext)
+}
+
+// RewrapWithContext is the context-aware version of Rewrap.
+func (v *VaultEncryptor) RewrapWithContext(ctx context.Context, ciphertext string) (string, error) {
+	keyName := vault.UserTransitKeyName(v.userID)
+	newCiphertext, err := v.client.TransitRewrapWithToken(ctx, v.token, keyName, ciphertext)
+	if err != nil {
+		return "", fmt.Errorf("vault rewrap failed: %w", err)
+	}
+	return newCiphertext, nil
+}
+
 // EncryptBytes encrypts raw bytes using the user's Vault transit key.
 func (v *VaultEncryptor) EncryptBytes(plaintext []byte) ([]byte, error) {
 	return v.EncryptBytesWithContext(context.Background(), plaintext)

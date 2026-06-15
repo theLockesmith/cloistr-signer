@@ -22,6 +22,7 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "Show what would be migrated without making changes")
 	userID := flag.String("user", "", "Migrate only a specific user ID (empty = all users)")
 	verbose := flag.Bool("verbose", false, "Enable verbose logging")
+	rotate := flag.Bool("rotate", false, "Rotate Vault transit keys and rewrap existing ciphertext to the new version (privacy-architecture §3.7). Does not require ENCRYPTION_KEY because no local decryption is needed.")
 	flag.Parse()
 
 	// Setup logging
@@ -34,7 +35,12 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	slog.Info("starting vault migration",
+	mode := "migrate"
+	if *rotate {
+		mode = "rotate"
+	}
+	slog.Info("starting vault tool",
+		"mode", mode,
 		"dry_run", *dryRun,
 		"user_filter", *userID,
 	)
@@ -49,13 +55,16 @@ func main() {
 	// Validate Vault configuration
 	if !cfg.Vault.Enabled || cfg.Vault.Address == "" {
 		slog.Error("Vault is not configured", "vault_enabled", cfg.Vault.Enabled, "vault_address", cfg.Vault.Address)
-		fmt.Println("Error: Vault must be enabled and configured to run migration")
+		fmt.Println("Error: Vault must be enabled and configured")
 		fmt.Println("Set VAULT_ENABLED=true and VAULT_ADDRESS=<url>")
 		os.Exit(1)
 	}
 
-	// Validate local encryption key (needed to decrypt existing keys)
-	if cfg.Storage.EncryptionKey == "" {
+	// The local encryption key is only needed for the migrate path (which
+	// decrypts locally-encrypted ciphertext before re-encrypting via Vault).
+	// The rotate path operates entirely on Vault-side ciphertext, so it
+	// skips this check.
+	if !*rotate && cfg.Storage.EncryptionKey == "" {
 		slog.Error("local encryption key not configured")
 		fmt.Println("Error: ENCRYPTION_KEY must be set to decrypt existing keys")
 		os.Exit(1)
@@ -69,11 +78,14 @@ func main() {
 	}
 	defer store.Close()
 
-	// Initialize local encryptor (for decrypting existing keys)
-	localEncryptor, err := crypto.NewEncryptor(cfg.Storage.EncryptionKey)
-	if err != nil {
-		slog.Error("failed to initialize local encryptor", "error", err)
-		os.Exit(1)
+	// Initialize local encryptor only when needed (migrate path).
+	var localEncryptor *crypto.Encryptor
+	if !*rotate {
+		localEncryptor, err = crypto.NewEncryptor(cfg.Storage.EncryptionKey)
+		if err != nil {
+			slog.Error("failed to initialize local encryptor", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Initialize Vault client (with service account token)
@@ -121,6 +133,17 @@ func main() {
 	}
 
 	slog.Info("found users to process", "count", len(users))
+
+	// Rotate path is independent of the migrate path: it operates entirely
+	// on Vault-side ciphertext (no local plaintext exposure) and is
+	// scheduled separately as ops hygiene per privacy-architecture §3.7.
+	if *rotate {
+		if err := runRotate(ctx, store, vaultClient, users, *dryRun); err != nil {
+			slog.Error("rotate failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Track statistics
 	var stats struct {
@@ -273,4 +296,118 @@ func truncatePubkey(pubkey string) string {
 		return pubkey[:16] + "..."
 	}
 	return pubkey
+}
+
+// runRotate rotates each user's Vault transit key and rewraps existing
+// ciphertext to the new key version. Operates entirely on Vault-side
+// ciphertext: plaintext is never exposed to this process. Implements
+// privacy-architecture §3.7 "Vault rewrap" as ops hygiene.
+//
+// The admin policy update is applied as a side effect (idempotent
+// CreatePolicy with the current GenerateUserPolicy, which grants rewrap
+// capability for end-user-initiated refreshes).
+func runRotate(ctx context.Context, store storage.Storage, vaultClient *vault.Client, users []*storage.User, dryRun bool) error {
+	var stats struct {
+		usersRotated     int
+		policiesUpdated  int
+		keysRewrapped    int
+		keysSkippedEmpty int
+		keysSkippedNon   int
+		errors           int
+	}
+
+	for _, user := range users {
+		keyName := vault.UserTransitKeyName(user.ID)
+		policyName := vault.UserPolicyName(user.ID)
+		policy := vault.GenerateUserPolicy(user.ID)
+
+		slog.Info("rotating user transit key",
+			"user_id", user.ID,
+			"username", user.Username,
+			"dry_run", dryRun,
+		)
+
+		if !dryRun {
+			// Ensure the policy reflects the current GenerateUserPolicy output
+			// (which includes rewrap capability).
+			if err := vaultClient.CreatePolicy(ctx, policyName, policy); err != nil {
+				slog.Error("policy update failed", "error", err, "user_id", user.ID)
+				stats.errors++
+				// Continue: policy update is not strictly required for the rotate
+				// itself; failures here are usually permission issues.
+			} else {
+				stats.policiesUpdated++
+			}
+
+			if err := vaultClient.TransitRotateKey(ctx, keyName); err != nil {
+				slog.Error("rotate failed", "error", err, "user_id", user.ID)
+				stats.errors++
+				continue
+			}
+		}
+		stats.usersRotated++
+
+		keys, err := store.ListKeys(ctx, user.ID)
+		if err != nil {
+			slog.Error("list keys failed", "error", err, "user_id", user.ID)
+			stats.errors++
+			continue
+		}
+
+		for _, key := range keys {
+			if key.EncryptedNsec == "" {
+				stats.keysSkippedEmpty++
+				continue
+			}
+			if !crypto.IsVaultEncrypted(key.EncryptedNsec) {
+				slog.Debug("skipping non-Vault-encrypted key",
+					"key_id", key.ID,
+					"encryption_method", key.EncryptionMethod,
+				)
+				stats.keysSkippedNon++
+				continue
+			}
+
+			if dryRun {
+				slog.Info("would rewrap key",
+					"key_id", key.ID,
+					"pubkey", truncatePubkey(key.Pubkey),
+				)
+				stats.keysRewrapped++
+				continue
+			}
+
+			newCiphertext, err := vaultClient.TransitRewrap(ctx, keyName, key.EncryptedNsec)
+			if err != nil {
+				slog.Error("rewrap failed", "error", err, "key_id", key.ID)
+				stats.errors++
+				continue
+			}
+
+			if err := store.UpdateKeyEncryption(ctx, key.ID, newCiphertext, "vault"); err != nil {
+				slog.Error("update key encryption failed", "error", err, "key_id", key.ID)
+				stats.errors++
+				continue
+			}
+
+			stats.keysRewrapped++
+			slog.Info("rewrapped key", "key_id", key.ID, "pubkey", truncatePubkey(key.Pubkey))
+		}
+	}
+
+	fmt.Println("\n=== Rotate Summary ===")
+	fmt.Printf("Users rotated:           %d\n", stats.usersRotated)
+	fmt.Printf("Policies updated:        %d\n", stats.policiesUpdated)
+	fmt.Printf("Keys rewrapped:          %d\n", stats.keysRewrapped)
+	fmt.Printf("Skipped (empty):         %d\n", stats.keysSkippedEmpty)
+	fmt.Printf("Skipped (non-Vault):     %d\n", stats.keysSkippedNon)
+	fmt.Printf("Errors:                  %d\n", stats.errors)
+	if dryRun {
+		fmt.Println("\n(Dry run - no changes made)")
+	}
+
+	if stats.errors > 0 {
+		return fmt.Errorf("%d errors during rotate", stats.errors)
+	}
+	return nil
 }

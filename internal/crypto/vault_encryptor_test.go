@@ -54,6 +54,41 @@ func mockVaultServer(t *testing.T) *httptest.Server {
 			return
 		}
 
+		// Transit rewrap - returns ciphertext bumped to a new version (v2)
+		// to simulate Vault re-encrypting under the current key version.
+		if strings.Contains(path, "/transit/rewrap/") && r.Method == http.MethodPost {
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+
+			ciphertext := payload["ciphertext"]
+			if !strings.HasPrefix(ciphertext, "vault:v") {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"errors": []string{"invalid ciphertext"},
+				})
+				return
+			}
+
+			// Strip the version prefix (e.g. "vault:v1:") and re-emit at v2 so
+			// the test can observe that a rewrap happened. Real Vault would do
+			// the actual cryptographic operation here.
+			rest := ciphertext
+			if idx := strings.Index(rest[len("vault:v"):], ":"); idx >= 0 {
+				rest = rest[len("vault:v")+idx+1:]
+			}
+
+			response := map[string]interface{}{
+				"data": map[string]interface{}{
+					"ciphertext": "vault:v2:" + rest,
+				},
+			}
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+
 		// Transit decrypt
 		if strings.Contains(path, "/transit/decrypt/") && r.Method == http.MethodPost {
 			var payload map[string]string
@@ -181,6 +216,56 @@ func TestVaultEncryptor_InvalidToken(t *testing.T) {
 	_, err := enc.Encrypt("test data")
 	if err == nil {
 		t.Error("Encrypt() should fail with invalid token")
+	}
+}
+
+func TestVaultEncryptor_Rewrap(t *testing.T) {
+	server := mockVaultServer(t)
+	defer server.Close()
+
+	client, err := vault.NewClient(&vault.Config{
+		Address: server.URL,
+		Token:   "service-token",
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	enc := NewVaultEncryptor(client, "user123", "user-token")
+
+	plaintext := "secret nsec material"
+	ciphertext, err := enc.Encrypt(plaintext)
+	if err != nil {
+		t.Fatalf("Encrypt() error = %v", err)
+	}
+	if !strings.HasPrefix(ciphertext, "vault:v1:") {
+		t.Fatalf("expected v1 ciphertext, got %s", ciphertext)
+	}
+
+	rewrapped, err := enc.Rewrap(ciphertext)
+	if err != nil {
+		t.Fatalf("Rewrap() error = %v", err)
+	}
+	if !strings.HasPrefix(rewrapped, "vault:v2:") {
+		t.Errorf("expected v2 ciphertext after rewrap, got %s", rewrapped)
+	}
+	if rewrapped == ciphertext {
+		t.Errorf("Rewrap() returned identical ciphertext; expected version bump")
+	}
+}
+
+func TestVaultEncryptor_RewrapInvalidToken(t *testing.T) {
+	server := mockVaultServer(t)
+	defer server.Close()
+
+	client, _ := vault.NewClient(&vault.Config{
+		Address: server.URL,
+		Token:   "service-token",
+	})
+
+	enc := NewVaultEncryptor(client, "user123", "invalid-token")
+	if _, err := enc.Rewrap("vault:v1:fake"); err == nil {
+		t.Error("Rewrap() should fail with invalid token")
 	}
 }
 
