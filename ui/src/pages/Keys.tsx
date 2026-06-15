@@ -165,6 +165,22 @@ function KeyCard({ keyData, onDelete }: { keyData: Key; onDelete: () => void }) 
     },
   });
 
+  const coverTrafficMutation = useMutation({
+    mutationFn: (next: boolean) =>
+      apiClient.updateKey(keyData.id, { cover_traffic: next }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['keys'] });
+    },
+  });
+
+  const torEgressMutation = useMutation({
+    mutationFn: (next: boolean) =>
+      apiClient.updateKey(keyData.id, { tor_egress: next }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['keys'] });
+    },
+  });
+
   const handleGetBunkerUrl = async () => {
     setBunkerError(null);
     setBunkerLoading(true);
@@ -264,6 +280,90 @@ function KeyCard({ keyData, onDelete }: { keyData: Key; onDelete: () => void }) 
             onChange={(e) => disposableMutation.mutate(e.target.checked)}
           />
           <span>{keyData.disposable_mode ? 'On' : 'Off'}</span>
+        </label>
+      </div>
+
+      <div
+        style={{
+          marginTop: '8px',
+          padding: '10px 12px',
+          background: 'var(--signer-bg)',
+          borderRadius: '6px',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '10px',
+          justifyContent: 'space-between',
+        }}
+      >
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 500, marginBottom: '2px' }}>
+            👻 Cover traffic
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--signer-text-muted, #888)' }}>
+            Signer emits ephemeral NIP-17 gift-wrap decoys to this key's
+            relays at randomized intervals so an observer cannot tell whether
+            you are online or idle.
+          </div>
+        </div>
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            cursor: coverTrafficMutation.isPending ? 'wait' : 'pointer',
+            opacity: coverTrafficMutation.isPending ? 0.6 : 1,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={!!keyData.cover_traffic}
+            disabled={coverTrafficMutation.isPending}
+            onChange={(e) => coverTrafficMutation.mutate(e.target.checked)}
+          />
+          <span>{keyData.cover_traffic ? 'On' : 'Off'}</span>
+        </label>
+      </div>
+
+      <div
+        style={{
+          marginTop: '8px',
+          padding: '10px 12px',
+          background: 'var(--signer-bg)',
+          borderRadius: '6px',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '10px',
+          justifyContent: 'space-between',
+        }}
+      >
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 500, marginBottom: '2px' }}>
+            🧅 Tor egress
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--signer-text-muted, #888)' }}>
+            Route outbound relay connections for this key through Tor. Flag
+            is plumbed end-to-end; runtime relay-client routing is pending
+            an upstream go-nostr change.
+          </div>
+        </div>
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            cursor: torEgressMutation.isPending ? 'wait' : 'pointer',
+            opacity: torEgressMutation.isPending ? 0.6 : 1,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={!!keyData.tor_egress}
+            disabled={torEgressMutation.isPending}
+            onChange={(e) => torEgressMutation.mutate(e.target.checked)}
+          />
+          <span>{keyData.tor_egress ? 'On' : 'Off'}</span>
         </label>
       </div>
 

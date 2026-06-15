@@ -45,12 +45,16 @@ export interface Key {
   permissions?: KeyPermissions;
   relays?: string[];
   disposable_mode?: boolean;
+  cover_traffic?: boolean;
+  tor_egress?: boolean;
 }
 
 export interface UpdateKeyRequest {
   name?: string;
   require_approval?: boolean;
   disposable_mode?: boolean;
+  cover_traffic?: boolean;
+  tor_egress?: boolean;
   relays?: string[];
 }
 
