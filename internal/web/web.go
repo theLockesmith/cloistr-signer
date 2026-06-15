@@ -941,11 +941,11 @@ func (h *Handler) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		expiresAt = now.Add(time.Duration(h.config.Auth.JWTExpiry) * time.Hour)
 	}
 
+	// Privacy-architecture §3.6: per-session IPs not retained.
 	session := &storage.UserSession{
 		ID:             sessionID,
 		UserID:         user.ID,
 		UserAgent:      r.UserAgent(),
-		IPAddress:      r.RemoteAddr,
 		RememberDevice: req.Remember,
 		LastActivity:   &now,
 		ExpiresAt:      expiresAt,
@@ -1069,11 +1069,11 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 		expiresAt = now.Add(time.Duration(h.config.Auth.JWTExpiry) * time.Hour)
 	}
 
+	// Privacy-architecture §3.6: per-session IPs not retained.
 	session := &storage.UserSession{
 		ID:             sessionID,
 		UserID:         user.ID,
 		UserAgent:      r.UserAgent(),
-		IPAddress:      r.RemoteAddr,
 		RememberDevice: req.Remember,
 		LastActivity:   &now,
 		ExpiresAt:      expiresAt,

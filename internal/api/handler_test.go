@@ -1886,6 +1886,56 @@ func TestHandleUserLogin_CreatesSession(t *testing.T) {
 	}
 }
 
+// TestHandleUserLogin_NoIPRetention verifies privacy-architecture §3.6:
+// login does not store the user's IP in either the user record (LastLoginIP)
+// or the session record (IPAddress). Even with a non-empty RemoteAddr on the
+// request, both fields are empty after login.
+func TestHandleUserLogin_NoIPRetention(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	hash, _ := auth.HashPassword("password123", auth.DefaultBcryptCost)
+	user := &storage.User{
+		ID:           "noip-test-user",
+		Username:     "noipuser",
+		PasswordHash: hash,
+		CreatedAt:    time.Now(),
+	}
+	store.CreateUser(ctx, user)
+
+	body := `{"username": "noipuser", "password": "password123"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "10.0.0.42:12345" // would have been captured before §3.6
+	rr := httptest.NewRecorder()
+
+	h.handleUserLogin(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("login failed: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	stored, err := store.GetUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if stored.LastLoginIP != "" {
+		t.Errorf("LastLoginIP should be empty after login, got %q", stored.LastLoginIP)
+	}
+
+	sessions, err := store.ListUserSessions(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("ListUserSessions: %v", err)
+	}
+	if len(sessions) == 0 {
+		t.Fatal("expected at least one session")
+	}
+	for _, s := range sessions {
+		if s.IPAddress != "" {
+			t.Errorf("session %s IPAddress should be empty, got %q", s.ID, s.IPAddress)
+		}
+	}
+}
+
 func TestHandleUserLogout_DeletesSessions(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()

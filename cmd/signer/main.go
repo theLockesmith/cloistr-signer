@@ -245,6 +245,36 @@ func main() {
 		}
 	}
 
+	// Periodic cleanup of expired storage records (privacy-architecture §3.6:
+	// retention sweep). Without this, expired sessions, requests, and bunker
+	// secrets accumulate indefinitely even though their expires_at has passed.
+	// Hourly cadence balances DB pressure against retention-window slack.
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if err := store.CleanExpiredSessions(cleanupCtx); err != nil {
+					slog.Warn("cleanup expired sessions failed", "error", err)
+				}
+				if err := store.CleanExpiredRequests(cleanupCtx); err != nil {
+					slog.Warn("cleanup expired requests failed", "error", err)
+				}
+				if err := store.CleanExpiredUserSessions(cleanupCtx); err != nil {
+					slog.Warn("cleanup expired user sessions failed", "error", err)
+				}
+				if err := store.CleanExpiredBunkerSecrets(cleanupCtx); err != nil {
+					slog.Warn("cleanup expired bunker secrets failed", "error", err)
+				}
+				cancel()
+			}
+		}
+	}()
+
 	// Send boot notification to admins (async)
 	go func() {
 		// Give relays a moment to connect

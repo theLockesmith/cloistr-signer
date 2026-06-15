@@ -1837,22 +1837,24 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create session (with Vault token if available)
+	// Privacy-architecture §3.6: we do not retain per-session or per-login IPs.
+	// IPAddress and LastLoginIP intentionally left empty; if/when we need
+	// session-location UX, it'll be derived from short-window encrypted
+	// telemetry the user can decrypt, not from operator-readable retention.
 	session := &storage.UserSession{
 		ID:         sessionID,
 		UserID:     user.ID,
 		Token:      token[:16], // Store prefix for revocation check
 		VaultToken: vaultToken, // Store Vault token for key operations
 		UserAgent:  r.UserAgent(),
-		IPAddress:  r.RemoteAddr,
 		ExpiresAt:  expiresAt,
 		CreatedAt:  time.Now(),
 	}
 	h.storage.CreateUserSession(r.Context(), session)
 
-	// Update last login
+	// Update last login. LastLoginIP intentionally not set (see above).
 	now := time.Now()
 	user.LastLoginAt = &now
-	user.LastLoginIP = r.RemoteAddr
 	h.storage.UpdateUser(r.Context(), user)
 
 	slog.Info("user logged in", "username", req.Username, "user_id", user.ID)
