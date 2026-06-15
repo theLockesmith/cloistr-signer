@@ -335,30 +335,34 @@ The following components are already implemented in the codebase. Future work co
 | TOTP MFA (enrollment + validation) | `internal/auth/auth.go` — `GenerateMFASecret`, `ValidateMFACode` | §3.1 (account-access gate) |
 | 10 backup codes (account-access path) | `internal/auth/auth.go` — `GenerateBackupCodes`, `DefaultBackupCodeCount = 10`, `ValidateBackupCode` | §3.1 (share-derivation extension still owed) |
 | Vault per-user transit encryption | `internal/vault/`, `internal/crypto/vault_encryptor.go` | §3.3 (current custody floor; FROST 2-of-N is the target above it) |
+| Vault transit key rotation + rewrap | `internal/vault/vault.go` — `TransitRotateKey`, `TransitRewrap`, `TransitRewrapWithToken`; CLI `cmd/migrate -rotate` | §3.7 (admin rotation + user-token rewrap path) |
 | FROST DKG (distributed, via Nostr ephemeral DMs) | `internal/frost/dkg_distributed.go`, `internal/frost/protocol.go`, `internal/frost/remote_signer.go` | §3.3 (most of the threshold scaffolding) |
 | FROST share import/export | `internal/frost/` | §3.3 |
+| Disposable-mode key flag (kind refusal + tag strip + jitter) | `storage.Key.DisposableMode`; `internal/signer/signer.go` gating in `handleSignEvent`, `handleBatchSign`, `handleNIP04Encrypt` | §3.5 |
+| Always-on signing jitter (0-50ms) + disposable extra jitter (0-150ms) | `internal/signer/signer.go` — `applyBaseJitter`, `applyDisposableJitter` | §3.5, §3.11 |
+| Cover-traffic emitter (ephemeral kind:1059 decoys) | `internal/signer/cover_traffic.go`; wired in `cmd/signer/main.go` | §3.11 (paid-tier behavior, opt-in per key via `CoverTraffic` flag) |
 | Per-key relay configuration, strict (no global fallback) | `internal/nostr/key_relay_manager.go`, `internal/discovery/selector.go` | §3.5, §3.10 |
+| Per-key NIP-46 subscriptions with per-key NIP-42 auth | `internal/signer/signer.go` subscription loop + `internal/nostr/key_relay_manager.go` | §3.10 (no signer-wide identity beacon; per-key isolation is the privacy unit today) |
 | NIP-46 bunker:// + nostrconnect:// | `internal/bunker/`, `internal/signer/` | §3.3, §3.10 |
 | HKDF-deterministic account pubkey | `internal/crypto/crypto.go` | §3.1 |
-| NIP-05 endpoint (`/.well-known/nostr.json`) | `internal/api/` | §3.1, §3.7 |
+| NIP-05 endpoint (`/.well-known/nostr.json`) — privacy-hardened | `internal/api/` — empty-name returns empty, disposable + unnamed keys excluded | §3.1, §3.10 |
+| `/api/v1/status` requires auth for full holdings | `internal/api/handler.go` | §3.10 (no anonymous count enumeration) |
+| Periodic cleanup of expired records (hourly sweep) | `cmd/signer/main.go` — janitor goroutine | §3.6 (bounded retention) |
+| No IP retention on login or session | `internal/api/handler.go`, `internal/web/web.go` — `r.RemoteAddr` no longer captured | §3.6 |
 | `KeyTypeProxy` (upstream signer chaining) | `internal/proxy/proxy.go`, `internal/storage/storage.go` | Distinct from disposable mode |
 | Admin DM commands | `internal/admin/admin.go` | Operational |
 | Vault-key restore on pod startup | `internal/api/handler.go` — `RestoreVaultKeysOnStartup` | §3.3 |
 | `nostr.json` and core API endpoints | `internal/api/` | §3.1 |
 
-**Greenfield work** (none of the below exists yet, sequenced in §4):
+**Greenfield work remaining** (sequenced in §4):
 
 - 24-word recovery phrase generation + UI flow
 - Backup-code extension to derive a FROST share (current implementation is account-access only)
 - FROST share rotation / refresh
 - Browser-side FROST share holder (WASM)
-- Disposable-mode key flag (§3.5) with kind-allowlist and metadata-strip
-- Vault rewrap automation (§3.7)
 - Onion endpoint + Cloudflare drop + nginx replacement stack
 - Tor egress per-key
-- NIP-17 gift-wrap default audit + enforcement
-- Metadata retention sweep
-- Cover traffic (jittered free, constant-rate paid)
+- Shared-TCP relay-connection pool (cost optimization; per-key NIP-46 session privacy is already met above)
 - Taproot-tweaked context keys
 - Selective-disclosure proofs
 - Continuity proofs
@@ -369,24 +373,24 @@ The following components are already implemented in the codebase. Future work co
 
 Each item is a defensible privacy claim on its own. Sequence is by ratio of privacy-delivered to engineering-effort.
 
-| # | Item | Effort | Privacy axis affected |
-|---|---|---|---|
-| 1 | Disposable-mode key flag with guardrails (3.5) | S | Unlinkability (behavioral) |
-| 2 | Vault rewrap (3.7) | S | Operator-coercion |
-| 3 | Drop Cloudflare; nginx + LE + fail2ban replacement | M | Pseudonymity, untraceability |
-| 4 | Onion endpoint live (3.2) | M | Pseudonymity |
-| 5 | Tor egress opt-in per key (3.10) | M | Untraceability |
-| 6 | NIP-17 default for DMs (3.12); audit current default | S | Untraceability |
-| 7 | Metadata retention sweep (3.6); strip linkable logs | M | All axes |
-| 8 | No-enumeration / no-presence-broadcast hardening (3.10) | S | Unobservability |
-| 9 | 10-code recovery + social recovery (3.1) | M | Pseudonymity |
-| 10 | Tier 2 Taproot-tweaked context keys (3.4) | L | Unlinkability (cryptographic) |
-| 11 | FROST 2-of-N custody, browser + signer (3.3) | XL | All axes; **the architectural inversion** |
-| 12 | Ephemeral relay tunnels (3.10) | M | Untraceability |
-| 13 | Cover traffic — jittered free, constant-rate paid (3.11) | M | Unobservability |
-| 14 | Selective-disclosure proofs (3.9) | XL | Credentialed authority |
-| 15 | Continuity proofs (3.8) | XL | Public-broadcast authorship |
-| 16 | Mobile-app share holder | XL | Multi-device custody |
+| # | Item | Effort | Privacy axis affected | Status |
+|---|---|---|---|---|
+| 1 | Disposable-mode key flag with guardrails (3.5) | S | Unlinkability (behavioral) | ✓ shipped |
+| 2 | Vault rewrap (3.7) | S | Operator-coercion | ✓ shipped |
+| 3 | Drop Cloudflare; nginx + LE + fail2ban replacement | M | Pseudonymity, untraceability | open (infrastructure) |
+| 4 | Onion endpoint live (3.2) | M | Pseudonymity | open (infrastructure) |
+| 5 | Tor egress opt-in per key (3.10) | M | Untraceability | open (infrastructure) |
+| 6 | NIP-17 default for DMs (3.12); audit current default | S | Untraceability | ✓ shipped (merged into #1 — disposable mode refuses NIP-04; non-disposable logs warning) |
+| 7 | Metadata retention sweep (3.6); strip linkable logs | M | All axes | ✓ shipped (IP retention removed; hourly cleanup of expired records added) |
+| 8 | No-enumeration / no-presence-broadcast hardening (3.10) | S | Unobservability | ✓ shipped (NIP-05 + /status hardened; per-key auth already met the rest) |
+| 9 | 10-code recovery + social recovery (3.1) | M | Pseudonymity | blocked on #11 — share recovery presupposes shares to recover |
+| 10 | Tier 2 Taproot-tweaked context keys (3.4) | L | Unlinkability (cryptographic) | open |
+| 11 | FROST 2-of-N custody, browser + signer (3.3) | XL | All axes; **the architectural inversion** | open |
+| 12 | Ephemeral relay tunnels (3.10) | M | Untraceability | ✓ privacy-met (per-key sub identity + per-key auth already enforced); shared-TCP cost optimization deferred |
+| 13 | Cover traffic — jittered free, constant-rate paid (3.11) | M | Unobservability | ✓ shipped (always-on signing jitter + opt-in `cover_traffic` flag with NIP-17-shaped decoy emitter) |
+| 14 | Selective-disclosure proofs (3.9) | XL | Credentialed authority | open |
+| 15 | Continuity proofs (3.8) | XL | Public-broadcast authorship | open |
+| 16 | Mobile-app share holder | XL | Multi-device custody | open |
 
 Items 1-9 are near-term hygiene. Item 11 is the architectural inversion that changes what we can claim. Items 14-15 are the headline features for the public-broadcast use case.
 
