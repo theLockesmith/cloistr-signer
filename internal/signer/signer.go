@@ -2,6 +2,7 @@ package signer
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -922,7 +923,7 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 		// Cloistr extension: sign multiple events in one request to reduce round-trips
 		return s.handleBatchSign(ctx, targetPubkey, privateKey, req.Params, perm)
 	case "nip04_encrypt":
-		return s.handleNIP04Encrypt(privateKey, req.Params)
+		return s.handleNIP04Encrypt(ctx, targetPubkey, privateKey, req.Params)
 	case "nip04_decrypt":
 		return s.handleNIP04Decrypt(privateKey, req.Params)
 	case "nip44_encrypt":
@@ -1073,7 +1074,7 @@ func (s *Signer) handleInternalProxy(ctx context.Context, upstreamPubkey, upstre
 	case "sign_event":
 		return s.handleSignEvent(ctx, upstreamPubkey, upstreamPrivkey, req.Params, perm)
 	case "nip04_encrypt":
-		return s.handleNIP04Encrypt(upstreamPrivkey, req.Params)
+		return s.handleNIP04Encrypt(ctx, upstreamPubkey, upstreamPrivkey, req.Params)
 	case "nip04_decrypt":
 		return s.handleNIP04Decrypt(upstreamPrivkey, req.Params)
 	case "nip44_encrypt":
@@ -1185,6 +1186,60 @@ func (s *Signer) getUpstreamPubkey(ctx context.Context, targetPubkey, privateKey
 	return conn.GetPublicKey(ctx)
 }
 
+// disposableKindRefusal maps event kinds that disposable-mode keys refuse to sign.
+// Kind 0 (profile metadata), 3 (contact list), 10002 (relay list metadata) trivially
+// link a disposable identity to the operator: a disposable npub posting the same
+// profile, following the same contacts, or pinning the same relay set as the master
+// re-correlates them. Kind 4 (NIP-04 DM) names the recipient in cleartext via a
+// `p` tag; refused in favor of NIP-17 gift-wrap (kind:1059 with NIP-44-encrypted
+// inner) which hides the recipient.
+var disposableKindRefusal = map[int]string{
+	0:     "disposable-mode key refuses kind:0 (profile metadata reveals identity)",
+	3:     "disposable-mode key refuses kind:3 (contact list reveals social graph)",
+	10002: "disposable-mode key refuses kind:10002 (relay list metadata reveals relay set)",
+	4:     "disposable-mode key refuses kind:4 (NIP-04 leaks recipient via p-tag); use NIP-17 (kind:1059) for stronger metadata privacy",
+}
+
+// keyIsDisposable returns true if the key with the given pubkey has DisposableMode
+// set. Graceful: returns false on lookup error so signing proceeds normally if the
+// key cannot be loaded (consistent with the existing graceful-degradation pattern
+// elsewhere in this file).
+func (s *Signer) keyIsDisposable(ctx context.Context, targetPubkey string) bool {
+	key, err := s.storage.GetKeyByPubkey(ctx, targetPubkey)
+	if err != nil || key == nil {
+		return false
+	}
+	return key.DisposableMode
+}
+
+// stripFingerprintTags removes tags that fingerprint the signing software. Called
+// for events signed by disposable-mode keys to defeat cross-identity correlation
+// via signer-software tells.
+func stripFingerprintTags(event *nostr.Event) {
+	filtered := event.Tags[:0]
+	for _, tag := range event.Tags {
+		if len(tag) > 0 && tag[0] == "client" {
+			continue
+		}
+		filtered = append(filtered, tag)
+	}
+	event.Tags = filtered
+}
+
+// applyDisposableJitter introduces a short random response delay for disposable-mode
+// keys to break per-request timing correlation between the disposable identity and
+// the master identity. 0-150ms window: small enough to be human-imperceptible,
+// large enough to obscure sub-millisecond timing tells.
+func applyDisposableJitter() {
+	const maxJitterMs = 150
+	var b [2]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return
+	}
+	n := (int(b[0])<<8 | int(b[1])) % maxJitterMs
+	time.Sleep(time.Duration(n) * time.Millisecond)
+}
+
 func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey string, params []string, perm *storage.Permission) (string, error) {
 	if len(params) < 1 {
 		return "", errors.New("missing event parameter")
@@ -1207,6 +1262,18 @@ func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey s
 		if !allowed {
 			return "", fmt.Errorf("kind %d not allowed", event.Kind)
 		}
+	}
+
+	disposable := s.keyIsDisposable(ctx, targetPubkey)
+	if disposable {
+		if reason, blocked := disposableKindRefusal[event.Kind]; blocked {
+			return "", errors.New(reason)
+		}
+		stripFingerprintTags(&event)
+		defer applyDisposableJitter()
+	} else if event.Kind == 4 {
+		slog.Warn("kind:4 (NIP-04 DM) signed on non-disposable key; consider NIP-17 (kind:1059) for stronger metadata privacy",
+			"key_pubkey", targetPubkey[:16]+"...")
 	}
 
 	// Set pubkey and sign
@@ -1239,6 +1306,11 @@ func (s *Signer) handleBatchSign(ctx context.Context, targetPubkey, privateKey s
 
 	signedEvents := make([]json.RawMessage, 0, len(params))
 
+	disposable := s.keyIsDisposable(ctx, targetPubkey)
+	if disposable {
+		defer applyDisposableJitter()
+	}
+
 	for i, param := range params {
 		var event nostr.Event
 		if err := json.Unmarshal([]byte(param), &event); err != nil {
@@ -1257,6 +1329,17 @@ func (s *Signer) handleBatchSign(ctx context.Context, targetPubkey, privateKey s
 			if !allowed {
 				return "", fmt.Errorf("kind %d not allowed at index %d", event.Kind, i)
 			}
+		}
+
+		if disposable {
+			if reason, blocked := disposableKindRefusal[event.Kind]; blocked {
+				return "", fmt.Errorf("event at index %d: %s", i, reason)
+			}
+			stripFingerprintTags(&event)
+		} else if event.Kind == 4 {
+			slog.Warn("kind:4 (NIP-04 DM) signed on non-disposable key in batch; consider NIP-17 (kind:1059) for stronger metadata privacy",
+				"key_pubkey", targetPubkey[:16]+"...",
+				"index", i)
 		}
 
 		// Set pubkey and sign
@@ -1285,10 +1368,17 @@ func (s *Signer) handleBatchSign(ctx context.Context, targetPubkey, privateKey s
 	return string(result), nil
 }
 
-func (s *Signer) handleNIP04Encrypt(privateKey string, params []string) (string, error) {
+func (s *Signer) handleNIP04Encrypt(ctx context.Context, targetPubkey, privateKey string, params []string) (string, error) {
 	if len(params) < 2 {
 		return "", errors.New("missing parameters (need pubkey and plaintext)")
 	}
+
+	if s.keyIsDisposable(ctx, targetPubkey) {
+		return "", errors.New("disposable-mode key refuses nip04_encrypt (NIP-04 leaks recipient via p-tag); use nip44_encrypt with NIP-17 gift-wrap instead")
+	}
+
+	slog.Warn("nip04_encrypt called; consider nip44_encrypt with NIP-17 gift-wrap for stronger metadata privacy",
+		"key_pubkey", targetPubkey[:16]+"...")
 
 	thirdPartyPubkey := params[0]
 	plaintext := params[1]

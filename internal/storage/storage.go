@@ -51,6 +51,7 @@ type Key struct {
 	BunkerURI        string    `json:"-"`                 // For proxy keys: bunker:// URI to upstream signer
 	UpstreamPubkey   string    `json:"upstream_pubkey,omitempty"` // For proxy keys: pubkey of the upstream signer
 	RequireApproval  bool      `json:"require_approval"`  // If true, requests need manual approval
+	DisposableMode   bool      `json:"disposable_mode"`   // If true, signer enforces privacy guardrails: refuses identity-linking kinds (0/3/10002), refuses NIP-04 encrypt, strips client tags, jitters response timing
 	Relays           []string  `json:"relays,omitempty"`  // Custom relays for this key (nil = use global config)
 	RelayMode        string    `json:"relay_mode,omitempty"` // Relay selection: "auto", "manual", "discovery"
 	CreatedAt        time.Time `json:"created_at"`
