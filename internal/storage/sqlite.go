@@ -99,6 +99,7 @@ func (ss *SQLiteStorage) initSchema() error {
 		require_approval INTEGER NOT NULL DEFAULT 0,
 		disposable_mode INTEGER NOT NULL DEFAULT 0,
 		cover_traffic INTEGER NOT NULL DEFAULT 0,
+		tor_egress INTEGER NOT NULL DEFAULT 0,
 		relays TEXT,  -- JSON array
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		created_by TEXT,
@@ -325,11 +326,11 @@ func (ss *SQLiteStorage) CreateKey(ctx context.Context, key *Key) error {
 	}
 
 	_, err := ss.db.ExecContext(ctx, `
-		INSERT INTO signer_keys (id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, relays, created_at, created_by, owner_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO signer_keys (id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		key.ID, nullStr(key.Name), key.Pubkey, keyType, nullStr(key.EncryptedNsec), encryptionMethod,
 		nullStr(key.BunkerURI), nullStr(key.UpstreamPubkey), boolToInt(key.RequireApproval),
-		boolToInt(key.DisposableMode), boolToInt(key.CoverTraffic),
+		boolToInt(key.DisposableMode), boolToInt(key.CoverTraffic), boolToInt(key.TorEgress),
 		stringsToJSONArray(key.Relays), formatTime(key.CreatedAt), nullStr(key.CreatedBy), nullStr(key.OwnerID))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -343,13 +344,13 @@ func (ss *SQLiteStorage) CreateKey(ctx context.Context, key *Key) error {
 func (ss *SQLiteStorage) GetKey(ctx context.Context, id string) (*Key, error) {
 	key := &Key{}
 	var name, encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerID, relays, createdAt, createdBy sql.NullString
-	var requireApproval, disposableMode, coverTraffic int
+	var requireApproval, disposableMode, coverTraffic, torEgress int
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
 		FROM signer_keys WHERE id = ?`, id).
 		Scan(&key.ID, &name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &relays, &createdAt, &createdBy, &ownerID)
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -389,6 +390,7 @@ func (ss *SQLiteStorage) GetKey(ctx context.Context, id string) (*Key, error) {
 	key.RequireApproval = requireApproval != 0
 	key.DisposableMode = disposableMode != 0
 	key.CoverTraffic = coverTraffic != 0
+	key.TorEgress = torEgress != 0
 
 	return key, nil
 }
@@ -396,13 +398,13 @@ func (ss *SQLiteStorage) GetKey(ctx context.Context, id string) (*Key, error) {
 func (ss *SQLiteStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*Key, error) {
 	key := &Key{}
 	var name, encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerID, relays, createdAt, createdBy sql.NullString
-	var requireApproval, disposableMode, coverTraffic int
+	var requireApproval, disposableMode, coverTraffic, torEgress int
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
 		FROM signer_keys WHERE pubkey = ?`, pubkey).
 		Scan(&key.ID, &name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &relays, &createdAt, &createdBy, &ownerID)
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -442,6 +444,7 @@ func (ss *SQLiteStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*Ke
 	key.RequireApproval = requireApproval != 0
 	key.DisposableMode = disposableMode != 0
 	key.CoverTraffic = coverTraffic != 0
+	key.TorEgress = torEgress != 0
 
 	return key, nil
 }
@@ -449,13 +452,13 @@ func (ss *SQLiteStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*Ke
 func (ss *SQLiteStorage) GetKeyByName(ctx context.Context, name string) (*Key, error) {
 	key := &Key{}
 	var keyName, encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerID, relays, createdAt, createdBy sql.NullString
-	var requireApproval, disposableMode, coverTraffic int
+	var requireApproval, disposableMode, coverTraffic, torEgress int
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
 		FROM signer_keys WHERE name = ?`, name).
 		Scan(&key.ID, &keyName, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &relays, &createdAt, &createdBy, &ownerID)
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -495,13 +498,14 @@ func (ss *SQLiteStorage) GetKeyByName(ctx context.Context, name string) (*Key, e
 	key.RequireApproval = requireApproval != 0
 	key.DisposableMode = disposableMode != 0
 	key.CoverTraffic = coverTraffic != 0
+	key.TorEgress = torEgress != 0
 
 	return key, nil
 }
 
 func (ss *SQLiteStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key, error) {
 	rows, err := ss.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
 		FROM signer_keys WHERE owner_id = ? ORDER BY created_at DESC`, ownerID)
 	if err != nil {
 		return nil, err
@@ -513,7 +517,7 @@ func (ss *SQLiteStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key, 
 
 func (ss *SQLiteStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 	rows, err := ss.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
 		FROM signer_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -528,10 +532,10 @@ func (ss *SQLiteStorage) scanKeys(rows *sql.Rows) ([]*Key, error) {
 	for rows.Next() {
 		key := &Key{}
 		var name, encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerID, relays, createdAt, createdBy sql.NullString
-		var requireApproval, disposableMode, coverTraffic int
+		var requireApproval, disposableMode, coverTraffic, torEgress int
 
 		if err := rows.Scan(&key.ID, &name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &relays, &createdAt, &createdBy, &ownerID); err != nil {
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID); err != nil {
 			return nil, err
 		}
 
@@ -567,6 +571,7 @@ func (ss *SQLiteStorage) scanKeys(rows *sql.Rows) ([]*Key, error) {
 		key.RequireApproval = requireApproval != 0
 		key.DisposableMode = disposableMode != 0
 	key.CoverTraffic = coverTraffic != 0
+	key.TorEgress = torEgress != 0
 
 		keys = append(keys, key)
 	}
@@ -575,10 +580,10 @@ func (ss *SQLiteStorage) scanKeys(rows *sql.Rows) ([]*Key, error) {
 
 func (ss *SQLiteStorage) UpdateKey(ctx context.Context, key *Key) error {
 	result, err := ss.db.ExecContext(ctx, `
-		UPDATE signer_keys SET name = ?, require_approval = ?, disposable_mode = ?, cover_traffic = ?, relays = ?,
+		UPDATE signer_keys SET name = ?, require_approval = ?, disposable_mode = ?, cover_traffic = ?, tor_egress = ?, relays = ?,
 			key_type = ?, bunker_uri = ?, upstream_pubkey = ?
 		WHERE id = ?`,
-		nullStr(key.Name), boolToInt(key.RequireApproval), boolToInt(key.DisposableMode), boolToInt(key.CoverTraffic), stringsToJSONArray(key.Relays),
+		nullStr(key.Name), boolToInt(key.RequireApproval), boolToInt(key.DisposableMode), boolToInt(key.CoverTraffic), boolToInt(key.TorEgress), stringsToJSONArray(key.Relays),
 		key.KeyType, nullStr(key.BunkerURI), nullStr(key.UpstreamPubkey), key.ID)
 	if err != nil {
 		return err

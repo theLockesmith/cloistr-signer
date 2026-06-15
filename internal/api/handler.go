@@ -223,6 +223,7 @@ type KeyResponse struct {
 	RequireApproval bool      `json:"require_approval"`
 	DisposableMode  bool      `json:"disposable_mode"`
 	CoverTraffic    bool      `json:"cover_traffic"`
+	TorEgress       bool      `json:"tor_egress"`
 	Relays          []string  `json:"relays,omitempty"` // Custom relays for this key
 	CreatedAt       time.Time `json:"created_at"`
 }
@@ -323,6 +324,7 @@ func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
 			RequireApproval: key.RequireApproval,
 		DisposableMode:  key.DisposableMode,
 		CoverTraffic:    key.CoverTraffic,
+		TorEgress:       key.TorEgress,
 			Relays:          key.Relays,
 			CreatedAt:       key.CreatedAt,
 		}
@@ -445,6 +447,7 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		RequireApproval: key.RequireApproval,
 		DisposableMode:  key.DisposableMode,
 		CoverTraffic:    key.CoverTraffic,
+		TorEgress:       key.TorEgress,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 	})
@@ -545,6 +548,7 @@ func (h *Handler) handleCreateProxyKey(w http.ResponseWriter, r *http.Request, r
 		RequireApproval: key.RequireApproval,
 		DisposableMode:  key.DisposableMode,
 		CoverTraffic:    key.CoverTraffic,
+		TorEgress:       key.TorEgress,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 	})
@@ -583,6 +587,7 @@ func (h *Handler) handleGetKey(w http.ResponseWriter, r *http.Request, id string
 		RequireApproval: key.RequireApproval,
 		DisposableMode:  key.DisposableMode,
 		CoverTraffic:    key.CoverTraffic,
+		TorEgress:       key.TorEgress,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 	})
@@ -593,6 +598,7 @@ type UpdateKeyRequest struct {
 	RequireApproval *bool    `json:"require_approval,omitempty"`
 	DisposableMode  *bool    `json:"disposable_mode,omitempty"`
 	CoverTraffic    *bool    `json:"cover_traffic,omitempty"`
+	TorEgress       *bool    `json:"tor_egress,omitempty"`
 	Relays          []string `json:"relays,omitempty"` // Custom relays for this key (empty = use global config)
 }
 
@@ -640,6 +646,9 @@ func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id str
 	if req.CoverTraffic != nil {
 		key.CoverTraffic = *req.CoverTraffic
 	}
+	if req.TorEgress != nil {
+		key.TorEgress = *req.TorEgress
+	}
 	if req.Relays != nil {
 		key.Relays = req.Relays
 	}
@@ -659,6 +668,7 @@ func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id str
 		RequireApproval: key.RequireApproval,
 		DisposableMode:  key.DisposableMode,
 		CoverTraffic:    key.CoverTraffic,
+		TorEgress:       key.TorEgress,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 	})

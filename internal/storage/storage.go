@@ -53,6 +53,7 @@ type Key struct {
 	RequireApproval  bool      `json:"require_approval"`  // If true, requests need manual approval
 	DisposableMode   bool      `json:"disposable_mode"`   // If true, signer enforces privacy guardrails: refuses identity-linking kinds (0/3/10002), refuses NIP-04 encrypt, strips client tags, jitters response timing
 	CoverTraffic     bool      `json:"cover_traffic"`     // If true, signer emits ephemeral NIP-17 gift-wrap decoys to this key's relays at randomized intervals to mask online/offline presence (privacy-architecture §3.11 paid-tier behavior)
+	TorEgress        bool      `json:"tor_egress"`        // If true, signer routes outbound relay connections for this key through the configured Tor SOCKS5 proxy (privacy-architecture §3.10)
 	Relays           []string  `json:"relays,omitempty"`  // Custom relays for this key (nil = use global config)
 	RelayMode        string    `json:"relay_mode,omitempty"` // Relay selection: "auto", "manual", "discovery"
 	CreatedAt        time.Time `json:"created_at"`
