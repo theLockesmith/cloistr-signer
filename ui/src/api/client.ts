@@ -11,6 +11,7 @@ import type {
   CreateKeyRequest,
   ImportKeyRequest,
   KeyPermissions,
+  UpdateKeyRequest,
   PendingRequest,
   App,
   FrostKey,
@@ -121,6 +122,13 @@ class ApiClient {
     return this.fetch(`/keys/${id}/permissions`, {
       method: 'PUT',
       body: JSON.stringify(permissions),
+    });
+  }
+
+  async updateKey(id: string, fields: UpdateKeyRequest): Promise<Key> {
+    return this.fetch(`/keys/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(fields),
     });
   }
 

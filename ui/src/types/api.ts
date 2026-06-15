@@ -44,6 +44,14 @@ export interface Key {
   last_used?: string;
   permissions?: KeyPermissions;
   relays?: string[];
+  disposable_mode?: boolean;
+}
+
+export interface UpdateKeyRequest {
+  name?: string;
+  require_approval?: boolean;
+  disposable_mode?: boolean;
+  relays?: string[];
 }
 
 export interface KeyPermissions {

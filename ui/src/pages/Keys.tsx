@@ -145,11 +145,25 @@ function DeleteKeyModal({
 }
 
 function KeyCard({ keyData, onDelete }: { keyData: Key; onDelete: () => void }) {
+  const queryClient = useQueryClient();
   const [showBunkerUrl, setShowBunkerUrl] = useState(false);
   const [bunkerUrl, setBunkerUrl] = useState<string | null>(null);
   const [bunkerError, setBunkerError] = useState<string | null>(null);
   const [bunkerLoading, setBunkerLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [disposableError, setDisposableError] = useState<string | null>(null);
+
+  const disposableMutation = useMutation({
+    mutationFn: (next: boolean) =>
+      apiClient.updateKey(keyData.id, { disposable_mode: next }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['keys'] });
+      setDisposableError(null);
+    },
+    onError: (err) => {
+      setDisposableError(err instanceof Error ? err.message : 'Failed to update');
+    },
+  });
 
   const handleGetBunkerUrl = async () => {
     setBunkerError(null);
@@ -205,6 +219,52 @@ function KeyCard({ keyData, onDelete }: { keyData: Key; onDelete: () => void }) 
           {keyData.is_active ? '✅ Active' : '⏸️ Inactive'}
         </span>
         {keyData.nip05 && <span>📧 {keyData.nip05}</span>}
+        {keyData.disposable_mode && <span title="Privacy guardrails enforced: refuses identity-linking kinds (0/3/10002), refuses NIP-04 DMs, strips client tags, jitters timing">🛡️ Disposable</span>}
+      </div>
+
+      <div
+        style={{
+          marginTop: '12px',
+          padding: '10px 12px',
+          background: 'var(--signer-bg)',
+          borderRadius: '6px',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '10px',
+          justifyContent: 'space-between',
+        }}
+      >
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 500, marginBottom: '2px' }}>
+            🛡️ Disposable mode
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--signer-text-muted, #888)' }}>
+            Refuses kind:0/3/10002 (profile, contacts, relay list) and NIP-04 DMs.
+            Strips client fingerprint tags. Jitters response timing. Cryptography is
+            necessary but not sufficient — behavioral hygiene is up to you.
+          </div>
+          {disposableError && (
+            <div className="auth-error" style={{ marginTop: '8px' }}>{disposableError}</div>
+          )}
+        </div>
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            cursor: disposableMutation.isPending ? 'wait' : 'pointer',
+            opacity: disposableMutation.isPending ? 0.6 : 1,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={!!keyData.disposable_mode}
+            disabled={disposableMutation.isPending}
+            onChange={(e) => disposableMutation.mutate(e.target.checked)}
+          />
+          <span>{keyData.disposable_mode ? 'On' : 'Off'}</span>
+        </label>
       </div>
 
       {showBunkerUrl && bunkerError && (

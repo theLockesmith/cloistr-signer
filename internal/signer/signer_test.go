@@ -3,6 +3,8 @@ package signer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -442,6 +444,116 @@ func TestSigner_handleSignEvent_AllowedKinds(t *testing.T) {
 			t.Error("handleSignEvent() should return error for invalid JSON")
 		}
 	})
+}
+
+func TestSigner_handleSignEvent_DisposableMode(t *testing.T) {
+	store := storage.NewMemoryStorage()
+	signer := New(&config.Config{}, store, nil, nil, nil, nil, nil)
+	ctx := context.Background()
+
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	privateKey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	signer.RegisterKey(pubkey, privateKey)
+
+	// Register a disposable-mode key in storage so keyIsDisposable() returns true
+	if err := store.CreateKey(ctx, &storage.Key{
+		ID:             "disposable-test-key",
+		Pubkey:         pubkey,
+		KeyType:        storage.KeyTypeLocal,
+		DisposableMode: true,
+	}); err != nil {
+		t.Fatalf("CreateKey() error = %v", err)
+	}
+
+	perm := &storage.Permission{Methods: []string{"sign_event"}}
+
+	refusedKinds := []int{0, 3, 10002, 4}
+	for _, kind := range refusedKinds {
+		t.Run(fmt.Sprintf("refuses kind %d", kind), func(t *testing.T) {
+			eventJSON := fmt.Sprintf(`{"kind":%d,"content":"x","tags":[],"created_at":1234567890}`, kind)
+			_, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{eventJSON}, perm)
+			if err == nil {
+				t.Errorf("handleSignEvent() kind:%d should be refused on disposable-mode key", kind)
+			}
+		})
+	}
+
+	t.Run("allows kind 1 (regular note)", func(t *testing.T) {
+		eventJSON := `{"kind":1,"content":"hello","tags":[],"created_at":1234567890}`
+		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{eventJSON}, perm)
+		if err != nil {
+			t.Errorf("handleSignEvent() kind:1 should be allowed on disposable-mode key, got %v", err)
+		}
+	})
+
+	t.Run("strips client fingerprint tag", func(t *testing.T) {
+		eventJSON := `{"kind":1,"content":"hello","tags":[["client","damus"],["t","nostr"]],"created_at":1234567890}`
+		result, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{eventJSON}, perm)
+		if err != nil {
+			t.Fatalf("handleSignEvent() error = %v", err)
+		}
+		// Result is JSON-encoded signed event; the client tag must not appear.
+		if strings.Contains(result, `"client"`) {
+			t.Errorf("handleSignEvent() did not strip client tag from disposable-mode signed event; got %s", result)
+		}
+		// Other tags should survive.
+		if !strings.Contains(result, `"nostr"`) {
+			t.Errorf("handleSignEvent() unexpectedly stripped non-fingerprint tags; got %s", result)
+		}
+	})
+}
+
+func TestSigner_handleSignEvent_NonDisposableAllowsAll(t *testing.T) {
+	// Control: a non-disposable key signs identity-linking kinds without refusal.
+	store := storage.NewMemoryStorage()
+	signer := New(&config.Config{}, store, nil, nil, nil, nil, nil)
+	ctx := context.Background()
+
+	pubkey := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	privateKey := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	signer.RegisterKey(pubkey, privateKey)
+	if err := store.CreateKey(ctx, &storage.Key{
+		ID:             "non-disposable-key",
+		Pubkey:         pubkey,
+		KeyType:        storage.KeyTypeLocal,
+		DisposableMode: false,
+	}); err != nil {
+		t.Fatalf("CreateKey() error = %v", err)
+	}
+
+	perm := &storage.Permission{Methods: []string{"sign_event"}}
+	for _, kind := range []int{0, 3, 10002, 4} {
+		t.Run(fmt.Sprintf("allows kind %d", kind), func(t *testing.T) {
+			eventJSON := fmt.Sprintf(`{"kind":%d,"content":"x","tags":[],"created_at":1234567890}`, kind)
+			if _, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{eventJSON}, perm); err != nil {
+				t.Errorf("handleSignEvent() kind:%d on non-disposable key should succeed, got %v", kind, err)
+			}
+		})
+	}
+}
+
+func TestSigner_handleNIP04Encrypt_DisposableMode(t *testing.T) {
+	store := storage.NewMemoryStorage()
+	signer := New(&config.Config{}, store, nil, nil, nil, nil, nil)
+	ctx := context.Background()
+
+	pubkey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	privateKey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	signer.RegisterKey(pubkey, privateKey)
+	if err := store.CreateKey(ctx, &storage.Key{
+		ID:             "disposable-nip04-key",
+		Pubkey:         pubkey,
+		KeyType:        storage.KeyTypeLocal,
+		DisposableMode: true,
+	}); err != nil {
+		t.Fatalf("CreateKey() error = %v", err)
+	}
+
+	otherPubkey := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	_, err := signer.handleNIP04Encrypt(ctx, pubkey, privateKey, []string{otherPubkey, "secret message"})
+	if err == nil {
+		t.Error("handleNIP04Encrypt() should refuse on disposable-mode key")
+	}
 }
 
 func TestSigner_handleBatchSign(t *testing.T) {
