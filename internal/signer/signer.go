@@ -1231,12 +1231,32 @@ func stripFingerprintTags(event *nostr.Event) {
 // the master identity. 0-150ms window: small enough to be human-imperceptible,
 // large enough to obscure sub-millisecond timing tells.
 func applyDisposableJitter() {
-	const maxJitterMs = 150
+	jitterUpTo(150)
+}
+
+// applyBaseJitter is the always-on signing-time jitter for every key
+// (privacy-architecture §3.11 free-tier behavior). 0-50ms window: small enough
+// that fast UX is preserved, large enough that a relay observer cannot
+// trivially decide whether "user X signed at 14:32:07.103" was a key-press
+// response or a scheduled task. Disposable-mode keys get an additional
+// applyDisposableJitter() call on top of this for stronger timing privacy.
+func applyBaseJitter() {
+	jitterUpTo(50)
+}
+
+// jitterUpTo sleeps a uniformly random duration in [0, maxMs) milliseconds.
+// On crypto/rand failure, returns immediately without sleeping (privacy-positive
+// graceful degradation: better to sign promptly than to fail-closed and break
+// signing for an entropy hiccup).
+func jitterUpTo(maxMs int) {
+	if maxMs <= 0 {
+		return
+	}
 	var b [2]byte
 	if _, err := cryptorand.Read(b[:]); err != nil {
 		return
 	}
-	n := (int(b[0])<<8 | int(b[1])) % maxJitterMs
+	n := (int(b[0])<<8 | int(b[1])) % maxMs
 	time.Sleep(time.Duration(n) * time.Millisecond)
 }
 
@@ -1265,6 +1285,7 @@ func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey s
 	}
 
 	disposable := s.keyIsDisposable(ctx, targetPubkey)
+	defer applyBaseJitter()
 	if disposable {
 		if reason, blocked := disposableKindRefusal[event.Kind]; blocked {
 			return "", errors.New(reason)
@@ -1307,6 +1328,7 @@ func (s *Signer) handleBatchSign(ctx context.Context, targetPubkey, privateKey s
 	signedEvents := make([]json.RawMessage, 0, len(params))
 
 	disposable := s.keyIsDisposable(ctx, targetPubkey)
+	defer applyBaseJitter()
 	if disposable {
 		defer applyDisposableJitter()
 	}

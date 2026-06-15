@@ -92,6 +92,9 @@ func (ps *PostgresStorage) migrate() error {
 	-- Add disposable_mode column for privacy guardrails (Phase: Privacy Architecture §3.5)
 	ALTER TABLE signer_keys ADD COLUMN IF NOT EXISTS disposable_mode BOOLEAN NOT NULL DEFAULT FALSE;
 
+	-- Add cover_traffic column for presence-masking decoys (Phase: Privacy Architecture §3.11)
+	ALTER TABLE signer_keys ADD COLUMN IF NOT EXISTS cover_traffic BOOLEAN NOT NULL DEFAULT FALSE;
+
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_pubkey ON signer_keys(pubkey);
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_name ON signer_keys(name);
 
@@ -327,10 +330,10 @@ func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) 
 	key := &Key{}
 	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, relays, created_at, created_by, owner_id
 		FROM signer_keys WHERE id = $1`, id).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -359,10 +362,10 @@ func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*
 	key := &Key{}
 	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, relays, created_at, created_by, owner_id
 		FROM signer_keys WHERE pubkey = $1`, pubkey).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -391,10 +394,10 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 	key := &Key{}
 	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, relays, created_at, created_by, owner_id
 		FROM signer_keys WHERE name = $1`, name).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -421,7 +424,7 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 
 func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, relays, created_at, created_by, owner_id, encryption_method
+		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, relays, created_at, created_by, owner_id, encryption_method
 		FROM signer_keys WHERE owner_id = $1 ORDER BY created_at DESC`, ownerID)
 	if err != nil {
 		return nil, err
@@ -433,7 +436,7 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key
 		key := &Key{}
 		var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull, encryptionMethod sql.NullString
 		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod); err != nil {
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod); err != nil {
 			return nil, err
 		}
 		if encryptedNsec.Valid {
@@ -460,7 +463,7 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key
 
 func (ps *PostgresStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, relays, created_at, created_by, owner_id, encryption_method
+		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, relays, created_at, created_by, owner_id, encryption_method
 		FROM signer_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -472,7 +475,7 @@ func (ps *PostgresStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 		key := &Key{}
 		var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull, encryptionMethod sql.NullString
 		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod); err != nil {
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod); err != nil {
 			return nil, err
 		}
 		if encryptedNsec.Valid {
@@ -499,10 +502,10 @@ func (ps *PostgresStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 
 func (ps *PostgresStorage) UpdateKey(ctx context.Context, key *Key) error {
 	result, err := ps.db.ExecContext(ctx, `
-		UPDATE signer_keys SET name = $1, require_approval = $2, disposable_mode = $3, relays = $4,
-			key_type = $5, bunker_uri = $6, upstream_pubkey = $7
-		WHERE id = $8`,
-		key.Name, key.RequireApproval, key.DisposableMode, pq.Array(key.Relays),
+		UPDATE signer_keys SET name = $1, require_approval = $2, disposable_mode = $3, cover_traffic = $4, relays = $5,
+			key_type = $6, bunker_uri = $7, upstream_pubkey = $8
+		WHERE id = $9`,
+		key.Name, key.RequireApproval, key.DisposableMode, key.CoverTraffic, pq.Array(key.Relays),
 		key.KeyType, nullString(key.BunkerURI), nullString(key.UpstreamPubkey), key.ID)
 	if err != nil {
 		return err

@@ -222,6 +222,7 @@ type KeyResponse struct {
 	UpstreamPubkey  string    `json:"upstream_pubkey,omitempty"`  // For proxy keys
 	RequireApproval bool      `json:"require_approval"`
 	DisposableMode  bool      `json:"disposable_mode"`
+	CoverTraffic    bool      `json:"cover_traffic"`
 	Relays          []string  `json:"relays,omitempty"` // Custom relays for this key
 	CreatedAt       time.Time `json:"created_at"`
 }
@@ -321,6 +322,7 @@ func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
 			UpstreamPubkey:  key.UpstreamPubkey,
 			RequireApproval: key.RequireApproval,
 		DisposableMode:  key.DisposableMode,
+		CoverTraffic:    key.CoverTraffic,
 			Relays:          key.Relays,
 			CreatedAt:       key.CreatedAt,
 		}
@@ -442,6 +444,7 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		KeyType:         key.KeyType,
 		RequireApproval: key.RequireApproval,
 		DisposableMode:  key.DisposableMode,
+		CoverTraffic:    key.CoverTraffic,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 	})
@@ -541,6 +544,7 @@ func (h *Handler) handleCreateProxyKey(w http.ResponseWriter, r *http.Request, r
 		UpstreamPubkey:  key.UpstreamPubkey,
 		RequireApproval: key.RequireApproval,
 		DisposableMode:  key.DisposableMode,
+		CoverTraffic:    key.CoverTraffic,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 	})
@@ -578,6 +582,7 @@ func (h *Handler) handleGetKey(w http.ResponseWriter, r *http.Request, id string
 		UpstreamPubkey:  key.UpstreamPubkey,
 		RequireApproval: key.RequireApproval,
 		DisposableMode:  key.DisposableMode,
+		CoverTraffic:    key.CoverTraffic,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 	})
@@ -587,6 +592,7 @@ type UpdateKeyRequest struct {
 	Name            *string  `json:"name,omitempty"`
 	RequireApproval *bool    `json:"require_approval,omitempty"`
 	DisposableMode  *bool    `json:"disposable_mode,omitempty"`
+	CoverTraffic    *bool    `json:"cover_traffic,omitempty"`
 	Relays          []string `json:"relays,omitempty"` // Custom relays for this key (empty = use global config)
 }
 
@@ -631,6 +637,9 @@ func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id str
 	if req.DisposableMode != nil {
 		key.DisposableMode = *req.DisposableMode
 	}
+	if req.CoverTraffic != nil {
+		key.CoverTraffic = *req.CoverTraffic
+	}
 	if req.Relays != nil {
 		key.Relays = req.Relays
 	}
@@ -649,6 +658,7 @@ func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id str
 		Pubkey:          key.Pubkey,
 		RequireApproval: key.RequireApproval,
 		DisposableMode:  key.DisposableMode,
+		CoverTraffic:    key.CoverTraffic,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 	})
