@@ -2418,6 +2418,14 @@ func (h *Handler) handleStatus(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	// Status exposes keys_loaded count and connected_relays. Privacy-architecture
+	// §3.10 forbids unauthenticated enumeration of signer holdings, so require
+	// auth: unauthenticated callers get a minimal "alive" response that doesn't
+	// leak counts or relay identities. Use /health for unauthenticated probes.
+	if _, err := h.validateAuthHeader(r); err != nil {
+		h.jsonResponse(w, http.StatusOK, map[string]interface{}{"ok": true})
+		return
+	}
 	status := h.signer.GetStatus()
 	h.jsonResponse(w, http.StatusOK, status)
 }
@@ -2691,7 +2699,23 @@ func (h *Handler) handleNIP05(w http.ResponseWriter, r *http.Request) {
 		Relays: make(map[string][]string),
 	}
 
-	// Get all keys and create name mappings (NIP-05 is public discovery)
+	// Privacy hardening (privacy-architecture §3.10):
+	// - Reject empty name queries. NIP-05 clients always query a specific
+	//   name; the bulk-list form leaks the full set of users on this signer
+	//   to anyone who can fetch /.well-known/nostr.json.
+	// - Skip disposable-mode keys. Disposable keys are explicitly off the
+	//   public discovery channel; surfacing them via NIP-05 would defeat
+	//   their purpose.
+	// - Skip keys with no user-set name. Falling back to the random key ID
+	//   used to enumerate every key here, even unnamed ones. A key is only
+	//   discoverable via NIP-05 if the owner named it.
+	if name == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+
 	keys, err := h.storage.ListAllKeys(r.Context())
 	if err != nil {
 		h.jsonResponse(w, http.StatusOK, response)
@@ -2699,22 +2723,25 @@ func (h *Handler) handleNIP05(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, key := range keys {
-		keyName := key.Name
-		if keyName == "" {
-			keyName = key.ID
+		if key.DisposableMode {
+			continue
+		}
+		if key.Name == "" {
+			continue
 		}
 		// Sanitize name for NIP-05 (lowercase, no spaces)
-		keyName = strings.ToLower(strings.ReplaceAll(keyName, " ", "-"))
-
-		if name == "" || name == keyName {
-			response.Names[keyName] = key.Pubkey
-			// Use key-specific relays if configured, otherwise fall back to global config
-			relays := key.Relays
-			if len(relays) == 0 {
-				relays = h.config.Relays
-			}
-			response.Relays[key.Pubkey] = relays
+		keyName := strings.ToLower(strings.ReplaceAll(key.Name, " ", "-"))
+		if name != keyName {
+			continue
 		}
+
+		response.Names[keyName] = key.Pubkey
+		// Use key-specific relays if configured, otherwise fall back to global config
+		relays := key.Relays
+		if len(relays) == 0 {
+			relays = h.config.Relays
+		}
+		response.Relays[key.Pubkey] = relays
 	}
 
 	w.Header().Set("Content-Type", "application/json")

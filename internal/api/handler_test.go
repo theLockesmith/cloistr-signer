@@ -1134,41 +1134,137 @@ func TestHandleNIP05(t *testing.T) {
 	}
 }
 
-func TestHandleNIP05_AllNames(t *testing.T) {
+// TestHandleStatus_RequiresAuthForFullStatus verifies that the /api/v1/status
+// endpoint hides keys_loaded/connected_relays from unauthenticated callers
+// (privacy-architecture §3.10) but still serves them to authenticated users
+// for monitoring purposes.
+func TestHandleStatus_RequiresAuthForFullStatus(t *testing.T) {
+	h, _ := testHandler(t)
+
+	t.Run("unauthenticated returns minimal status", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+		rr := httptest.NewRecorder()
+		h.handleStatus(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200", rr.Code)
+		}
+		var resp map[string]interface{}
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, leaks := resp["keys_loaded"]; leaks {
+			t.Errorf("unauthenticated status response leaks keys_loaded")
+		}
+		if _, leaks := resp["connected_relays"]; leaks {
+			t.Errorf("unauthenticated status response leaks connected_relays")
+		}
+		if resp["ok"] != true {
+			t.Errorf("unauthenticated status response should be {ok: true}, got %v", resp)
+		}
+	})
+
+	t.Run("authenticated returns full status", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+		addAuthHeader(t, h, req)
+		rr := httptest.NewRecorder()
+		h.handleStatus(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200", rr.Code)
+		}
+		var resp map[string]interface{}
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, present := resp["keys_loaded"]; !present {
+			t.Errorf("authenticated status response missing keys_loaded")
+		}
+	})
+}
+
+// TestHandleNIP05_PrivacyHardening covers privacy-architecture §3.10:
+// NIP-05 no longer enumerates the full key set on empty name queries,
+// disposable-mode keys are excluded entirely, and unnamed keys (which
+// previously surfaced under their random ID) are not surfaced.
+func TestHandleNIP05_PrivacyHardening(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	// Create multiple keys
 	store.CreateKey(ctx, &storage.Key{
-		ID:        "key1",
+		ID:        "key-bob",
 		Name:      "bob",
 		Pubkey:    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		CreatedAt: time.Now(),
 	})
 	store.CreateKey(ctx, &storage.Key{
-		ID:        "key2",
+		ID:        "key-carol",
 		Name:      "carol",
 		Pubkey:    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 		CreatedAt: time.Now(),
 	})
+	store.CreateKey(ctx, &storage.Key{
+		ID:             "key-disposable",
+		Name:           "ghost",
+		Pubkey:         "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		DisposableMode: true,
+		CreatedAt:      time.Now(),
+	})
+	store.CreateKey(ctx, &storage.Key{
+		ID:        "key-unnamed",
+		Name:      "",
+		Pubkey:    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		CreatedAt: time.Now(),
+	})
 
-	req := httptest.NewRequest(http.MethodGet, "/.well-known/nostr.json", nil)
-	rr := httptest.NewRecorder()
-
-	h.handleNIP05(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("handleNIP05() status = %d, want %d", rr.Code, http.StatusOK)
+	decode := func(rr *httptest.ResponseRecorder) NIP05Response {
+		t.Helper()
+		var resp NIP05Response
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp
 	}
 
-	var resp NIP05Response
-	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
+	t.Run("empty name returns empty (no enumeration)", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/nostr.json", nil)
+		rr := httptest.NewRecorder()
+		h.handleNIP05(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Errorf("status = %d, want 200", rr.Code)
+		}
+		if len(decode(rr).Names) != 0 {
+			t.Errorf("empty-name query should return zero names")
+		}
+	})
 
-	if len(resp.Names) != 2 {
-		t.Errorf("expected 2 names, got %d", len(resp.Names))
-	}
+	t.Run("specific name returns that name", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/nostr.json?name=bob", nil)
+		rr := httptest.NewRecorder()
+		h.handleNIP05(rr, req)
+		resp := decode(rr)
+		if got := resp.Names["bob"]; got != "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" {
+			t.Errorf("bob lookup pubkey mismatch; got %q", got)
+		}
+	})
+
+	t.Run("disposable-mode key is invisible to NIP-05", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/nostr.json?name=ghost", nil)
+		rr := httptest.NewRecorder()
+		h.handleNIP05(rr, req)
+		if len(decode(rr).Names) != 0 {
+			t.Errorf("disposable-mode key 'ghost' should not appear in NIP-05")
+		}
+	})
+
+	t.Run("unnamed key is invisible to NIP-05", func(t *testing.T) {
+		// Previously the random key ID was used as a fallback name; that
+		// surfaced every unnamed key. Now unnamed keys are excluded.
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/nostr.json?name=key-unnamed", nil)
+		rr := httptest.NewRecorder()
+		h.handleNIP05(rr, req)
+		if len(decode(rr).Names) != 0 {
+			t.Errorf("unnamed key should not appear in NIP-05 under its ID")
+		}
+	})
 }
 
 // Audit logs test
