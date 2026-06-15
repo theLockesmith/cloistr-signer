@@ -275,6 +275,13 @@ func main() {
 		}
 	}()
 
+	// Cover-traffic emitter (privacy-architecture §3.11): publishes ephemeral
+	// NIP-17-shaped decoys to relays of keys with cover_traffic enabled, on a
+	// randomized 15-30 minute cadence. Decoys are signed by one-time-use
+	// ephemeral keys, never by user signing material.
+	coverEmitter := signer.NewCoverTrafficEmitter(store, relayClient)
+	go coverEmitter.Run(ctx)
+
 	// Send boot notification to admins (async)
 	go func() {
 		// Give relays a moment to connect
