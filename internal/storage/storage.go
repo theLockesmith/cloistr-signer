@@ -36,8 +36,9 @@ var (
 
 // KeyType represents the type of key storage
 const (
-	KeyTypeLocal = "local" // Key is stored locally (has EncryptedNsec)
-	KeyTypeProxy = "proxy" // Key is proxied to upstream signer (has BunkerURI)
+	KeyTypeLocal     = "local"      // Key is stored locally (has EncryptedNsec)
+	KeyTypeProxy     = "proxy"      // Key is proxied to upstream signer (has BunkerURI)
+	KeyTypeFrostUser = "frost-user" // Key is FROST 2-of-N: signer holds one share, user device(s) hold the others. No full nsec exists anywhere. See docs/frost-2-of-n-design.md.
 )
 
 // Key represents a stored signing key
@@ -232,6 +233,36 @@ type FrostKey struct {
 	OwnerID            string    `json:"owner_id,omitempty"`   // User who owns this FROST key (for per-user encryption)
 }
 
+// FrostUserShare is the signer-side share of a 2-of-N user-cosigner FROST
+// identity. Distinct from FrostShare (which is for signer-to-signer DKG).
+// One row per Key with KeyType == KeyTypeFrostUser. See
+// docs/frost-2-of-n-design.md §3.1 for the storage shape and §3.3 for the
+// share derivation.
+//
+// EncryptedShare is the signer's share scalar encrypted via the user's
+// Vault transit key. The signer cannot decrypt without the user's Vault
+// token (live session), and the share alone is useless without the user
+// device's share - that's the "We Cannot Comply" inversion.
+//
+// VerificationShare is public material used to verify a user device's
+// partial signature before combining. Safe to store unencrypted.
+//
+// RotationGeneration increments on share refresh (privacy-architecture
+// §3.7 + FROST design §6.3). Lets the signer detect stale shares.
+type FrostUserShare struct {
+	ID                 string    `json:"id"`
+	KeyID              string    `json:"key_id"`              // FK to Key.ID
+	OwnerID            string    `json:"owner_id"`            // User who owns this identity (denormalized from Key for fast lookup)
+	ShareIndex         int       `json:"share_index"`         // Signer's participant index (usually 2 for 2-of-N)
+	EncryptedShare     []byte    `json:"-"`                   // Signer's share scalar, Vault-encrypted
+	VerificationShare  []byte    `json:"-"`                   // Public verification material for partial-sig validation
+	Threshold          int       `json:"threshold"`           // t in t-of-n (2 in the v1 design)
+	TotalShares        int       `json:"total_shares"`        // n in t-of-n (>= 2; grows when user adds devices)
+	RotationGeneration int       `json:"rotation_generation"` // Increments on share refresh
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
 // FrostShare represents a single share of a FROST key
 // Shares can be local (stored encrypted) or remote (held by another signer)
 type FrostShare struct {
@@ -353,6 +384,16 @@ type Storage interface {
 	ListLocalFrostShares(ctx context.Context, keyID string) ([]*FrostShare, error)
 	DeleteFrostShare(ctx context.Context, id string) error
 
+	// FROST 2-of-N user-cosigner share management (docs/frost-2-of-n-design.md).
+	// One signer-held share per FROST-user Key; UpdateFrostUserShare is used
+	// for share refresh / rotation.
+	CreateFrostUserShare(ctx context.Context, share *FrostUserShare) error
+	GetFrostUserShare(ctx context.Context, id string) (*FrostUserShare, error)
+	GetFrostUserShareByKeyID(ctx context.Context, keyID string) (*FrostUserShare, error)
+	ListFrostUserSharesByOwner(ctx context.Context, ownerID string) ([]*FrostUserShare, error)
+	UpdateFrostUserShare(ctx context.Context, share *FrostUserShare) error
+	DeleteFrostUserShare(ctx context.Context, id string) error
+
 	// Lifecycle
 	Close() error
 }
@@ -406,6 +447,8 @@ type MemoryStorage struct {
 	frostKeysByPubkey  map[string]*FrostKey             // pubkey -> FrostKey
 	frostShares        map[string]*FrostShare           // id -> FrostShare
 	frostSharesByKey   map[string]map[int]*FrostShare   // keyID -> index -> FrostShare
+	frostUserShares    map[string]*FrostUserShare       // id -> FrostUserShare
+	frostUserShareByKey map[string]*FrostUserShare      // key_id -> FrostUserShare (one signer-held share per key)
 }
 
 // NewMemoryStorage creates a new in-memory storage
@@ -432,6 +475,8 @@ func NewMemoryStorage() *MemoryStorage {
 		frostKeysByPubkey:  make(map[string]*FrostKey),
 		frostShares:        make(map[string]*FrostShare),
 		frostSharesByKey:   make(map[string]map[int]*FrostShare),
+		frostUserShares:    make(map[string]*FrostUserShare),
+		frostUserShareByKey: make(map[string]*FrostUserShare),
 	}
 }
 
@@ -1397,6 +1442,8 @@ func (m *MemoryStorage) SetSetting(ctx context.Context, key, value string) error
 
 var ErrFrostKeyNotFound = errors.New("frost key not found")
 var ErrFrostShareNotFound = errors.New("frost share not found")
+var ErrFrostUserShareNotFound = errors.New("frost user share not found")
+var ErrFrostUserShareExists = errors.New("frost user share already exists for this key")
 
 func (m *MemoryStorage) CreateFrostKey(ctx context.Context, key *FrostKey) error {
 	m.mu.Lock()
@@ -1574,6 +1621,97 @@ func (m *MemoryStorage) DeleteFrostShare(ctx context.Context, id string) error {
 	if shares, exists := m.frostSharesByKey[share.FrostKeyID]; exists {
 		delete(shares, share.ShareIndex)
 	}
+	return nil
+}
+
+// FROST 2-of-N user-cosigner share management (in-memory backend).
+
+func (m *MemoryStorage) CreateFrostUserShare(ctx context.Context, share *FrostUserShare) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.frostUserShares[share.ID]; exists {
+		return ErrFrostUserShareExists
+	}
+	if _, exists := m.frostUserShareByKey[share.KeyID]; exists {
+		return ErrFrostUserShareExists
+	}
+
+	now := time.Now()
+	if share.CreatedAt.IsZero() {
+		share.CreatedAt = now
+	}
+	share.UpdatedAt = now
+
+	m.frostUserShares[share.ID] = share
+	m.frostUserShareByKey[share.KeyID] = share
+	return nil
+}
+
+func (m *MemoryStorage) GetFrostUserShare(ctx context.Context, id string) (*FrostUserShare, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	share, exists := m.frostUserShares[id]
+	if !exists {
+		return nil, ErrFrostUserShareNotFound
+	}
+	return share, nil
+}
+
+func (m *MemoryStorage) GetFrostUserShareByKeyID(ctx context.Context, keyID string) (*FrostUserShare, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	share, exists := m.frostUserShareByKey[keyID]
+	if !exists {
+		return nil, ErrFrostUserShareNotFound
+	}
+	return share, nil
+}
+
+func (m *MemoryStorage) ListFrostUserSharesByOwner(ctx context.Context, ownerID string) ([]*FrostUserShare, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]*FrostUserShare, 0)
+	for _, share := range m.frostUserShares {
+		if share.OwnerID == ownerID {
+			result = append(result, share)
+		}
+	}
+	return result, nil
+}
+
+func (m *MemoryStorage) UpdateFrostUserShare(ctx context.Context, share *FrostUserShare) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	existing, exists := m.frostUserShares[share.ID]
+	if !exists {
+		return ErrFrostUserShareNotFound
+	}
+
+	// Preserve CreatedAt; refresh UpdatedAt.
+	share.CreatedAt = existing.CreatedAt
+	share.UpdatedAt = time.Now()
+
+	m.frostUserShares[share.ID] = share
+	m.frostUserShareByKey[share.KeyID] = share
+	return nil
+}
+
+func (m *MemoryStorage) DeleteFrostUserShare(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	share, exists := m.frostUserShares[id]
+	if !exists {
+		return ErrFrostUserShareNotFound
+	}
+
+	delete(m.frostUserShares, id)
+	delete(m.frostUserShareByKey, share.KeyID)
 	return nil
 }
 

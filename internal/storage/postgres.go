@@ -287,6 +287,23 @@ func (ps *PostgresStorage) migrate() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_signer_frost_shares_key ON signer_frost_shares(frost_key_id);
+
+	-- FROST 2-of-N user-cosigner shares. One signer-held share per FROST-user Key.
+	-- See docs/frost-2-of-n-design.md §3.1.
+	CREATE TABLE IF NOT EXISTS signer_frost_user_shares (
+		id                  TEXT PRIMARY KEY,
+		key_id              TEXT NOT NULL UNIQUE REFERENCES signer_keys(id) ON DELETE CASCADE,
+		owner_id            TEXT NOT NULL,
+		share_index         INTEGER NOT NULL,
+		encrypted_share     BYTEA NOT NULL,
+		verification_share  BYTEA NOT NULL,
+		threshold           INTEGER NOT NULL,
+		total_shares        INTEGER NOT NULL,
+		rotation_generation INTEGER NOT NULL DEFAULT 0,
+		created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_frost_user_shares_owner ON signer_frost_user_shares(owner_id);
 	`
 
 	_, err := ps.db.Exec(schema)
@@ -2117,6 +2134,132 @@ func (ps *PostgresStorage) DeleteFrostShare(ctx context.Context, id string) erro
 	}
 	if rows == 0 {
 		return ErrFrostShareNotFound
+	}
+	return nil
+}
+
+// FROST 2-of-N user-cosigner share CRUD (docs/frost-2-of-n-design.md §3.1).
+
+func (ps *PostgresStorage) CreateFrostUserShare(ctx context.Context, share *FrostUserShare) error {
+	now := time.Now()
+	if share.CreatedAt.IsZero() {
+		share.CreatedAt = now
+	}
+	share.UpdatedAt = now
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO signer_frost_user_shares
+			(id, key_id, owner_id, share_index, encrypted_share, verification_share,
+			 threshold, total_shares, rotation_generation, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		share.ID, share.KeyID, share.OwnerID, share.ShareIndex,
+		share.EncryptedShare, share.VerificationShare,
+		share.Threshold, share.TotalShares, share.RotationGeneration,
+		share.CreatedAt, share.UpdatedAt)
+	if err != nil {
+		if isDuplicateError(err) {
+			return ErrFrostUserShareExists
+		}
+		return err
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) GetFrostUserShare(ctx context.Context, id string) (*FrostUserShare, error) {
+	share := &FrostUserShare{}
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, key_id, owner_id, share_index, encrypted_share, verification_share,
+			threshold, total_shares, rotation_generation, created_at, updated_at
+		FROM signer_frost_user_shares WHERE id = $1`, id).
+		Scan(&share.ID, &share.KeyID, &share.OwnerID, &share.ShareIndex,
+			&share.EncryptedShare, &share.VerificationShare,
+			&share.Threshold, &share.TotalShares, &share.RotationGeneration,
+			&share.CreatedAt, &share.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrFrostUserShareNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return share, nil
+}
+
+func (ps *PostgresStorage) GetFrostUserShareByKeyID(ctx context.Context, keyID string) (*FrostUserShare, error) {
+	share := &FrostUserShare{}
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, key_id, owner_id, share_index, encrypted_share, verification_share,
+			threshold, total_shares, rotation_generation, created_at, updated_at
+		FROM signer_frost_user_shares WHERE key_id = $1`, keyID).
+		Scan(&share.ID, &share.KeyID, &share.OwnerID, &share.ShareIndex,
+			&share.EncryptedShare, &share.VerificationShare,
+			&share.Threshold, &share.TotalShares, &share.RotationGeneration,
+			&share.CreatedAt, &share.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrFrostUserShareNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return share, nil
+}
+
+func (ps *PostgresStorage) ListFrostUserSharesByOwner(ctx context.Context, ownerID string) ([]*FrostUserShare, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, key_id, owner_id, share_index, encrypted_share, verification_share,
+			threshold, total_shares, rotation_generation, created_at, updated_at
+		FROM signer_frost_user_shares WHERE owner_id = $1 ORDER BY created_at DESC`, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var shares []*FrostUserShare
+	for rows.Next() {
+		share := &FrostUserShare{}
+		if err := rows.Scan(&share.ID, &share.KeyID, &share.OwnerID, &share.ShareIndex,
+			&share.EncryptedShare, &share.VerificationShare,
+			&share.Threshold, &share.TotalShares, &share.RotationGeneration,
+			&share.CreatedAt, &share.UpdatedAt); err != nil {
+			return nil, err
+		}
+		shares = append(shares, share)
+	}
+	return shares, rows.Err()
+}
+
+func (ps *PostgresStorage) UpdateFrostUserShare(ctx context.Context, share *FrostUserShare) error {
+	share.UpdatedAt = time.Now()
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE signer_frost_user_shares SET
+			share_index = $1, encrypted_share = $2, verification_share = $3,
+			threshold = $4, total_shares = $5, rotation_generation = $6, updated_at = $7
+		WHERE id = $8`,
+		share.ShareIndex, share.EncryptedShare, share.VerificationShare,
+		share.Threshold, share.TotalShares, share.RotationGeneration,
+		share.UpdatedAt, share.ID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrFrostUserShareNotFound
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) DeleteFrostUserShare(ctx context.Context, id string) error {
+	result, err := ps.db.ExecContext(ctx, `DELETE FROM signer_frost_user_shares WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrFrostUserShareNotFound
 	}
 	return nil
 }
