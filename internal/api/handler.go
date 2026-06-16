@@ -37,6 +37,7 @@ type Handler struct {
 	frostKeyGen      *frost.KeyGenerator
 	distributedDKG   *frost.DistributedDKG
 	remoteSigner     *frost.RemoteSigner
+	userDKG          *frost.UserDKG // FROST 2-of-N user-cosigner DKG (docs/frost-2-of-n-design.md)
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -80,6 +81,7 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 		vaultClient:      vaultClient,
 		frostCoordinator: frostCoord,
 		frostKeyGen:      frostKG,
+		userDKG:          frost.NewUserDKG(),
 	}
 }
 
@@ -154,6 +156,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// FROST distributed DKG
 	mux.HandleFunc("/api/v1/frost/dkg", h.handleFrostDKG)
 	mux.HandleFunc("/api/v1/frost/dkg/", h.handleFrostDKGByID)
+
+	// FROST 2-of-N user-cosigner DKG (docs/frost-2-of-n-design.md §4.2)
+	mux.HandleFunc("/api/v1/frost/user-dkg/round1", h.handleFrostUserDKGRound1)
+	mux.HandleFunc("/api/v1/frost/user-dkg/round2", h.handleFrostUserDKGRound2)
+	mux.HandleFunc("/api/v1/frost/user-dkg/finalize", h.handleFrostUserDKGFinalize)
 }
 
 // Health check response
