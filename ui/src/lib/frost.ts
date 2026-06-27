@@ -21,6 +21,11 @@
 //     pubkey: the user has already computed it from the same inputs.
 
 import apiClient from '../api/client';
+import {
+  storeShare,
+  isShareStorageUnlocked,
+  FrostStorageLockedError,
+} from './frostStorage';
 
 // Static-relative import of the wasm-pack output. Vite resolves the JS
 // wrapper at build time; the .wasm binary is loaded at runtime via the
@@ -88,6 +93,13 @@ interface UserDkgStatePayload {
  * Caller must hold an authenticated session (apiClient.setToken).
  */
 export async function createFrostKey(): Promise<CreatedFrostKey> {
+  // Fail fast if the KEK is locked. Otherwise we'd run the full ceremony,
+  // build the final share, then discover at storeShare time that we
+  // can't persist it - losing the share material.
+  if (!isShareStorageUnlocked()) {
+    throw new FrostStorageLockedError();
+  }
+
   await initWasm();
 
   const initial = generate_user_dkg_state() as UserDkgStatePayload;
@@ -155,6 +167,17 @@ export async function createFrostKey(): Promise<CreatedFrostKey> {
     if (!fin.key_id || !fin.pubkey) {
       throw new Error('signer finalize response missing key_id or pubkey');
     }
+
+    // Persist the user share to IndexedDB, encrypted under the
+    // password-derived KEK. After this returns, the share survives
+    // page reloads on this device. Lose the device or clear IndexedDB
+    // and recovery is via the BIP39 phrase (P3e).
+    await storeShare({
+      keyId: fin.key_id,
+      pubkey: fin.pubkey,
+      finalShareHex: userFinalShareHex,
+      verificationShareHex: userVerificationShareHex,
+    });
 
     return {
       keyId: fin.key_id,

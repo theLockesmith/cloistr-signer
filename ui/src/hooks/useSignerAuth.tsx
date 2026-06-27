@@ -22,6 +22,7 @@ import {
 } from 'react';
 import { useNostrAuth } from '@cloistr/collab-common';
 import apiClient from '../api/client';
+import { unlockShareStorage, lockShareStorage } from '../lib/frostStorage';
 import type { User, LoginRequest, RegisterRequest } from '../types/api';
 
 // ============================================
@@ -126,6 +127,15 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     try {
       const response = await apiClient.login(data);
       saveAuthState(response.token, response.expires_at, response.user);
+      // Derive the FROST-share KEK from the password the user just typed.
+      // The KEK lives in module-scoped memory only; the password is
+      // forgotten after derivation. Failure here is non-fatal for login
+      // (a user without FROST keys never notices); we log + continue.
+      try {
+        await unlockShareStorage(data.password, response.user.id);
+      } catch (unlockErr) {
+        console.warn('FROST share storage unlock failed', unlockErr);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Login failed';
       setError(message);
@@ -142,6 +152,14 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     try {
       const response = await apiClient.register(data);
       saveAuthState(response.token, response.expires_at, response.user);
+      // Same KEK-derivation as loginWithPassword. The fresh user's
+      // IndexedDB has no shares yet, but generating the salt now means
+      // the first storeShare() call is faster.
+      try {
+        await unlockShareStorage(data.password, response.user.id);
+      } catch (unlockErr) {
+        console.warn('FROST share storage unlock failed', unlockErr);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Registration failed';
       setError(message);
@@ -157,6 +175,9 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     } catch {
       // Ignore logout errors
     }
+    // Drop the KEK from memory BEFORE clearing auth state. Order matters:
+    // a malicious logout race could otherwise still see the KEK active.
+    lockShareStorage();
     clearAuthState();
   }, [clearAuthState]);
 

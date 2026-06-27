@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiClient from '../api/client';
 import { createFrostKey } from '../lib/frost';
+import { listShareIds, isShareStorageUnlocked } from '../lib/frostStorage';
 import type { Key, CreateKeyRequest } from '../types/api';
 
 export function KeysPage() {
@@ -14,6 +15,17 @@ export function KeysPage() {
     queryKey: ['keys'],
     queryFn: () => apiClient.listKeys(),
   });
+
+  // Which FROST keys have a local share stored on this device? Loaded
+  // once and refetched when the keys list changes. Empty Set means no
+  // FROST shares stored here (or the user logged in via a path that
+  // didn't unlock the KEK).
+  const { data: localShareIds } = useQuery({
+    queryKey: ['frost-local-shares', keys?.length ?? 0],
+    queryFn: async () => new Set(await listShareIds()),
+  });
+
+  const storageUnlocked = isShareStorageUnlocked();
 
   const createMutation = useMutation({
     mutationFn: (data: CreateKeyRequest) => apiClient.createKey(data),
@@ -79,10 +91,10 @@ export function KeysPage() {
             <code style={{ wordBreak: 'break-all' }}>{frostResult.pubkey}</code>
           </div>
           <div style={{ fontSize: '12px', color: 'var(--signer-text-muted, #888)' }}>
-            The signer cannot sign with this key without this browser participating.
-            Heads-up: share storage in IndexedDB is wired up in a follow-up phase;
-            currently the user share lives only in this tab's memory and is lost on
-            reload.
+            The signer cannot sign with this key without this browser
+            participating. Your share is stored in this browser's IndexedDB,
+            encrypted under a key derived from your password (PBKDF2 + AES-GCM).
+            Lose this device and recovery is via your BIP39 phrase.
           </div>
           <button
             className="btn btn-secondary"
@@ -91,6 +103,13 @@ export function KeysPage() {
           >
             Dismiss
           </button>
+        </div>
+      )}
+
+      {keys && keys.some((k) => k.key_type === 'frost-user') && !storageUnlocked && (
+        <div className="auth-error" style={{ marginBottom: '16px' }}>
+          You have FROST keys, but this session can't decrypt their shares.
+          Log out and log back in with your password to unlock them.
         </div>
       )}
 
@@ -104,6 +123,9 @@ export function KeysPage() {
             <KeyCard
               key={key.id}
               keyData={key}
+              hasLocalShare={
+                key.key_type === 'frost-user' && (localShareIds?.has(key.id) ?? false)
+              }
               onDelete={() => setKeyToDelete(key)}
             />
           ))}
@@ -200,7 +222,7 @@ function DeleteKeyModal({
   );
 }
 
-function KeyCard({ keyData, onDelete }: { keyData: Key; onDelete: () => void }) {
+function KeyCard({ keyData, hasLocalShare, onDelete }: { keyData: Key; hasLocalShare: boolean; onDelete: () => void }) {
   const queryClient = useQueryClient();
   const [showBunkerUrl, setShowBunkerUrl] = useState(false);
   const [bunkerUrl, setBunkerUrl] = useState<string | null>(null);
@@ -285,13 +307,22 @@ function KeyCard({ keyData, onDelete }: { keyData: Key; onDelete: () => void }) 
 
       <div className="key-meta">
         <span>
-          {keyData.is_proxy ? '🔀 Proxy Key' : '🔑 Local Key'}
+          {keyData.key_type === 'frost-user'
+            ? '🛡️ FROST 2-of-N'
+            : keyData.is_proxy
+              ? '🔀 Proxy Key'
+              : '🔑 Local Key'}
         </span>
         <span>
           {keyData.is_active ? '✅ Active' : '⏸️ Inactive'}
         </span>
         {keyData.nip05 && <span>📧 {keyData.nip05}</span>}
         {keyData.disposable_mode && <span title="Privacy guardrails enforced: refuses identity-linking kinds (0/3/10002), refuses NIP-04 DMs, strips client tags, jitters timing">🛡️ Disposable</span>}
+        {keyData.key_type === 'frost-user' && (
+          hasLocalShare
+            ? <span title="Your FROST share is stored on this device (encrypted in IndexedDB).">✓ share on this device</span>
+            : <span title="This FROST key has no share on this device. Sign in on a device that has your share, or recover via your BIP39 phrase.">⚠️ no share on this device</span>
+        )}
       </div>
 
       <div

@@ -47,6 +47,10 @@ export interface Key {
   disposable_mode?: boolean;
   cover_traffic?: boolean;
   tor_egress?: boolean;
+  /** Key custody type. "frost-user" means the signer holds only a share
+   * and signing requires this browser to cosign. See
+   * docs/frost-2-of-n-design.md. */
+  key_type?: 'local' | 'proxy' | 'frost-user';
 }
 
 export interface UpdateKeyRequest {
