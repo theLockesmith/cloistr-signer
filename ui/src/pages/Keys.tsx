@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiClient from '../api/client';
+import { createFrostKey } from '../lib/frost';
 import type { Key, CreateKeyRequest } from '../types/api';
 
 export function KeysPage() {
   const queryClient = useQueryClient();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [keyToDelete, setKeyToDelete] = useState<Key | null>(null);
+  const [frostResult, setFrostResult] = useState<{ pubkey: string } | null>(null);
 
   const { data: keys, isLoading } = useQuery({
     queryKey: ['keys'],
@@ -29,14 +31,68 @@ export function KeysPage() {
     },
   });
 
+  // FROST 2-of-N user-cosigner key creation. Runs the full 3-round DKG
+  // against the signer endpoints; the signer ends up with one share and
+  // the browser ends up with the other. The aggregated final share is
+  // currently held only in this mutation's success result -- P3d wraps
+  // it with a password-derived KEK and persists to IndexedDB.
+  const frostMutation = useMutation({
+    mutationFn: () => createFrostKey(),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['keys'] });
+      setFrostResult({ pubkey: result.pubkey });
+    },
+  });
+
   return (
     <div>
       <div className="page-header">
         <h1 className="page-title">Keys</h1>
-        <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
-          + Create Key
-        </button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button
+            className="btn btn-secondary"
+            onClick={() => frostMutation.mutate()}
+            disabled={frostMutation.isPending}
+            title="Create a 2-of-N FROST key. The signer holds one share, this browser holds the other; signing requires both."
+          >
+            {frostMutation.isPending ? '⏳ Running DKG…' : '🛡️ Create FROST key'}
+          </button>
+          <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
+            + Create Key
+          </button>
+        </div>
       </div>
+
+      {frostMutation.error && (
+        <div className="auth-error" style={{ marginBottom: '16px' }}>
+          FROST key creation failed: {frostMutation.error instanceof Error ? frostMutation.error.message : String(frostMutation.error)}
+        </div>
+      )}
+
+      {frostResult && (
+        <div className="card" style={{ marginBottom: '16px', borderLeft: '3px solid var(--signer-primary)' }}>
+          <div style={{ fontWeight: 500, marginBottom: '4px' }}>
+            🛡️ FROST key created
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--signer-text-muted, #888)', marginBottom: '8px' }}>
+            Pubkey:{' '}
+            <code style={{ wordBreak: 'break-all' }}>{frostResult.pubkey}</code>
+          </div>
+          <div style={{ fontSize: '12px', color: 'var(--signer-text-muted, #888)' }}>
+            The signer cannot sign with this key without this browser participating.
+            Heads-up: share storage in IndexedDB is wired up in a follow-up phase;
+            currently the user share lives only in this tab's memory and is lost on
+            reload.
+          </div>
+          <button
+            className="btn btn-secondary"
+            style={{ marginTop: '12px', padding: '4px 10px' }}
+            onClick={() => setFrostResult(null)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {isLoading ? (
         <div className="loading-container">

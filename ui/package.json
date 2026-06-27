@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:wasm": "cd frost-wasm && wasm-pack build --target web --release",
+    "prebuild": "npm run build:wasm"
   },
   "dependencies": {
     "@cloistr/collab-common": "file:../../cloistr-collab-common",

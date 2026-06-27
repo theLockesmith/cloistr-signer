@@ -17,6 +17,12 @@ import type {
   FrostKey,
   DashboardStats,
   ApiError,
+  FrostUserDkgRound1Request,
+  FrostUserDkgRound1Response,
+  FrostUserDkgRound2Request,
+  FrostUserDkgRound2Response,
+  FrostUserDkgFinalizeRequest,
+  FrostUserDkgFinalizeResponse,
 } from '../types/api';
 
 const API_BASE = '/api/v1';
@@ -134,6 +140,36 @@ class ApiClient {
 
   async getBunkerUrl(id: string): Promise<{ bunker_uri: string; signer_pubkey: string; relays: string[]; secret?: string }> {
     return this.fetch(`/bunker/${id}`);
+  }
+
+  // FROST 2-of-N user-cosigner DKG endpoints (docs/frost-2-of-n-design.md §4.2).
+  // The orchestrator in ui/src/lib/frost.ts drives all three; consumers
+  // typically call createFrostKey() rather than these directly.
+  async frostUserDkgRound1(
+    body: FrostUserDkgRound1Request,
+  ): Promise<FrostUserDkgRound1Response> {
+    return this.fetch('/frost/user-dkg/round1', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async frostUserDkgRound2(
+    body: FrostUserDkgRound2Request,
+  ): Promise<FrostUserDkgRound2Response> {
+    return this.fetch('/frost/user-dkg/round2', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async frostUserDkgFinalize(
+    body: FrostUserDkgFinalizeRequest,
+  ): Promise<FrostUserDkgFinalizeResponse> {
+    return this.fetch('/frost/user-dkg/finalize', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
   }
 
   // Request endpoints

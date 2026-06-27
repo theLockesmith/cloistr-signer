@@ -58,6 +58,36 @@ export interface UpdateKeyRequest {
   relays?: string[];
 }
 
+// FROST 2-of-N user-cosigner DKG wire types. Mirror the Go-side
+// definitions in internal/frost/user_dkg.go.
+export interface FrostUserDkgRound1Request {
+  user_commits_hex: string[]; // [A0, A1], compressed-SEC1 hex
+}
+
+export interface FrostUserDkgRound1Response {
+  session_id: string;
+  signer_commits_hex: string[]; // [B0, B1]
+}
+
+export interface FrostUserDkgRound2Request {
+  session_id: string;
+  user_share_for_signer_hex: string; // f(SignerIndex), 32-byte scalar hex
+}
+
+export interface FrostUserDkgRound2Response {
+  signer_share_for_user_hex: string; // g(UserIndex)
+}
+
+export interface FrostUserDkgFinalizeRequest {
+  session_id: string;
+  confirm_joint_pubkey_hex: string; // A0 + B0, compressed-SEC1 hex
+}
+
+export interface FrostUserDkgFinalizeResponse {
+  key_id: string;
+  pubkey: string; // x-only BIP-340 / Nostr hex (32 bytes / 64 chars)
+}
+
 export interface KeyPermissions {
   sign_event: boolean;
   nip04_encrypt: boolean;
