@@ -19,6 +19,20 @@ k256 = { version = "0.13", default-features = false, features = ["arithmetic", "
 elliptic-curve = { version = "0.13", default-features = false, features = ["arithmetic"] }
 sha2 = { version = "0.10", default-features = false }
 
+# BIP39 mnemonic (24-word English wordlist). Used to derive the user's
+# polynomial coefficients deterministically so that lost-device recovery
+# can re-derive the same FROST share from just the phrase.
+# (See docs/frost-2-of-n-design.md §3.3 + §6.4.)
+#
+# English-only by deliberate choice: bundling all-languages bloats the
+# WASM by ~200KB. If we ship localized wordlists later it should be as
+# a separate WASM module loaded on demand.
+bip39 = { version = "2.1", default-features = false, features = ["std"] }
+
+# HKDF-SHA-256 - expands the 64-byte BIP39 seed into two 32-byte scalars
+# for the polynomial coefficients (a0, a1) with a domain-separation tag.
+hkdf = { version = "0.12", default-features = false }
+
 # WASM-side glue
 wasm-bindgen = "0.2"
 js-sys = "0.3"
