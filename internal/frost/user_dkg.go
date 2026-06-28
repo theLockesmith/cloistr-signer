@@ -95,6 +95,11 @@ type userDKGState struct {
 	// Populated in round 2 after the user's share-for-signer is verified.
 	signerShare *ecc.Scalar
 
+	// signerShareForUser = g(UserIndex), the evaluation we sent to the user
+	// in Round 2. Kept here so Finalize can persist it (encrypted under the
+	// user's vault key) for lost-device recovery (design doc §6.4).
+	signerShareForUser *ecc.Scalar
+
 	// Joint pubkey = A0 + B0. Computed in round 2 (signer side); user computes
 	// independently and confirms in finalize.
 	jointPubkey *ecc.Element
@@ -145,6 +150,13 @@ type Round2Response struct {
 type FinalizeRequest struct {
 	SessionID             string `json:"session_id"`
 	ConfirmJointPubkeyHex string `json:"confirm_joint_pubkey_hex"` // user-computed P, signer verifies it matches its own computation
+	// User's final-share·G computed client-side. Optional - if present,
+	// the signer stores it for use in the lost-device recovery flow
+	// (design doc §6.4). The signer does not verify it against any
+	// secret; it is a public commitment the user is responsible for
+	// supplying correctly. The recovery flow uses it to verify that
+	// the share reconstructed from a BIP39 phrase matches the original.
+	UserVerificationShareHex string `json:"user_verification_share_hex,omitempty"`
 }
 
 // FinalizeResult is what Finalize returns to the HTTP handler. The handler
@@ -156,8 +168,16 @@ type FinalizeResult struct {
 	JointPubkey       []byte // encoded element (caller chooses storage encoding)
 	SignerShare       []byte // encoded scalar - caller MUST Vault-encrypt before persisting
 	VerificationShare []byte // encoded element - public, safe to store unencrypted
-	Threshold         int
-	TotalShares       int
+	// SignerShareForUser is g(UserIndex), the value sent to the user in
+	// Round 2. Caller MUST Vault-encrypt before persisting for recovery
+	// (design doc §6.4). Plaintext bytes; never log.
+	SignerShareForUser []byte
+	// UserVerificationShareHex is the user-reported value from the
+	// FinalizeRequest, passed through to the handler so it can store it.
+	// Empty if the request did not include it (older clients).
+	UserVerificationShareHex string
+	Threshold                int
+	TotalShares              int
 }
 
 // Round1 processes the user's commitments and returns the signer's.
@@ -261,6 +281,7 @@ func (d *UserDKG) Round2(req *Round2Request) (*Round2Response, error) {
 
 	d.mu.Lock()
 	state.signerShare = finalSignerShare
+	state.signerShareForUser = signerShareForUser
 	state.jointPubkey = jointPubkey
 	state.Phase = PhaseAwaitingFinalize
 	d.mu.Unlock()
@@ -300,13 +321,15 @@ func (d *UserDKG) Finalize(req *FinalizeRequest) (*FinalizeResult, error) {
 	verificationShare := group.Base().Multiply(state.signerShare)
 
 	result := &FinalizeResult{
-		SessionID:         state.SessionID,
-		UserID:            state.UserID,
-		JointPubkey:       state.jointPubkey.Encode(),
-		SignerShare:       state.signerShare.Encode(),
-		VerificationShare: verificationShare.Encode(),
-		Threshold:         2,
-		TotalShares:       2,
+		SessionID:                state.SessionID,
+		UserID:                   state.UserID,
+		JointPubkey:              state.jointPubkey.Encode(),
+		SignerShare:              state.signerShare.Encode(),
+		VerificationShare:        verificationShare.Encode(),
+		SignerShareForUser:       state.signerShareForUser.Encode(),
+		UserVerificationShareHex: req.UserVerificationShareHex,
+		Threshold:                2,
+		TotalShares:              2,
 	}
 
 	d.dropSession(state.SessionID)

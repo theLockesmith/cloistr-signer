@@ -255,12 +255,27 @@ type FrostUserShare struct {
 	OwnerID            string    `json:"owner_id"`            // User who owns this identity (denormalized from Key for fast lookup)
 	ShareIndex         int       `json:"share_index"`         // Signer's participant index (usually 2 for 2-of-N)
 	EncryptedShare     []byte    `json:"-"`                   // Signer's share scalar, Vault-encrypted
-	VerificationShare  []byte    `json:"-"`                   // Public verification material for partial-sig validation
+	VerificationShare  []byte    `json:"-"`                   // Public verification material for the signer's partial sigs
 	Threshold          int       `json:"threshold"`           // t in t-of-n (2 in the v1 design)
 	TotalShares        int       `json:"total_shares"`        // n in t-of-n (>= 2; grows when user adds devices)
 	RotationGeneration int       `json:"rotation_generation"` // Increments on share refresh
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
+	// Recovery materials (docs/frost-2-of-n-design.md §6.4). Populated at
+	// DKG finalize for keys created post-P3e-b; older rows have them NULL
+	// and cannot be recovered without re-DKG.
+	//
+	// EncryptedUserShareAtDkg: g(UserIndex) at DKG time, encrypted under
+	// the user's Vault transit key. The signer wrote it, the user reads
+	// it back during recovery via the user's Vault token. Operator alone
+	// cannot decrypt it (consistent with We-Cannot-Comply §1.1).
+	//
+	// UserVerificationShareHex: the user's final-share·G computed by
+	// the user at DKG time and reported to the signer. Public. Used
+	// during recovery to verify that the reconstructed share is the
+	// same one the joint pubkey was anchored to.
+	EncryptedUserShareAtDkg  []byte `json:"-"`
+	UserVerificationShareHex string `json:"-"`
 }
 
 // FrostShare represents a single share of a FROST key

@@ -245,18 +245,25 @@ func (ss *SQLiteStorage) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_signer_frost_shares_key ON signer_frost_shares(frost_key_id);
 
 	-- FROST 2-of-N user-cosigner shares (docs/frost-2-of-n-design.md §3.1).
+	-- Recovery materials (encrypted_user_share_at_dkg + user_verification_share)
+	-- are present from the table definition forward; on older sqlite-backed
+	-- dev DBs the columns are absent and existing FROST keys can't be
+	-- recovered (sqlite is dev/test only; postgres handles existing rows
+	-- via ALTER TABLE IF NOT EXISTS in postgres.go).
 	CREATE TABLE IF NOT EXISTS signer_frost_user_shares (
-		id                  TEXT PRIMARY KEY,
-		key_id              TEXT NOT NULL UNIQUE REFERENCES signer_keys(id) ON DELETE CASCADE,
-		owner_id            TEXT NOT NULL,
-		share_index         INTEGER NOT NULL,
-		encrypted_share     BLOB NOT NULL,
-		verification_share  BLOB NOT NULL,
-		threshold           INTEGER NOT NULL,
-		total_shares        INTEGER NOT NULL,
-		rotation_generation INTEGER NOT NULL DEFAULT 0,
-		created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-		updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+		id                          TEXT PRIMARY KEY,
+		key_id                      TEXT NOT NULL UNIQUE REFERENCES signer_keys(id) ON DELETE CASCADE,
+		owner_id                    TEXT NOT NULL,
+		share_index                 INTEGER NOT NULL,
+		encrypted_share             BLOB NOT NULL,
+		verification_share          BLOB NOT NULL,
+		threshold                   INTEGER NOT NULL,
+		total_shares                INTEGER NOT NULL,
+		rotation_generation         INTEGER NOT NULL DEFAULT 0,
+		created_at                  TEXT NOT NULL DEFAULT (datetime('now')),
+		updated_at                  TEXT NOT NULL DEFAULT (datetime('now')),
+		encrypted_user_share_at_dkg BLOB,
+		user_verification_share     TEXT
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_frost_user_shares_owner ON signer_frost_user_shares(owner_id);
 	`
@@ -1775,12 +1782,14 @@ func (ss *SQLiteStorage) CreateFrostUserShare(ctx context.Context, share *FrostU
 	_, err := ss.db.ExecContext(ctx, `
 		INSERT INTO signer_frost_user_shares
 			(id, key_id, owner_id, share_index, encrypted_share, verification_share,
-			 threshold, total_shares, rotation_generation, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 threshold, total_shares, rotation_generation, created_at, updated_at,
+			 encrypted_user_share_at_dkg, user_verification_share)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		share.ID, share.KeyID, share.OwnerID, share.ShareIndex,
 		share.EncryptedShare, share.VerificationShare,
 		share.Threshold, share.TotalShares, share.RotationGeneration,
-		formatTime(share.CreatedAt), formatTime(share.UpdatedAt))
+		formatTime(share.CreatedAt), formatTime(share.UpdatedAt),
+		share.EncryptedUserShareAtDkg, nullStr(share.UserVerificationShareHex))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrFrostUserShareExists
@@ -1793,14 +1802,17 @@ func (ss *SQLiteStorage) CreateFrostUserShare(ctx context.Context, share *FrostU
 func (ss *SQLiteStorage) GetFrostUserShare(ctx context.Context, id string) (*FrostUserShare, error) {
 	share := &FrostUserShare{}
 	var createdAt, updatedAt string
+	var userVerificationShare sql.NullString
 	err := ss.db.QueryRowContext(ctx, `
 		SELECT id, key_id, owner_id, share_index, encrypted_share, verification_share,
-			threshold, total_shares, rotation_generation, created_at, updated_at
+			threshold, total_shares, rotation_generation, created_at, updated_at,
+			encrypted_user_share_at_dkg, user_verification_share
 		FROM signer_frost_user_shares WHERE id = ?`, id).
 		Scan(&share.ID, &share.KeyID, &share.OwnerID, &share.ShareIndex,
 			&share.EncryptedShare, &share.VerificationShare,
 			&share.Threshold, &share.TotalShares, &share.RotationGeneration,
-			&createdAt, &updatedAt)
+			&createdAt, &updatedAt,
+			&share.EncryptedUserShareAtDkg, &userVerificationShare)
 	if err == sql.ErrNoRows {
 		return nil, ErrFrostUserShareNotFound
 	}
@@ -1809,20 +1821,26 @@ func (ss *SQLiteStorage) GetFrostUserShare(ctx context.Context, id string) (*Fro
 	}
 	share.CreatedAt = parseTime(createdAt)
 	share.UpdatedAt = parseTime(updatedAt)
+	if userVerificationShare.Valid {
+		share.UserVerificationShareHex = userVerificationShare.String
+	}
 	return share, nil
 }
 
 func (ss *SQLiteStorage) GetFrostUserShareByKeyID(ctx context.Context, keyID string) (*FrostUserShare, error) {
 	share := &FrostUserShare{}
 	var createdAt, updatedAt string
+	var userVerificationShare sql.NullString
 	err := ss.db.QueryRowContext(ctx, `
 		SELECT id, key_id, owner_id, share_index, encrypted_share, verification_share,
-			threshold, total_shares, rotation_generation, created_at, updated_at
+			threshold, total_shares, rotation_generation, created_at, updated_at,
+			encrypted_user_share_at_dkg, user_verification_share
 		FROM signer_frost_user_shares WHERE key_id = ?`, keyID).
 		Scan(&share.ID, &share.KeyID, &share.OwnerID, &share.ShareIndex,
 			&share.EncryptedShare, &share.VerificationShare,
 			&share.Threshold, &share.TotalShares, &share.RotationGeneration,
-			&createdAt, &updatedAt)
+			&createdAt, &updatedAt,
+			&share.EncryptedUserShareAtDkg, &userVerificationShare)
 	if err == sql.ErrNoRows {
 		return nil, ErrFrostUserShareNotFound
 	}
@@ -1831,13 +1849,17 @@ func (ss *SQLiteStorage) GetFrostUserShareByKeyID(ctx context.Context, keyID str
 	}
 	share.CreatedAt = parseTime(createdAt)
 	share.UpdatedAt = parseTime(updatedAt)
+	if userVerificationShare.Valid {
+		share.UserVerificationShareHex = userVerificationShare.String
+	}
 	return share, nil
 }
 
 func (ss *SQLiteStorage) ListFrostUserSharesByOwner(ctx context.Context, ownerID string) ([]*FrostUserShare, error) {
 	rows, err := ss.db.QueryContext(ctx, `
 		SELECT id, key_id, owner_id, share_index, encrypted_share, verification_share,
-			threshold, total_shares, rotation_generation, created_at, updated_at
+			threshold, total_shares, rotation_generation, created_at, updated_at,
+			encrypted_user_share_at_dkg, user_verification_share
 		FROM signer_frost_user_shares WHERE owner_id = ? ORDER BY created_at DESC`, ownerID)
 	if err != nil {
 		return nil, err
@@ -1848,14 +1870,19 @@ func (ss *SQLiteStorage) ListFrostUserSharesByOwner(ctx context.Context, ownerID
 	for rows.Next() {
 		share := &FrostUserShare{}
 		var createdAt, updatedAt string
+		var userVerificationShare sql.NullString
 		if err := rows.Scan(&share.ID, &share.KeyID, &share.OwnerID, &share.ShareIndex,
 			&share.EncryptedShare, &share.VerificationShare,
 			&share.Threshold, &share.TotalShares, &share.RotationGeneration,
-			&createdAt, &updatedAt); err != nil {
+			&createdAt, &updatedAt,
+			&share.EncryptedUserShareAtDkg, &userVerificationShare); err != nil {
 			return nil, err
 		}
 		share.CreatedAt = parseTime(createdAt)
 		share.UpdatedAt = parseTime(updatedAt)
+		if userVerificationShare.Valid {
+			share.UserVerificationShareHex = userVerificationShare.String
+		}
 		shares = append(shares, share)
 	}
 	return shares, rows.Err()
@@ -1866,11 +1893,15 @@ func (ss *SQLiteStorage) UpdateFrostUserShare(ctx context.Context, share *FrostU
 	result, err := ss.db.ExecContext(ctx, `
 		UPDATE signer_frost_user_shares SET
 			share_index = ?, encrypted_share = ?, verification_share = ?,
-			threshold = ?, total_shares = ?, rotation_generation = ?, updated_at = ?
+			threshold = ?, total_shares = ?, rotation_generation = ?, updated_at = ?,
+			encrypted_user_share_at_dkg = ?, user_verification_share = ?
 		WHERE id = ?`,
 		share.ShareIndex, share.EncryptedShare, share.VerificationShare,
 		share.Threshold, share.TotalShares, share.RotationGeneration,
-		formatTime(share.UpdatedAt), share.ID)
+		formatTime(share.UpdatedAt),
+		share.EncryptedUserShareAtDkg,
+		nullStr(share.UserVerificationShareHex),
+		share.ID)
 	if err != nil {
 		return err
 	}

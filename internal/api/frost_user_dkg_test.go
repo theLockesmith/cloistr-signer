@@ -439,6 +439,146 @@ func TestFrostUserDKGHTTP_FinalizeRejectsPubkeyMismatch(t *testing.T) {
 	}
 }
 
+// Recovery endpoint round-trip (docs/frost-2-of-n-design.md §6.4).
+// Run a full DKG that supplies UserVerificationShareHex at finalize,
+// then hit GET /api/v1/frost/user-dkg/recovery/{keyId} and verify the
+// response carries:
+//   - the same Pubkey as the finalize response
+//   - the original Round 2 signer-share-for-user (decrypted server-side
+//     from the Vault-stored ciphertext)
+//   - the user_verification_share that we passed in
+func TestFrostUserDKGHTTP_Recovery(t *testing.T) {
+	env := setupFrostTestEnv(t)
+	defer env.close()
+	user := newFrostTestUser()
+
+	// Round 1
+	r1Body := postJSON(t, env.mux, "/api/v1/frost/user-dkg/round1", env.authToken, map[string]interface{}{
+		"user_commits_hex": user.commitsHex(),
+	})
+	if r1Body.Code != http.StatusOK {
+		t.Fatalf("round1: %d - %s", r1Body.Code, r1Body.Body.String())
+	}
+	var r1 frost.Round1Response
+	json.Unmarshal(r1Body.Body.Bytes(), &r1)
+
+	// Round 2
+	r2Body := postJSON(t, env.mux, "/api/v1/frost/user-dkg/round2", env.authToken, frost.Round2Request{
+		SessionID:             r1.SessionID,
+		UserShareForSignerHex: user.shareForSigner(),
+	})
+	if r2Body.Code != http.StatusOK {
+		t.Fatalf("round2: %d - %s", r2Body.Code, r2Body.Body.String())
+	}
+	var r2 frost.Round2Response
+	json.Unmarshal(r2Body.Body.Bytes(), &r2)
+
+	// Compute the user's final share + verification share locally - same
+	// math a real client runs.
+	group := frost.DefaultCiphersuite.Group()
+	signerShareForUser := group.NewScalar()
+	rawSignerShare, _ := hex.DecodeString(r2.SignerShareForUserHex)
+	if err := signerShareForUser.Decode(rawSignerShare); err != nil {
+		t.Fatalf("decode signer share: %v", err)
+	}
+	userSelf := group.NewScalar().Set(user.coeffs[0])
+	term := group.NewScalar().Set(user.coeffs[1])
+	idx := group.NewScalar().SetUInt64(uint64(frost.UserIndex))
+	term.Multiply(idx)
+	userSelf.Add(term)
+	userFinalShare := group.NewScalar().Set(userSelf)
+	userFinalShare.Add(signerShareForUser)
+	userVerificationShare := group.Base().Multiply(userFinalShare)
+	userVerificationShareHex := userVerificationShare.Hex()
+
+	// Finalize with the verification share so recovery can later be tested
+	finBody := postJSON(t, env.mux, "/api/v1/frost/user-dkg/finalize", env.authToken, frost.FinalizeRequest{
+		SessionID:                r1.SessionID,
+		ConfirmJointPubkeyHex:    user.jointPubkeyHex(t, r1.SignerCommitsHex),
+		UserVerificationShareHex: userVerificationShareHex,
+	})
+	if finBody.Code != http.StatusOK {
+		t.Fatalf("finalize: %d - %s", finBody.Code, finBody.Body.String())
+	}
+	var fin FrostUserDKGFinalizeResponse
+	json.Unmarshal(finBody.Body.Bytes(), &fin)
+
+	// Recovery
+	recReq := httptest.NewRequest(http.MethodGet,
+		"/api/v1/frost/user-dkg/recovery/"+fin.KeyID, nil)
+	recReq.Header.Set("Authorization", "Bearer "+env.authToken)
+	recW := httptest.NewRecorder()
+	env.mux.ServeHTTP(recW, recReq)
+	if recW.Code != http.StatusOK {
+		t.Fatalf("recovery: %d - %s", recW.Code, recW.Body.String())
+	}
+	var rec FrostUserDKGRecoveryResponse
+	if err := json.Unmarshal(recW.Body.Bytes(), &rec); err != nil {
+		t.Fatalf("decode recovery: %v", err)
+	}
+
+	if rec.KeyID != fin.KeyID {
+		t.Errorf("recovery key_id = %q, want %q", rec.KeyID, fin.KeyID)
+	}
+	if rec.Pubkey != fin.Pubkey {
+		t.Errorf("recovery pubkey = %q, want %q", rec.Pubkey, fin.Pubkey)
+	}
+	if rec.UserVerificationShareHex != userVerificationShareHex {
+		t.Errorf("verification share mismatch: got %q, want %q",
+			rec.UserVerificationShareHex, userVerificationShareHex)
+	}
+	if rec.SignerShareForUserHex != r2.SignerShareForUserHex {
+		t.Errorf("signer_share_for_user round-trip mismatch:\n got: %q\nwant: %q",
+			rec.SignerShareForUserHex, r2.SignerShareForUserHex)
+	}
+
+	// Sanity: the recovered signer_share_for_user + user-derived f(UserIndex)
+	// should reconstruct to the same final share whose ·G == user_verification_share.
+	signerShare2 := group.NewScalar()
+	raw2, _ := hex.DecodeString(rec.SignerShareForUserHex)
+	if err := signerShare2.Decode(raw2); err != nil {
+		t.Fatalf("decode recovered share: %v", err)
+	}
+	reconstructed := group.NewScalar().Set(userSelf)
+	reconstructed.Add(signerShare2)
+	reconstructedPt := group.Base().Multiply(reconstructed)
+	if !reconstructedPt.Equal(userVerificationShare) {
+		t.Errorf("reconstructed final-share·G does not match stored user_verification_share")
+	}
+}
+
+// Recovery for a key owned by a different user must return 404.
+func TestFrostUserDKGHTTP_RecoveryOwnerCheck(t *testing.T) {
+	env := setupFrostTestEnv(t)
+	defer env.close()
+
+	// Hit recovery on a made-up key id - same code path as owner-mismatch
+	// because the GetKey returns ErrKeyNotFound which is mapped to 404.
+	// We don't have a second-user fixture in this test env; this exercises
+	// the not-found branch which is the same response shape.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/frost/user-dkg/recovery/nonexistent-key-id", nil)
+	req.Header.Set("Authorization", "Bearer "+env.authToken)
+	w := httptest.NewRecorder()
+	env.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("recovery of missing key: status = %d, want 404", w.Code)
+	}
+}
+
+// Without auth the recovery endpoint must 401.
+func TestFrostUserDKGHTTP_RecoveryRequiresAuth(t *testing.T) {
+	env := setupFrostTestEnv(t)
+	defer env.close()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/frost/user-dkg/recovery/anything", nil)
+	w := httptest.NewRecorder()
+	env.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("recovery without auth: status = %d, want 401", w.Code)
+	}
+}
+
 // Without Vault, finalize MUST refuse - the privacy-architecture §1.1
 // "We Cannot Comply" property requires the share to be encrypted under a
 // key the operator alone cannot read. The signer refuses to fall back to

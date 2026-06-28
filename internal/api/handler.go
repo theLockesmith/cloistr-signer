@@ -161,6 +161,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/frost/user-dkg/round1", h.handleFrostUserDKGRound1)
 	mux.HandleFunc("/api/v1/frost/user-dkg/round2", h.handleFrostUserDKGRound2)
 	mux.HandleFunc("/api/v1/frost/user-dkg/finalize", h.handleFrostUserDKGFinalize)
+	// FROST lost-device recovery (design doc §6.4) - returns the at-DKG
+	// signer_share_for_user (decrypted server-side via the user's Vault
+	// token) plus the user-reported verification share for client-side
+	// reconstruction validation.
+	mux.HandleFunc("/api/v1/frost/user-dkg/recovery/", h.handleFrostUserDKGRecovery)
 }
 
 // Health check response
