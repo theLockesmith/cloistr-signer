@@ -1,7 +1,14 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiClient from '../api/client';
-import { createFrostKey } from '../lib/frost';
+import {
+  createFrostKeyWithPhrase,
+  generateFrostRecoveryPhrase,
+  isValidFrostRecoveryPhrase,
+  recoverFrostKey,
+  FrostRecoveryWrongPhraseError,
+  type CreatedFrostKey,
+} from '../lib/frost';
 import { listShareIds, isShareStorageUnlocked } from '../lib/frostStorage';
 import type { Key, CreateKeyRequest } from '../types/api';
 
@@ -10,6 +17,14 @@ export function KeysPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [keyToDelete, setKeyToDelete] = useState<Key | null>(null);
   const [frostResult, setFrostResult] = useState<{ pubkey: string } | null>(null);
+  // FROST creation runs in two stages: generate phrase → user confirms →
+  // run DKG with that phrase. frostPhrase is the in-flight phrase shown
+  // to the user; null when no creation is in progress.
+  const [frostPhrase, setFrostPhrase] = useState<string | null>(null);
+  const [frostPhraseError, setFrostPhraseError] = useState<string | null>(null);
+  // Recovery flow: which existing FROST key (id + pubkey) the user is
+  // trying to recover.
+  const [recoveryTarget, setRecoveryTarget] = useState<Key | null>(null);
 
   const { data: keys, isLoading } = useQuery({
     queryKey: ['keys'],
@@ -43,16 +58,46 @@ export function KeysPage() {
     },
   });
 
-  // FROST 2-of-N user-cosigner key creation. Runs the full 3-round DKG
-  // against the signer endpoints; the signer ends up with one share and
-  // the browser ends up with the other. The aggregated final share is
-  // currently held only in this mutation's success result -- P3d wraps
-  // it with a password-derived KEK and persists to IndexedDB.
-  const frostMutation = useMutation({
-    mutationFn: () => createFrostKey(),
-    onSuccess: (result) => {
+  // FROST 2-of-N creation, stage 1: generate a phrase locally (WASM) and
+  // show it to the user. No network traffic yet; the phrase isn't sent
+  // anywhere. The user must explicitly confirm they've written it down
+  // before stage 2 (the DKG itself) runs.
+  const generatePhraseMutation = useMutation({
+    mutationFn: () => generateFrostRecoveryPhrase(),
+    onSuccess: (phrase) => {
+      setFrostPhrase(phrase);
+      setFrostPhraseError(null);
+    },
+    onError: (err) => {
+      setFrostPhraseError(err instanceof Error ? err.message : String(err));
+    },
+  });
+
+  // FROST creation, stage 2: with the phrase the user just confirmed,
+  // run the 3-round DKG. Phrase becomes the seed for the deterministic
+  // user-side polynomial → the resulting key is recoverable via the
+  // same phrase later.
+  const frostCreateMutation = useMutation({
+    mutationFn: (phrase: string) => createFrostKeyWithPhrase(phrase),
+    onSuccess: (result: CreatedFrostKey) => {
       queryClient.invalidateQueries({ queryKey: ['keys'] });
+      queryClient.invalidateQueries({ queryKey: ['frost-local-shares'] });
       setFrostResult({ pubkey: result.pubkey });
+      setFrostPhrase(null);
+    },
+  });
+
+  // Recovery: re-derive the user share from a phrase + fetch the
+  // signer's stored at-DKG materials, then persist to IndexedDB. Wrong
+  // phrase surfaces as FrostRecoveryWrongPhraseError - the modal handles
+  // that specifically so the user gets actionable feedback.
+  const recoverMutation = useMutation({
+    mutationFn: ({ keyId, phrase }: { keyId: string; phrase: string }) =>
+      recoverFrostKey(keyId, phrase),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['keys'] });
+      queryClient.invalidateQueries({ queryKey: ['frost-local-shares'] });
+      setRecoveryTarget(null);
     },
   });
 
@@ -63,11 +108,15 @@ export function KeysPage() {
         <div style={{ display: 'flex', gap: '8px' }}>
           <button
             className="btn btn-secondary"
-            onClick={() => frostMutation.mutate()}
-            disabled={frostMutation.isPending}
-            title="Create a 2-of-N FROST key. The signer holds one share, this browser holds the other; signing requires both."
+            onClick={() => generatePhraseMutation.mutate()}
+            disabled={generatePhraseMutation.isPending || frostCreateMutation.isPending}
+            title="Create a 2-of-N FROST key. The signer holds one share, this browser holds the other; signing requires both. A 24-word phrase is shown for lost-device recovery."
           >
-            {frostMutation.isPending ? '⏳ Running DKG…' : '🛡️ Create FROST key'}
+            {generatePhraseMutation.isPending
+              ? '⏳ Generating phrase…'
+              : frostCreateMutation.isPending
+                ? '⏳ Running DKG…'
+                : '🛡️ Create FROST key'}
           </button>
           <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
             + Create Key
@@ -75,9 +124,14 @@ export function KeysPage() {
         </div>
       </div>
 
-      {frostMutation.error && (
+      {(frostCreateMutation.error || frostPhraseError) && (
         <div className="auth-error" style={{ marginBottom: '16px' }}>
-          FROST key creation failed: {frostMutation.error instanceof Error ? frostMutation.error.message : String(frostMutation.error)}
+          FROST key creation failed:{' '}
+          {frostCreateMutation.error
+            ? frostCreateMutation.error instanceof Error
+              ? frostCreateMutation.error.message
+              : String(frostCreateMutation.error)
+            : frostPhraseError}
         </div>
       )}
 
@@ -127,6 +181,7 @@ export function KeysPage() {
                 key.key_type === 'frost-user' && (localShareIds?.has(key.id) ?? false)
               }
               onDelete={() => setKeyToDelete(key)}
+              onRecover={() => setRecoveryTarget(key)}
             />
           ))}
         </div>
@@ -161,6 +216,34 @@ export function KeysPage() {
           onConfirm={() => deleteMutation.mutate(keyToDelete.id)}
           loading={deleteMutation.isPending}
           error={deleteMutation.error?.message}
+        />
+      )}
+
+      {frostPhrase && (
+        <FrostPhraseModal
+          phrase={frostPhrase}
+          onCancel={() => {
+            if (!frostCreateMutation.isPending) setFrostPhrase(null);
+          }}
+          onConfirm={() => frostCreateMutation.mutate(frostPhrase)}
+          loading={frostCreateMutation.isPending}
+        />
+      )}
+
+      {recoveryTarget && (
+        <FrostRecoveryModal
+          keyData={recoveryTarget}
+          onCancel={() => {
+            if (!recoverMutation.isPending) {
+              setRecoveryTarget(null);
+              recoverMutation.reset();
+            }
+          }}
+          onRecover={(phrase) =>
+            recoverMutation.mutate({ keyId: recoveryTarget.id, phrase })
+          }
+          loading={recoverMutation.isPending}
+          error={recoverMutation.error}
         />
       )}
     </div>
@@ -222,7 +305,7 @@ function DeleteKeyModal({
   );
 }
 
-function KeyCard({ keyData, hasLocalShare, onDelete }: { keyData: Key; hasLocalShare: boolean; onDelete: () => void }) {
+function KeyCard({ keyData, hasLocalShare, onDelete, onRecover }: { keyData: Key; hasLocalShare: boolean; onDelete: () => void; onRecover: () => void }) {
   const queryClient = useQueryClient();
   const [showBunkerUrl, setShowBunkerUrl] = useState(false);
   const [bunkerUrl, setBunkerUrl] = useState<string | null>(null);
@@ -324,6 +407,18 @@ function KeyCard({ keyData, hasLocalShare, onDelete }: { keyData: Key; hasLocalS
             : <span title="This FROST key has no share on this device. Sign in on a device that has your share, or recover via your BIP39 phrase.">⚠️ no share on this device</span>
         )}
       </div>
+      {keyData.key_type === 'frost-user' && !hasLocalShare && (
+        <div style={{ marginTop: '12px' }}>
+          <button
+            className="btn btn-secondary"
+            onClick={onRecover}
+            style={{ fontSize: '14px' }}
+            title="Recover this FROST share on this device by entering your 24-word phrase."
+          >
+            🔑 Recover from phrase
+          </button>
+        </div>
+      )}
 
       <div
         style={{
@@ -534,6 +629,194 @@ function CreateKeyModal({
               </button>
               <button type="submit" className="btn btn-primary" disabled={loading}>
                 {loading ? 'Creating...' : 'Create Key'}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// FrostPhraseModal shows the 24-word BIP39 recovery phrase to the user
+// once at FROST key creation. Two gates before the DKG runs:
+//   1. "I have written this down" checkbox
+//   2. Confirm button (disabled until checkbox is checked)
+// We deliberately avoid a "Copy" button on first reveal - encouraging
+// the user to write it down on paper rather than store digitally is
+// part of the user-controlled-secret threat model. They can still
+// select-and-copy; we just don't make it the obvious primary action.
+function FrostPhraseModal({
+  phrase,
+  onCancel,
+  onConfirm,
+  loading,
+}: {
+  phrase: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+  loading: boolean;
+}) {
+  const [confirmed, setConfirmed] = useState(false);
+  const words = phrase.trim().split(/\s+/);
+  return (
+    <div className="modal-overlay">
+      <div className="modal" style={{ maxWidth: '600px' }}>
+        <div className="modal-content">
+          <h2 style={{ marginTop: 0 }}>🛡️ Your FROST recovery phrase</h2>
+          <p style={{ fontSize: '14px', color: 'var(--signer-text-muted, #888)', marginBottom: '12px' }}>
+            Write down these 24 words in order. They are the ONLY way to
+            recover this key on a new device. If you lose this browser AND
+            don't have the phrase, the key is gone.
+          </p>
+          <p style={{ fontSize: '14px', color: 'var(--signer-text-muted, #888)', marginBottom: '16px' }}>
+            The phrase never leaves this browser tab. The signer never sees it.
+          </p>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(3, 1fr)',
+              gap: '8px',
+              padding: '16px',
+              background: 'var(--signer-bg)',
+              borderRadius: '8px',
+              marginBottom: '16px',
+              fontFamily: 'monospace',
+            }}
+          >
+            {words.map((word, i) => (
+              <div key={i} style={{ display: 'flex', gap: '6px', alignItems: 'baseline' }}>
+                <span style={{ color: 'var(--signer-text-muted, #888)', fontSize: '11px', minWidth: '20px', textAlign: 'right' }}>
+                  {i + 1}.
+                </span>
+                <span style={{ fontSize: '14px' }}>{word}</span>
+              </div>
+            ))}
+          </div>
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', marginBottom: '16px', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={confirmed}
+              disabled={loading}
+              onChange={(e) => setConfirmed(e.target.checked)}
+              style={{ marginTop: '3px' }}
+            />
+            <span style={{ fontSize: '14px' }}>
+              I have written this phrase down somewhere safe and offline. I
+              understand the signer cannot recover it for me.
+            </span>
+          </label>
+          <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+            <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={onConfirm}
+              disabled={!confirmed || loading}
+            >
+              {loading ? '⏳ Running DKG…' : 'Continue → run DKG'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// FrostRecoveryModal collects a 24-word phrase and triggers the
+// recoverFrostKey flow against a specific FROST key. The phrase is
+// validated locally (WASM is_valid_recovery_phrase) before any network
+// roundtrip so typos surface immediately.
+function FrostRecoveryModal({
+  keyData,
+  onCancel,
+  onRecover,
+  loading,
+  error,
+}: {
+  keyData: Key;
+  onCancel: () => void;
+  onRecover: (phrase: string) => void;
+  loading: boolean;
+  error: Error | null;
+}) {
+  const [phrase, setPhrase] = useState('');
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setValidationError(null);
+    const trimmed = phrase.trim().replace(/\s+/g, ' ');
+    const valid = await isValidFrostRecoveryPhrase(trimmed);
+    if (!valid) {
+      setValidationError('Phrase is not a valid 24-word BIP39 phrase. Check word count, spelling, and order.');
+      return;
+    }
+    onRecover(trimmed);
+  };
+
+  const wrongPhrase = error instanceof FrostRecoveryWrongPhraseError;
+  const otherErrorMsg = error && !wrongPhrase
+    ? (error instanceof Error ? error.message : String(error))
+    : null;
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal" style={{ maxWidth: '600px' }}>
+        <div className="modal-content">
+          <h2 style={{ marginTop: 0 }}>🔑 Recover FROST share</h2>
+          <p style={{ fontSize: '14px', color: 'var(--signer-text-muted, #888)', marginBottom: '8px' }}>
+            For key: <code style={{ wordBreak: 'break-all' }}>{keyData.pubkey}</code>
+          </p>
+          <p style={{ fontSize: '14px', color: 'var(--signer-text-muted, #888)', marginBottom: '16px' }}>
+            Enter the 24-word phrase you wrote down when this FROST key was
+            created. The phrase reconstructs your share on this device; the
+            signer cannot do this for you.
+          </p>
+          <form onSubmit={handleSubmit}>
+            <textarea
+              value={phrase}
+              onChange={(e) => setPhrase(e.target.value)}
+              disabled={loading}
+              rows={4}
+              placeholder="word1 word2 word3 …"
+              style={{
+                width: '100%',
+                padding: '10px',
+                fontFamily: 'monospace',
+                fontSize: '14px',
+                borderRadius: '6px',
+                border: '1px solid var(--signer-border, #444)',
+                background: 'var(--signer-bg)',
+                color: 'var(--signer-text, #eee)',
+                boxSizing: 'border-box',
+                marginBottom: '12px',
+              }}
+            />
+            {validationError && (
+              <div className="auth-error" style={{ marginBottom: '12px' }}>
+                {validationError}
+              </div>
+            )}
+            {wrongPhrase && (
+              <div className="auth-error" style={{ marginBottom: '12px' }}>
+                That phrase does not reconstruct the share for this key.
+                Double-check the words and try again.
+              </div>
+            )}
+            {otherErrorMsg && (
+              <div className="auth-error" style={{ marginBottom: '12px' }}>
+                Recovery failed: {otherErrorMsg}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={loading || !phrase.trim()}>
+                {loading ? '⏳ Recovering…' : 'Recover'}
               </button>
             </div>
           </form>

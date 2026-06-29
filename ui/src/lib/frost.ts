@@ -35,7 +35,9 @@ import {
 // --release`, gitignored. Fresh checkouts must run that build before
 // `npm run build` here. See ui/frost-wasm/README.md.
 import init, {
-  generate_user_dkg_state,
+  generate_recovery_phrase,
+  is_valid_recovery_phrase,
+  derive_user_dkg_state_from_phrase,
   compute_share_for_signer,
   verify_signer_share,
   compute_joint_pubkey,
@@ -64,8 +66,8 @@ function initWasm(): Promise<void> {
 /**
  * Result returned by createFrostKey() on a successful DKG ceremony.
  *
- * userFinalShareHex is the scalar the caller MUST store securely (in P3d
- * this gets wrapped by a password-derived KEK and persisted to IndexedDB).
+ * userFinalShareHex is the scalar the caller MUST store securely (P3d
+ * wraps it with a password-derived KEK and persists to IndexedDB).
  * userVerificationShareHex is public material used by the signer to
  * verify the user's partial signatures during signing (P4).
  */
@@ -82,32 +84,59 @@ interface UserDkgStatePayload {
 }
 
 /**
- * Drive the full 3-round FROST 2-of-N user-cosigner DKG against the
- * signer endpoints. Returns the created key's id + pubkey on success.
+ * Generate a fresh 24-word BIP39 recovery phrase. The caller MUST display
+ * it to the user once and obtain explicit acknowledgement before passing
+ * it to createFrostKeyWithPhrase. After the ceremony completes the phrase
+ * is the user's only recovery path; if they don't write it down, losing
+ * IndexedDB is permanent loss.
+ */
+export async function generateFrostRecoveryPhrase(): Promise<string> {
+  await initWasm();
+  return generate_recovery_phrase() as string;
+}
+
+/**
+ * Cheap structural + checksum validation of a typed-in phrase. Used by
+ * the recovery UI to catch typos before the network roundtrip.
+ */
+export async function isValidFrostRecoveryPhrase(phrase: string): Promise<boolean> {
+  await initWasm();
+  return is_valid_recovery_phrase(phrase) as boolean;
+}
+
+/**
+ * Drive the full 3-round FROST 2-of-N user-cosigner DKG using a phrase
+ * the user has just been shown (and confirmed they wrote down). The
+ * resulting key is RECOVERABLE: on a fresh browser, recoverFrostKey()
+ * with the same phrase reproduces the same final share.
+ *
+ * passphrase is the BIP39 25th-word secret. Empty string is acceptable
+ * for users who don't want passphrase composition.
  *
  * On any failure - network, cryptographic verification, or signer-side
  * rejection - throws and ensures the user_state_hex is destroyed. The
  * server-side DKG session also self-aborts on any 4xx from the
  * intermediate rounds.
  *
- * Caller must hold an authenticated session (apiClient.setToken).
+ * Caller must hold an authenticated session AND must have already called
+ * unlockShareStorage (the share storage KEK must be derivable).
  */
-export async function createFrostKey(): Promise<CreatedFrostKey> {
-  // Fail fast if the KEK is locked. Otherwise we'd run the full ceremony,
-  // build the final share, then discover at storeShare time that we
-  // can't persist it - losing the share material.
+export async function createFrostKeyWithPhrase(
+  phrase: string,
+  passphrase: string = '',
+): Promise<CreatedFrostKey> {
   if (!isShareStorageUnlocked()) {
     throw new FrostStorageLockedError();
   }
 
   await initWasm();
 
-  const initial = generate_user_dkg_state() as UserDkgStatePayload;
+  const initial = derive_user_dkg_state_from_phrase(phrase, passphrase) as UserDkgStatePayload;
   let userStateHex: string | null = initial.user_state_hex;
   const userCommitsHex = initial.commits_hex;
 
   try {
-    // Round 1: send our commits, get the signer's commits + session_id.
+    // Round 1
     const r1 = await apiClient.frostUserDkgRound1({
       user_commits_hex: userCommitsHex,
     });
@@ -115,8 +144,8 @@ export async function createFrostKey(): Promise<CreatedFrostKey> {
       throw new Error('signer round1 response missing session_id or commits');
     }
 
-    // Round 2: compute and send our share-for-signer; the signer responds
-    // with its share-for-us.
+    // Round 2: send our share-for-signer; verify signer's share against its
+    // round 1 commitments before accepting.
     const userShareForSignerHex = compute_share_for_signer(userStateHex);
     const r2 = await apiClient.frostUserDkgRound2({
       session_id: r1.session_id,
@@ -125,11 +154,6 @@ export async function createFrostKey(): Promise<CreatedFrostKey> {
     if (!r2.signer_share_for_user_hex) {
       throw new Error('signer round2 response missing share');
     }
-
-    // Cryptographic verification: the signer's share MUST validate against
-    // the signer's commits from round 1. Without this check, a malicious
-    // signer could feed us a share whose corresponding scalar doesn't
-    // produce a sensible joint identity.
     const signerShareValid = verify_signer_share(
       r2.signer_share_for_user_hex,
       r1.signer_commits_hex,
@@ -138,18 +162,11 @@ export async function createFrostKey(): Promise<CreatedFrostKey> {
       throw new Error("signer's share did not verify against its commitments");
     }
 
-    // Independently compute the joint pubkey from A0 + B0. The signer
-    // computes the same value server-side; we send ours up at finalize
-    // and the signer rejects on mismatch.
+    // Independently compute joint pubkey + aggregated final share.
     const jointPubkeyHex = compute_joint_pubkey(
       userStateHex,
       r1.signer_commits_hex[0],
     ) as string;
-
-    // Aggregate the final share = f(UserIndex) + signer_share.
-    // After this point, the polynomial coefficients (a0, a1) are no
-    // longer needed - everything we keep going forward is the
-    // aggregated share.
     const userFinalShareHex = compute_user_final_share(
       userStateHex,
       r2.signer_share_for_user_hex,
@@ -158,20 +175,17 @@ export async function createFrostKey(): Promise<CreatedFrostKey> {
       userFinalShareHex,
     ) as string;
 
-    // Finalize: confirm the pubkey to the signer. On success the signer
-    // persists its share and returns key_id + the BIP-340 x-only pubkey.
+    // Finalize - now WITH user_verification_share so the signer can
+    // persist the recovery materials (design doc §6.4, P3e-b).
     const fin = await apiClient.frostUserDkgFinalize({
       session_id: r1.session_id,
       confirm_joint_pubkey_hex: jointPubkeyHex,
+      user_verification_share_hex: userVerificationShareHex,
     });
     if (!fin.key_id || !fin.pubkey) {
       throw new Error('signer finalize response missing key_id or pubkey');
     }
 
-    // Persist the user share to IndexedDB, encrypted under the
-    // password-derived KEK. After this returns, the share survives
-    // page reloads on this device. Lose the device or clear IndexedDB
-    // and recovery is via the BIP39 phrase (P3e).
     await storeShare({
       keyId: fin.key_id,
       pubkey: fin.pubkey,
@@ -186,11 +200,100 @@ export async function createFrostKey(): Promise<CreatedFrostKey> {
       userVerificationShareHex,
     };
   } finally {
-    // Always destroy the polynomial coefficients. They are not needed
-    // after the ceremony - only the aggregated final share matters.
-    // Even on success this is intentional: in P3d the final share is
-    // wrapped by a password-derived KEK and stored; the coefficients
-    // never persist anywhere.
+    // Drop the polynomial coefficients - the phrase itself stays with
+    // the user (on paper) as the long-term recovery anchor; this
+    // in-memory derivation is ephemeral.
+    if (userStateHex !== null) {
+      userStateHex = null;
+    }
+  }
+}
+
+/**
+ * Errors recoverFrostKey throws to distinguish recoverable user mistakes
+ * (wrong phrase, key never had recovery support) from infrastructure
+ * problems (Vault down, server unreachable).
+ */
+export class FrostRecoveryWrongPhraseError extends Error {
+  constructor() {
+    super('the phrase does not reconstruct the original FROST share for this key');
+    this.name = 'FrostRecoveryWrongPhraseError';
+  }
+}
+
+/**
+ * Reconstruct a FROST user share from a BIP39 phrase and the signer's
+ * stored recovery materials. After success the share is persisted to
+ * IndexedDB exactly like createFrostKeyWithPhrase persists fresh DKG
+ * output - subsequent signing on this device works without re-entering
+ * the phrase.
+ *
+ * Flow (design doc §6.4):
+ *   1. Derive (a0, a1) deterministically from phrase + passphrase.
+ *   2. GET /recovery/{keyId} → signer_share_for_user_hex + user_verification_share_hex.
+ *   3. final_share = f(UserIndex) + signer_share_for_user, where f is
+ *      the polynomial derived from the phrase. Compute via WASM.
+ *   4. Verify final_share·G == user_verification_share_hex. If yes the
+ *      phrase is correct; if no the user typed the wrong phrase
+ *      (or the signer is lying, which is detected here too).
+ *   5. Persist to IndexedDB.
+ *
+ * Caller must hold an authenticated session and must have already
+ * unlocked share storage.
+ */
+export async function recoverFrostKey(
+  keyId: string,
+  phrase: string,
+  passphrase: string = '',
+): Promise<CreatedFrostKey> {
+  if (!isShareStorageUnlocked()) {
+    throw new FrostStorageLockedError();
+  }
+
+  await initWasm();
+
+  // Phrase-derived polynomial. The user_state_hex blob is ephemeral
+  // and destroyed in finally.
+  const derived = derive_user_dkg_state_from_phrase(phrase, passphrase) as UserDkgStatePayload;
+  let userStateHex: string | null = derived.user_state_hex;
+
+  try {
+    const rec = await apiClient.frostUserDkgRecovery(keyId);
+    if (!rec.signer_share_for_user_hex || !rec.user_verification_share_hex) {
+      throw new Error('recovery response missing required fields');
+    }
+
+    const userFinalShareHex = compute_user_final_share(
+      userStateHex,
+      rec.signer_share_for_user_hex,
+    ) as string;
+    const recomputedVerificationShare = compute_user_verification_share(
+      userFinalShareHex,
+    ) as string;
+
+    if (recomputedVerificationShare !== rec.user_verification_share_hex) {
+      // Phrase mismatch (most likely) OR server returned wrong recovery
+      // materials. Either way, we refuse to persist a wrong share -
+      // doing so would brick the user (they'd think recovery succeeded
+      // but signing would fail). Fail loud so the UI can prompt for
+      // the correct phrase.
+      throw new FrostRecoveryWrongPhraseError();
+    }
+
+    await storeShare({
+      keyId: rec.key_id,
+      pubkey: rec.pubkey,
+      finalShareHex: userFinalShareHex,
+      verificationShareHex: rec.user_verification_share_hex,
+    });
+
+    return {
+      keyId: rec.key_id,
+      pubkey: rec.pubkey,
+      userFinalShareHex,
+      userVerificationShareHex: rec.user_verification_share_hex,
+    };
+  } finally {
     if (userStateHex !== null) {
       userStateHex = null;
     }

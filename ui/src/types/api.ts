@@ -85,11 +85,31 @@ export interface FrostUserDkgRound2Response {
 export interface FrostUserDkgFinalizeRequest {
   session_id: string;
   confirm_joint_pubkey_hex: string; // A0 + B0, compressed-SEC1 hex
+  /** Optional but expected for keys that need lost-device recovery support.
+   * The signer stores this verbatim; the recovery flow uses it to verify
+   * a share reconstructed from a BIP39 phrase. */
+  user_verification_share_hex?: string;
 }
 
 export interface FrostUserDkgFinalizeResponse {
   key_id: string;
   pubkey: string; // x-only BIP-340 / Nostr hex (32 bytes / 64 chars)
+}
+
+/** GET /api/v1/frost/user-dkg/recovery/{keyId} response.
+ * Returned only for keys created post-P3e-b (older rows yield 409 Conflict). */
+export interface FrostUserDkgRecoveryResponse {
+  key_id: string;
+  pubkey: string;
+  /** g(UserIndex) from the original DKG, decrypted server-side via the
+   * user's Vault token. The client reconstructs the final share by
+   * computing f(UserIndex) (from the phrase) + this value. */
+  signer_share_for_user_hex: string;
+  /** Original final_share·G the user reported at finalize. The
+   * orchestrator MUST verify the reconstructed final share against this
+   * before accepting recovery; otherwise a wrong phrase silently
+   * produces an unusable share. */
+  user_verification_share_hex: string;
 }
 
 export interface KeyPermissions {

@@ -23,6 +23,7 @@ import type {
   FrostUserDkgRound2Response,
   FrostUserDkgFinalizeRequest,
   FrostUserDkgFinalizeResponse,
+  FrostUserDkgRecoveryResponse,
 } from '../types/api';
 
 const API_BASE = '/api/v1';
@@ -170,6 +171,15 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify(body),
     });
+  }
+
+  /** Fetch recovery materials for a FROST key the authenticated user owns.
+   * The server decrypts the at-DKG share via the user's Vault token and
+   * returns it plus the verification share. Returns 409 if the key
+   * predates recovery support (created before P3e-b), 404 if not owned
+   * or not found, 424 if Vault is unavailable. */
+  async frostUserDkgRecovery(keyId: string): Promise<FrostUserDkgRecoveryResponse> {
+    return this.fetch(`/frost/user-dkg/recovery/${encodeURIComponent(keyId)}`);
   }
 
   // Request endpoints
