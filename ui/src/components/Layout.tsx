@@ -1,5 +1,5 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { Footer } from '@cloistr/ui';
+import { Header, Footer } from '@cloistr/ui/components';
 import { useSignerAuth } from '../hooks/useSignerAuth';
 import { SignerLoginModal } from './SignerLoginModal';
 
@@ -24,40 +24,8 @@ export function Layout() {
 
   return (
     <div className="app-layout">
-      {/* Header */}
-      <header className="signer-header">
-        <div className="signer-header-left">
-          <Link to="/" className="signer-header-logo">
-            <svg width="32" height="32" viewBox="0 0 32 32" fill="currentColor">
-              <circle cx="16" cy="16" r="14" stroke="currentColor" strokeWidth="2" fill="none" />
-              <path d="M12 10l8 6-8 6V10z" fill="currentColor" />
-            </svg>
-            <span className="signer-header-brand">Cloistr Signer</span>
-          </Link>
-
-          {/* Service Menu */}
-          <nav className="signer-service-menu">
-            <a href="https://docs.cloistr.xyz" className="signer-service-link">Docs</a>
-            <a href="https://drive.cloistr.xyz" className="signer-service-link">Drive</a>
-            <span className="signer-service-link signer-service-active">Signer</span>
-          </nav>
-        </div>
-
-        <div className="signer-header-right">
-          {isAuthenticated ? (
-            <div className="signer-user-menu">
-              <span className="signer-username">{user?.username}</span>
-              <button className="btn btn-secondary btn-sm" onClick={logout}>
-                Sign Out
-              </button>
-            </div>
-          ) : (
-            <button className="btn btn-primary" onClick={showLoginModal}>
-              Sign In
-            </button>
-          )}
-        </div>
-      </header>
+      {/* Shared Cloistr navbar (service menu + Nostr auth) */}
+      <Header activeServiceId="signer" />
 
       {/* Main Content */}
       <div className="app-main">
@@ -82,6 +50,13 @@ export function Layout() {
                   Users
                 </Link>
               )}
+              {/* Signer backend session (JWT) — distinct from the navbar's Nostr auth */}
+              <div className="sidebar-account">
+                <span className="sidebar-username">{user?.username}</span>
+                <button className="btn btn-secondary btn-sm" onClick={logout}>
+                  Sign Out
+                </button>
+              </div>
             </nav>
           </aside>
         )}
