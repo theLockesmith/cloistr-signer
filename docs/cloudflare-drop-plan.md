@@ -275,11 +275,8 @@ Suggested implementation phases **(revised 2026-06-29: cutovers first, harden af
 | Phase | Scope | Wall-clock |
 |---|---|---|
 | C1 | Minimal technical prep: create **`roles/kube/cloistr-ingress/`** (Routes/NodePorts/DNS, §13.4), edge-box vhost/stream templates, per-host SAN additions, `test-direct.cloistr.xyz` end-to-end cert+route, runbook. **No protections/load-test in this phase.** | days |
-| C2 | ✅ apex `cloistr.xyz` SHIPPED 2026-06-29 (§13.2). Remaining: **drive.cloistr.xyz**. | 1-2 days |
-| C3 | Cutover stash, contacts, files, relay-admin. | days |
-| C4 | Cutover privacy-critical pair (signer, bunker). Update privacy-architecture status. | 2-3 days |
-| C5 | Cutover WebSocket-heavy (documents). Parallel (independent of web cutover): **mail backend repoint** — `stream.d/mail.conf` upstreams `10.60.169.11` → cloistr-email NodePorts (§13.3), retire `10.60.169.11`. | 1-2 days |
-| C6 | Cutover highest-traffic (relay). | 2-3 days |
+| C2 | ✅ apex `cloistr.xyz` SHIPPED 2026-06-29 (§13.2). | done |
+| C3-C6 | ✅ **ALL deployed subdomains SHIPPED 2026-06-29** (§13.5): drive, stash, files, blossom, vault, tasks, docs, sheets, slides, whiteboard, space, discover, email, me, relay-admin, signer, bunker, relay. WebSocket verified (relay real 101 via edge). Skipped (no backend deployed): contacts, calendar, documents, hub, api.hub. Outstanding: cloistr-email **SMTP** backend repoint (§13.3); api.hub needs its own cert SAN. | done |
 | **H** | **Hardening (deferred protections): DDoS-replacement decision (§4), fail2ban on edge nodes, nginx `limit_req` per vhost, load test / baseline.** Done AFTER everything is on direct ingress. | 1-2 weeks |
 | C7 | Decommission cloistr-tunnel. Scale to 0, leave 30 days, then delete. | 30-day soak + cleanup |
 
@@ -410,6 +407,35 @@ Notes:
   needs the `uri` module against the CF API (as the cert-manager token task already does).
 - Prod applies are gated by the V17 prod-target hooks; each `atlas kube apply` / nginx play needs a
   `verify_action` (or override) per the go/no-go for that phase.
+
+### 13.5 All-subdomain cutover — ✅ SHIPPED 2026-06-29
+
+All deployed cloistr subdomains moved to grey-cloud direct ingress in one session, after the apex.
+
+**Mechanism (reusable):**
+- **One wildcard edge vhost** `nginx_proxy/files/sites-enabled/cloistr.xyz/wildcard.cloistr.xyz`
+  (`server_name *.cloistr.xyz`) → `proxy_pass http://10.51.0.6:80`, Host preserved, WS upgrade headers,
+  3600s timeouts, 2g body, `limit_req`. The router dispatches each Host to its Route, so no per-service
+  vhosts are needed. The apex + files-staging specific vhosts take precedence.
+- **`cloistr-ingress` role** now declares a Route per service (path-split for discover/email/me;
+  `haproxy.router.openshift.io/timeout: 3600s` annotation on WS routes relay/signer/bunker). Six
+  subdomains already had Routes from their own roles (docs, sheets, slides, space, whiteboard,
+  relay-admin) and were left as-is.
+- **Batched DNS** via `-e cloistr_ingress_manage_dns=true -e cloistr_ingress_dns_only=h1,h2` (comma list,
+  no spaces — the `atlas` wrapper rejects JSON `-e`). Flipped in plan order: drive/stash → bulk web →
+  signer/bunker → relay last.
+
+**Verified:** every service reached via the router VIP pre-flip (no 503s); post-flip all serve direct
+(`Server: nginx`); **relay does a real `HTTP/1.1 101` WebSocket upgrade through the edge**; NIP-05 +
+Lightning Address live via cloistr-me.
+
+**Skipped — not deployed** (their tunnel routes were already dead, `no such host` in cloudflared logs):
+`contacts`, `calendar`, `documents`, `hub`, `api.hub`. `api.hub.cloistr.xyz` additionally needs its own
+cert SAN (nested name not covered by `*.cloistr.xyz`). Cut these over once their backends ship.
+
+**Still on the tunnel (intentionally):** the tunnel deployment stays up as the rollback path during the
+soak; removing the cut-over hostnames from `cloistr_services` + scaling cloudflared to 0 is the C7
+decommission step (post-soak). SMTP (cloistr-email) backend repoint (§13.3) is still outstanding.
 
 ---
 
