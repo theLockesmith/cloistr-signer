@@ -397,7 +397,7 @@ func TestSigner_handleSignEvent_AllowedKinds(t *testing.T) {
 		}
 
 		eventJSON := `{"kind":1,"content":"hello","tags":[],"created_at":1234567890}`
-		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{eventJSON}, perm)
+		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, "", []string{eventJSON}, perm)
 		if err != nil {
 			t.Errorf("handleSignEvent() error = %v, should allow kind 1", err)
 		}
@@ -410,7 +410,7 @@ func TestSigner_handleSignEvent_AllowedKinds(t *testing.T) {
 		}
 
 		eventJSON := `{"kind":4,"content":"encrypted","tags":[],"created_at":1234567890}`
-		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{eventJSON}, perm)
+		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, "", []string{eventJSON}, perm)
 		if err == nil {
 			t.Error("handleSignEvent() should return error for disallowed kind")
 		}
@@ -423,7 +423,7 @@ func TestSigner_handleSignEvent_AllowedKinds(t *testing.T) {
 		}
 
 		eventJSON := `{"kind":9999,"content":"test","tags":[],"created_at":1234567890}`
-		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{eventJSON}, perm)
+		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, "", []string{eventJSON}, perm)
 		if err != nil {
 			t.Errorf("handleSignEvent() error = %v, should allow any kind when AllowedKinds is empty", err)
 		}
@@ -431,7 +431,7 @@ func TestSigner_handleSignEvent_AllowedKinds(t *testing.T) {
 
 	t.Run("missing params", func(t *testing.T) {
 		perm := &storage.Permission{Methods: []string{"sign_event"}}
-		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{}, perm)
+		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, "", []string{}, perm)
 		if err == nil {
 			t.Error("handleSignEvent() should return error for missing params")
 		}
@@ -439,7 +439,7 @@ func TestSigner_handleSignEvent_AllowedKinds(t *testing.T) {
 
 	t.Run("invalid event JSON", func(t *testing.T) {
 		perm := &storage.Permission{Methods: []string{"sign_event"}}
-		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{"not-json"}, perm)
+		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, "", []string{"not-json"}, perm)
 		if err == nil {
 			t.Error("handleSignEvent() should return error for invalid JSON")
 		}
@@ -471,7 +471,7 @@ func TestSigner_handleSignEvent_DisposableMode(t *testing.T) {
 	for _, kind := range refusedKinds {
 		t.Run(fmt.Sprintf("refuses kind %d", kind), func(t *testing.T) {
 			eventJSON := fmt.Sprintf(`{"kind":%d,"content":"x","tags":[],"created_at":1234567890}`, kind)
-			_, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{eventJSON}, perm)
+			_, err := signer.handleSignEvent(ctx, pubkey, privateKey, "", []string{eventJSON}, perm)
 			if err == nil {
 				t.Errorf("handleSignEvent() kind:%d should be refused on disposable-mode key", kind)
 			}
@@ -480,7 +480,7 @@ func TestSigner_handleSignEvent_DisposableMode(t *testing.T) {
 
 	t.Run("allows kind 1 (regular note)", func(t *testing.T) {
 		eventJSON := `{"kind":1,"content":"hello","tags":[],"created_at":1234567890}`
-		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{eventJSON}, perm)
+		_, err := signer.handleSignEvent(ctx, pubkey, privateKey, "", []string{eventJSON}, perm)
 		if err != nil {
 			t.Errorf("handleSignEvent() kind:1 should be allowed on disposable-mode key, got %v", err)
 		}
@@ -488,7 +488,7 @@ func TestSigner_handleSignEvent_DisposableMode(t *testing.T) {
 
 	t.Run("strips client fingerprint tag", func(t *testing.T) {
 		eventJSON := `{"kind":1,"content":"hello","tags":[["client","damus"],["t","nostr"]],"created_at":1234567890}`
-		result, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{eventJSON}, perm)
+		result, err := signer.handleSignEvent(ctx, pubkey, privateKey, "", []string{eventJSON}, perm)
 		if err != nil {
 			t.Fatalf("handleSignEvent() error = %v", err)
 		}
@@ -525,7 +525,7 @@ func TestSigner_handleSignEvent_NonDisposableAllowsAll(t *testing.T) {
 	for _, kind := range []int{0, 3, 10002, 4} {
 		t.Run(fmt.Sprintf("allows kind %d", kind), func(t *testing.T) {
 			eventJSON := fmt.Sprintf(`{"kind":%d,"content":"x","tags":[],"created_at":1234567890}`, kind)
-			if _, err := signer.handleSignEvent(ctx, pubkey, privateKey, []string{eventJSON}, perm); err != nil {
+			if _, err := signer.handleSignEvent(ctx, pubkey, privateKey, "", []string{eventJSON}, perm); err != nil {
 				t.Errorf("handleSignEvent() kind:%d on non-disposable key should succeed, got %v", kind, err)
 			}
 		})
