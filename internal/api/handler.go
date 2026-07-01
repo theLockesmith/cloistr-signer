@@ -102,9 +102,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health/live", h.handleLive)
 	mux.HandleFunc("/health/ready", h.handleReady)
 
-	// Key management
+	// Key management. The /api/v1/keys/ handler is registered below with a
+	// wrapper that also handles the P7 Path A migration path.
 	mux.HandleFunc("/api/v1/keys", h.handleKeys)
-	mux.HandleFunc("/api/v1/keys/", h.handleKeyByID)
 
 	// Policy management
 	mux.HandleFunc("/api/v1/policies", h.handlePolicies)
@@ -170,6 +170,18 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// P4e: browser-side cosign listener registers its ephemeral pubkey
 	// so the signer knows where to p-tag kind:24135 cosign requests.
 	mux.HandleFunc("/api/v1/frost/cosign-listener/register", h.handleFrostCosignListenerRegister)
+
+	// P7 Path A: convert an existing user-owned local (Vault-encrypted-
+	// nsec) key to FROST-user (2-of-2) shape without changing the pubkey.
+	// See docs/frost-2-of-n-design.md §13.2.
+	// Route pattern: POST /api/v1/keys/{keyId}/frost-migrate
+	mux.HandleFunc("/api/v1/keys/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/frost-migrate") {
+			h.handleFrostMigratePathA(w, r)
+			return
+		}
+		h.handleKeyByID(w, r)
+	})
 }
 
 // Health check response
