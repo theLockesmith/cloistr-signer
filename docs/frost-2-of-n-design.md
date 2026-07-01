@@ -600,15 +600,43 @@ model (signer already decrypts on every sign). Migration eliminates
 future exposure without adding new exposure.
 
 **Path B — Interactive additive split (for keys living in a different
-client):** Signer sends `R_signer = r_signer·G`. Browser (with `p`
-briefly in memory) computes `r_user = p - r_signer`, sends only
-`R_user = r_user·G`. Signer verifies `R_user + R_signer == p·G`
-against the existing pubkey, stores `r_signer`. Browser stores
-`r_user`, wipes `p`. Nsec's total exposure is one HTTP round-trip in
-the browser JS heap; never touches the wire, never touches signer
-infrastructure. This is the theoretical floor for existing-key
-migration: someone has to hold `p` momentarily and this minimizes
-that.
+client, shipped 2026-07-01):** Two-round protocol.
+
+_Round 1 (init)._ Browser sends `{ pubkey, name }`. Signer verifies
+the caller doesn't already own this pubkey and creates a 5-minute
+session id. NO crypto material exchanged at init — the browser does
+all the math in Round 2.
+
+_Round 2 (finalize)._ Browser (with pasted nsec `p`):
+1. Samples fresh random `p_user`
+2. Computes `p_signer = (p - p_user) mod n`
+3. Computes `R_user = p_user·G`
+4. Drops `p` from memory
+5. Sends `{ session_id, p_signer_hex, r_user_hex, relays }`
+6. Retains `p_user` in IndexedDB
+
+Signer verifies `p_signer·G + R_user == pubkey·G`. If yes, the
+browser proved `(p_signer + p_user) = p` WITHOUT ever transmitting
+`p`. Signer Vault-encrypts `p_signer`, persists Key + FrostUserShare.
+
+**An earlier version of this doc had a broken variant** where the
+signer generated `r_signer` and sent `R_signer` (commitment) to the
+browser, expecting the browser to compute `r_user = p - r_signer`.
+That doesn't work because R_signer is a curve POINT and the browser
+can't extract the scalar r_signer (discrete log). The corrected
+protocol above has the browser own the split, matching what actually
+shipped.
+
+Security properties preserved:
+- Nsec `p` exists only in browser JS heap, briefly (steps 1–4)
+- Nsec never on the wire, never on the signer
+- Signer only sees `p_signer` (its own future share)
+- Browser only retains `p_user` (its own future share)
+- Neither party alone can reconstruct `p`
+
+This is the theoretical floor for existing-key migration: someone
+has to hold `p` momentarily and this minimizes that to the
+browser's execution stack for the duration of Round 2.
 
 **Path C — Fresh FROST + kind:0 rotation (paranoid path):** Mint fresh
 FROST key, publish kind:0 profile update pointing at new pubkey,
