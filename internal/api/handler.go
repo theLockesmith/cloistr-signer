@@ -1618,6 +1618,67 @@ type RegisterRequest struct {
 	Username string `json:"username"`
 	Email    string `json:"email,omitempty"`
 	Password string `json:"password"`
+	// ImportNsec optionally imports an existing key (nsec or hex) as the user's
+	// initial signing key. When empty, a fresh keypair is generated so the new
+	// account can sign immediately (no "account with zero keys" dead end).
+	ImportNsec string `json:"import_nsec,omitempty"`
+}
+
+// createInitialSigningKey provisions a signing key for a newly registered user
+// so they aren't left with an account that can't sign anything. importPriv may
+// be an nsec/hex private key to import, or "" to generate a fresh keypair. The
+// key is local-encrypted: registration runs before the user has a session, so
+// no per-user Vault encryptor is available yet.
+func (h *Handler) createInitialSigningKey(ctx context.Context, ownerID, name, importPriv string) (*storage.Key, error) {
+	var privateKey, pubkey string
+	if strings.TrimSpace(importPriv) != "" {
+		privateKey = strings.TrimSpace(importPriv)
+		if strings.HasPrefix(privateKey, "nsec1") {
+			prefix, value, err := nip19.Decode(privateKey)
+			if err != nil || prefix != "nsec" {
+				return nil, fmt.Errorf("invalid nsec format")
+			}
+			privateKey = value.(string)
+		}
+		pk, err := nostr.GetPublicKey(privateKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid private key")
+		}
+		pubkey = pk
+	} else {
+		privateKey = nostr.GeneratePrivateKey()
+		pk, err := nostr.GetPublicKey(privateKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate key: %w", err)
+		}
+		pubkey = pk
+	}
+
+	encryptedKey := privateKey
+	encryptionMethod := "local"
+	if h.encryptor != nil {
+		enc, err := h.encryptor.Encrypt(privateKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt key: %w", err)
+		}
+		encryptedKey = enc
+	}
+
+	key := &storage.Key{
+		ID:               pubkey[:16],
+		Name:             name,
+		Pubkey:           pubkey,
+		KeyType:          storage.KeyTypeLocal,
+		EncryptedNsec:    encryptedKey,
+		EncryptionMethod: encryptionMethod,
+		CreatedAt:        time.Now(),
+		OwnerID:          ownerID,
+	}
+	if err := h.storage.CreateKey(ctx, key); err != nil {
+		return nil, err
+	}
+	h.signer.RegisterKey(pubkey, privateKey)
+	return key, nil
 }
 
 type LoginRequest struct {
@@ -1744,6 +1805,15 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 	if err := h.storage.EnsurePlatformUser(r.Context(), user.Pubkey); err != nil {
 		// Log but don't fail registration - platform linking is supplementary
 		slog.Warn("failed to ensure platform user", "error", err, "pubkey", user.Pubkey[:16]+"...")
+	}
+
+	// Provision an initial signing key so the new account can actually sign
+	// (an account with zero signing keys is a dead end). Best-effort: on failure
+	// we log and still return success — the user can create a key later.
+	if key, err := h.createInitialSigningKey(r.Context(), userID, "Primary", req.ImportNsec); err != nil {
+		slog.Warn("failed to create initial signing key", "error", err, "user_id", userID)
+	} else {
+		slog.Info("created initial signing key", "user_id", userID, "pubkey", key.Pubkey[:16]+"...")
 	}
 
 	slog.Info("user registered", "username", req.Username, "user_id", userID, "pubkey", user.Pubkey[:16]+"...")
