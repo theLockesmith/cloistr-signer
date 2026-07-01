@@ -207,6 +207,21 @@ class ApiClient {
     });
   }
 
+  /** P7 Path A: convert an existing Vault-encrypted local key to
+   * FROST-user shape. Pubkey preserved. Returns the user share so the
+   * browser can immediately store it in IndexedDB. */
+  async frostMigratePathA(keyId: string): Promise<{
+    key_id: string;
+    pubkey: string;
+    user_share_hex: string;
+    user_verification_share_hex: string;
+    signer_verification_share_hex: string;
+  }> {
+    return this.fetch(`/keys/${encodeURIComponent(keyId)}/frost-migrate`, {
+      method: 'POST',
+    });
+  }
+
 
   // Request endpoints
   async listRequests(): Promise<PendingRequest[]> {

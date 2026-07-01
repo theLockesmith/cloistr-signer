@@ -210,6 +210,31 @@ export async function createFrostKeyWithPhrase(
 }
 
 /**
+ * P7 Path A migration: convert an existing user-owned local key to
+ * FROST-user shape without changing the pubkey. Server splits the nsec
+ * into (p_signer, p_user); this function stores p_user in IndexedDB
+ * under the KEK so subsequent cosigning finds it.
+ */
+export async function migrateKeyToFrostPathA(keyId: string): Promise<CreatedFrostKey> {
+  if (!isShareStorageUnlocked()) {
+    throw new FrostStorageLockedError();
+  }
+  const resp = await apiClient.frostMigratePathA(keyId);
+  await storeShare({
+    keyId: resp.key_id,
+    pubkey: resp.pubkey,
+    finalShareHex: resp.user_share_hex,
+    verificationShareHex: resp.user_verification_share_hex,
+  });
+  return {
+    keyId: resp.key_id,
+    pubkey: resp.pubkey,
+    userFinalShareHex: resp.user_share_hex,
+    userVerificationShareHex: resp.user_verification_share_hex,
+  };
+}
+
+/**
  * Errors recoverFrostKey throws to distinguish recoverable user mistakes
  * (wrong phrase, key never had recovery support) from infrastructure
  * problems (Vault down, server unreachable).
