@@ -23,6 +23,18 @@ type Config struct {
 	Service            ServiceConfig     `yaml:"service"`
 	Proxy              ProxyConfig       `yaml:"proxy"`
 	Discovery          DiscoveryConfig   `yaml:"discovery"`
+	Tor                TorConfig         `yaml:"tor"` // Optional SOCKS5 egress for per-key Tor routing (privacy §3.5)
+}
+
+// TorConfig holds Tor egress configuration.
+//
+// When SOCKS5URL is set (e.g. socks5h://cloistr-tor.cloistr.svc.cluster.local:9050),
+// the go-nostr relay dialer routes outbound connections for keys with
+// tor_egress=true through this proxy. The `socks5h` scheme forces DNS
+// resolution through Tor (required — without it, hostname lookups leak
+// the circuit metadata).
+type TorConfig struct {
+	SOCKS5URL string `yaml:"socks5_url"` // e.g. "socks5h://tor.cloistr.svc.cluster.local:9050"; empty = disabled
 }
 
 // DiscoveryConfig holds optional discovery service configuration
@@ -184,6 +196,10 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("invalid MIN_POW_DIFFICULTY: %w", err)
 		}
 		cfg.MinPowDifficulty = pow
+	}
+
+	if torURL := os.Getenv("TOR_SOCKS5_URL"); torURL != "" {
+		cfg.Tor.SOCKS5URL = torURL
 	}
 
 	if storageType := os.Getenv("STORAGE_TYPE"); storageType != "" {
