@@ -7,7 +7,6 @@ import (
 	"sync"
 
 	"github.com/bytemare/ecc"
-	frostlib "github.com/bytemare/frost"
 	"github.com/bytemare/secret-sharing/keys"
 )
 
@@ -28,54 +27,61 @@ func NewCoordinator(storage FrostStorage, encryptor Encryptor) *Coordinator {
 	}
 }
 
-// SignMessage signs a message using FROST threshold signatures
-// This requires at least t local shares to be available for the given key.
-// Returns the signature as a 64-byte array (32-byte R + 32-byte s) compatible with Nostr/BIP-340.
+// SignMessage signs a 32-byte digest using BIP-340-mode FROST threshold
+// signatures. Requires at least t local shares. Returns a canonical 64-byte
+// BIP-340 signature that verifies under btcec/schnorr — the same verifier
+// Nostr relays use.
+//
+// P4a'/2026-07-01: replaced bytemare/frost.Signer + AggregateSignatures
+// with the BIP-340-native primitives from bip340_frost.go. The prior
+// implementation produced FROST-secp256k1-SHA256-v1 signatures which
+// Nostr relays would have rejected. See docs/frost-cosigning-design.md §9.
 func (c *Coordinator) SignMessage(ctx context.Context, frostKeyID string, message []byte) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Get the FROST key
+	if len(message) != 32 {
+		return nil, fmt.Errorf("message must be 32 bytes (Nostr event id), got %d", len(message))
+	}
+
 	frostKey, err := c.storage.GetFrostKey(ctx, frostKeyID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get FROST key: %w", err)
 	}
 
-	// Get all local shares
 	localShares, err := c.storage.ListLocalFrostShares(ctx, frostKeyID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list local shares: %w", err)
 	}
-
-	// Check if we have enough shares
 	if len(localShares) < frostKey.Threshold {
 		return nil, fmt.Errorf("%w: have %d, need %d", ErrInsufficientShares, len(localShares), frostKey.Threshold)
 	}
-
-	// Use exactly threshold shares (first t available)
 	sharesToUse := localShares[:frostKey.Threshold]
 
-	// Decrypt shares and build key shares
 	group := DefaultCiphersuite.Group()
-	keyShares := make([]*keys.KeyShare, len(sharesToUse))
-	publicKeyShares := make([]*keys.PublicKeyShare, frostKey.TotalShares)
 
-	// First, decode all public key shares from verification data
+	// Decode the joint pubkey.
+	jointPubkey := group.NewElement()
+	if err := jointPubkey.Decode(frostKey.GroupPublicKey); err != nil {
+		return nil, fmt.Errorf("decode group public key: %w", err)
+	}
+
+	// Decode all verification shares. Indexed by participant ID.
 	verificationPubKeys, err := decodeVerificationShares(frostKey.VerificationShares, group)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode verification shares: %w", err)
 	}
-
-	// Build PublicKeyShare array for configuration
-	for i := 0; i < frostKey.TotalShares; i++ {
-		publicKeyShares[i] = &keys.PublicKeyShare{
-			PublicKey: verificationPubKeys[i],
-			ID:        uint16(i + 1),
-			Group:     group,
-		}
+	verificationByID := make(map[uint16]*ecc.Element, len(verificationPubKeys))
+	for i, v := range verificationPubKeys {
+		verificationByID[uint16(i+1)] = v
 	}
 
-	// Decrypt and decode the key shares we'll use for signing
+	// Decrypt each local share, extract raw secret scalar + participant ID.
+	type localShareMaterial struct {
+		id     uint16
+		secret *ecc.Scalar
+	}
+	locals := make([]localShareMaterial, len(sharesToUse))
 	for i, share := range sharesToUse {
 		var shareData []byte
 		if c.encryptor != nil && len(share.EncryptedShare) > 0 {
@@ -87,62 +93,99 @@ func (c *Coordinator) SignMessage(ctx context.Context, frostKeyID string, messag
 		} else {
 			shareData = share.EncryptedShare
 		}
-
 		ks, err := decodeKeyShare(shareData, group)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode key share %d: %w", share.ShareIndex, err)
 		}
-		keyShares[i] = ks
-	}
-
-	// Build FROST configuration
-	config, err := GetFrostConfiguration(frostKey, publicKeyShares)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create FROST configuration: %w", err)
-	}
-
-	// Create signers for each share
-	signers := make([]*frostlib.Signer, len(keyShares))
-	for i, ks := range keyShares {
-		signer, err := config.Signer(ks)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create signer for share %d: %w", sharesToUse[i].ShareIndex, err)
+		locals[i] = localShareMaterial{
+			id:     ks.ID,
+			secret: ks.Secret,
 		}
-		signers[i] = signer
 	}
 
-	// Round 1: Generate commitments
-	commitments := make(frostlib.CommitmentList, len(signers))
-	for i, signer := range signers {
-		commitment := signer.Commit()
-		commitments[i] = commitment
+	// Generate a fresh nonce pair per participant. In-process signing —
+	// all t signers are local, so all nonces stay in this function.
+	participants := make([]signParticipant, len(locals))
+	commitments := make([]NonceCommitmentPair, len(locals))
+	allIDs := make([]uint16, len(locals))
+	for i, l := range locals {
+		d := group.NewScalar().Random()
+		e := group.NewScalar().Random()
+		D := group.Base().Multiply(d)
+		E := group.Base().Multiply(e)
+		participants[i] = signParticipant{id: l.id, d: d, e: e, D: D, E: E, secret: l.secret}
+		commitments[i] = NonceCommitmentPair{ParticipantID: l.id, Hiding: D, Binding: E}
+		allIDs[i] = l.id
 	}
+	// Sort by ID ascending — required by ComputeBindingFactors + all BIP-340
+	// FROST helpers.
+	sortByParticipantID(commitments, allIDs, participants)
 
-	// Sort commitments by signer ID (required by FROST protocol)
-	commitments.Sort()
-
-	// Round 2: Generate signature shares
-	sigShares := make([]*frostlib.SignatureShare, len(signers))
-	for i, signer := range signers {
-		sigShare, err := signer.Sign(message, commitments)
-		if err != nil {
-			return nil, fmt.Errorf("failed to sign with share %d: %w", sharesToUse[i].ShareIndex, err)
-		}
-		sigShares[i] = sigShare
-	}
-
-	// Aggregate signatures
-	signature, err := config.AggregateSignatures(message, sigShares, commitments, true)
+	// Prepare shared signable state (binding factors, R aggregation +
+	// even-Y normalization, BIP-340 challenge).
+	signable, err := PrepareSignable(&SessionForSigning{
+		Group:         group,
+		ParticipantID: participants[0].id, // placeholder; PrepareSignable also computes lambda but we recompute per-participant below
+		AllIDs:        allIDs,
+		Commitments:   commitments,
+		JointPubkey:   jointPubkey,
+		Message:       message,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to aggregate signatures: %w", err)
+		return nil, fmt.Errorf("prepare signable: %w", err)
 	}
 
-	// Encode signature to bytes
-	// FROST signature is R (element) + z (scalar)
-	// For Nostr/BIP-340, we need 32-byte R + 32-byte s format
-	sigBytes := signature.Encode()
+	// Compute each participant's partial sig.
+	partials := make([]*ecc.Scalar, len(participants))
+	for i, p := range participants {
+		lambda := LagrangeCoefficient(group, p.id, allIDs)
+		rho := signable.BindingFactors[p.id]
+		partials[i] = ComputePartialSignature(
+			group,
+			p.d, p.e, rho, signable.REvenY,
+			p.secret, signable.PubkeyEvenY,
+			lambda, signable.Challenge,
+		)
+	}
+
+	// Aggregate into canonical 64-byte BIP-340 signature.
+	sigBytes, err := AggregateFullSignature(group, signable, partials)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate: %w", err)
+	}
+
+	// Belt-and-braces: verify under btcec/schnorr before returning. If
+	// this fails, something is wrong with the local math or share
+	// material and we do NOT want to publish an invalid Nostr sig.
+	if err := VerifyBIP340(sigBytes, message, jointPubkey); err != nil {
+		return nil, fmt.Errorf("assembled signature failed BIP-340 verification: %w", err)
+	}
 
 	return sigBytes, nil
+}
+
+// signParticipant is the in-process state for one FROST participant during
+// a single-shot local-shares-only signing ceremony.
+type signParticipant struct {
+	id     uint16
+	d, e   *ecc.Scalar
+	D, E   *ecc.Element
+	secret *ecc.Scalar
+}
+
+// sortByParticipantID sorts three parallel slices by the commitment
+// list's participant ID ascending. Used because Go's sort.Slice can't
+// swap parallel slices atomically without a wrapper struct.
+func sortByParticipantID(commitments []NonceCommitmentPair, allIDs []uint16, participants []signParticipant) {
+	// Simple insertion sort — for small n (typically 2-5), avoids the
+	// wrapper struct overhead.
+	for i := 1; i < len(commitments); i++ {
+		for j := i; j > 0 && commitments[j-1].ParticipantID > commitments[j].ParticipantID; j-- {
+			commitments[j-1], commitments[j] = commitments[j], commitments[j-1]
+			allIDs[j-1], allIDs[j] = allIDs[j], allIDs[j-1]
+			participants[j-1], participants[j] = participants[j], participants[j-1]
+		}
+	}
 }
 
 // SignEvent signs a Nostr event hash using FROST
@@ -161,9 +204,10 @@ func (c *Coordinator) SignEvent(ctx context.Context, frostKeyID string, eventHas
 	return hex.EncodeToString(sigBytes), nil
 }
 
-// VerifySignature verifies a FROST signature against the group public key
+// VerifySignature verifies a BIP-340 Schnorr signature against the joint
+// public key via btcec/schnorr — the same verifier real Nostr relays run.
+// signatureBytes must be a canonical 64-byte (R_x || s) sig.
 func (c *Coordinator) VerifySignature(ctx context.Context, frostKeyID string, message, signatureBytes []byte) (bool, error) {
-	// Get the FROST key
 	frostKey, err := c.storage.GetFrostKey(ctx, frostKeyID)
 	if err != nil {
 		return false, fmt.Errorf("failed to get FROST key: %w", err)
@@ -171,24 +215,22 @@ func (c *Coordinator) VerifySignature(ctx context.Context, frostKeyID string, me
 
 	group := DefaultCiphersuite.Group()
 
-	// Decode the group public key
 	verificationKey := group.NewElement()
 	if err := verificationKey.Decode(frostKey.GroupPublicKey); err != nil {
 		return false, fmt.Errorf("failed to decode verification key: %w", err)
 	}
 
-	// Decode the signature
-	signature := new(frostlib.Signature)
-	if err := signature.Decode(signatureBytes); err != nil {
-		return false, fmt.Errorf("failed to decode signature: %w", err)
+	// Length + format errors are reported as errors; only the actual
+	// "signature does not verify" case returns (false, nil).
+	if len(signatureBytes) != 64 {
+		return false, fmt.Errorf("signature must be 64 bytes, got %d", len(signatureBytes))
 	}
-
-	// Verify
-	err = frostlib.VerifySignature(DefaultCiphersuite, message, signature, verificationKey)
-	if err != nil {
-		return false, nil // Verification failed but no error
+	if err := VerifyBIP340(signatureBytes, message, verificationKey); err != nil {
+		if err.Error() == "BIP-340 verification failed" {
+			return false, nil
+		}
+		return false, err
 	}
-
 	return true, nil
 }
 
