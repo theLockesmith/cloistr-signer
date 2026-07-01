@@ -268,6 +268,31 @@ class ApiClient {
     });
   }
 
+
+  /** P5 share-transfer upload: encrypted ciphertext + salt + iv. */
+  async frostShareTransferUpload(body: {
+    key_id: string;
+    ciphertext_b64: string;
+    salt_hex: string;
+    iv_hex: string;
+  }): Promise<{ session_id: string; expires_at_unix: number }> {
+    return this.fetch('/frost/share-transfer/upload', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** P5 share-transfer download by session id. Consume-on-read. */
+  async frostShareTransferDownload(sessionId: string): Promise<{
+    key_id: string;
+    pubkey: string;
+    ciphertext_b64: string;
+    salt_hex: string;
+    iv_hex: string;
+  }> {
+    return this.fetch(`/frost/share-transfer/${encodeURIComponent(sessionId)}`);
+  }
+
   async frostMigratePathA(keyId: string): Promise<{
     key_id: string;
     pubkey: string;

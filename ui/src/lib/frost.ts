@@ -556,3 +556,151 @@ export async function publishFrostRotationProfile(
 
   return { signedEvent: signed, publishedTo: published };
 }
+
+// -----------------------------------------------------------------------------
+// P5: cross-device FROST share transfer (for non-phrase keys).
+// -----------------------------------------------------------------------------
+
+/**
+ * Derive an AES-256-GCM key from a pairing password + salt via
+ * PBKDF2-HMAC-SHA-256 (600k iterations - matches the IndexedDB KEK
+ * discipline). Non-extractable CryptoKey.
+ */
+async function derivePairingKek(password: string, salt: Uint8Array): Promise<CryptoKey> {
+  const enc = new TextEncoder();
+  const material = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(password) as unknown as BufferSource,
+    { name: 'PBKDF2' },
+    false,
+    ['deriveKey'],
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: salt as unknown as BufferSource, iterations: 600_000, hash: 'SHA-256' },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
+}
+
+function b64(bytes: Uint8Array): string {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+function b64Decode(str: string): Uint8Array {
+  const s = atob(str);
+  const out = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+  return out;
+}
+function hexEncode(bytes: Uint8Array): string {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+function hexDecode(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
+}
+
+/**
+ * Export the FROST share on this device for transfer to another
+ * device. Encrypts the share via AES-GCM under a pairing-password-
+ * derived KEK and uploads the ciphertext to the signer. Returns the
+ * session_id the destination device needs.
+ *
+ * The pairing password is communicated out-of-band by the user (e.g.
+ * they send it to themselves via a secure channel).
+ */
+export async function exportFrostShareForTransfer(
+  keyId: string,
+  pairingPassword: string,
+): Promise<{ sessionId: string; expiresAtUnix: number }> {
+  if (!isShareStorageUnlocked()) {
+    throw new FrostStorageLockedError();
+  }
+  const { loadShare } = await import('./frostStorage');
+  const share = await loadShare(keyId);
+  if (!share) throw new Error(`no local share for key ${keyId}`);
+
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const kek = await derivePairingKek(pairingPassword, salt);
+
+  const plaintext = hexDecode(share.finalShareHex);
+  const ciphertextBuf = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: iv as unknown as BufferSource },
+    kek,
+    plaintext as unknown as BufferSource,
+  );
+
+  const resp = await apiClient.frostShareTransferUpload({
+    key_id: keyId,
+    ciphertext_b64: b64(new Uint8Array(ciphertextBuf)),
+    salt_hex: hexEncode(salt),
+    iv_hex: hexEncode(iv),
+  });
+  return { sessionId: resp.session_id, expiresAtUnix: resp.expires_at_unix };
+}
+
+/**
+ * Import a FROST share sent from another device. Downloads the
+ * ciphertext + salt + iv from the signer, decrypts locally via the
+ * pairing password, stores in IndexedDB under this device's KEK.
+ *
+ * Wrong password throws FrostShareTransferBadPasswordError — GCM
+ * auth-tag failure surfaces distinctly from other issues.
+ */
+export async function importFrostShareFromTransfer(
+  sessionId: string,
+  pairingPassword: string,
+): Promise<CreatedFrostKey> {
+  if (!isShareStorageUnlocked()) {
+    throw new FrostStorageLockedError();
+  }
+
+  const resp = await apiClient.frostShareTransferDownload(sessionId);
+  const salt = hexDecode(resp.salt_hex);
+  const iv = hexDecode(resp.iv_hex);
+  const ciphertext = b64Decode(resp.ciphertext_b64);
+  const kek = await derivePairingKek(pairingPassword, salt);
+
+  let plaintextBuf: ArrayBuffer;
+  try {
+    plaintextBuf = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: iv as unknown as BufferSource },
+      kek,
+      ciphertext as unknown as BufferSource,
+    );
+  } catch (e) {
+    throw new FrostShareTransferBadPasswordError();
+  }
+  const plaintext = new Uint8Array(plaintextBuf);
+  const finalShareHex = hexEncode(plaintext);
+
+  // Compute verification share via WASM.
+  await initWasm();
+  const verificationShareHex = compute_user_verification_share(finalShareHex) as string;
+
+  await storeShare({
+    keyId: resp.key_id,
+    pubkey: resp.pubkey,
+    finalShareHex,
+    verificationShareHex,
+  });
+
+  return {
+    keyId: resp.key_id,
+    pubkey: resp.pubkey,
+    userFinalShareHex: finalShareHex,
+    userVerificationShareHex: verificationShareHex,
+  };
+}
+
+export class FrostShareTransferBadPasswordError extends Error {
+  constructor() {
+    super('The pairing password does not match. The share cannot be decrypted.');
+    this.name = 'FrostShareTransferBadPasswordError';
+  }
+}
