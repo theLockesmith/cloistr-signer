@@ -873,13 +873,16 @@ fn verify_bip340_impl(
     signature_hex: &str,
 ) -> Result<bool, String> {
     use k256::schnorr::{Signature as SchnorrSig, VerifyingKey};
-    use k256::schnorr::signature::Verifier;
+    use k256::schnorr::signature::hazmat::PrehashVerifier;
 
     let pk_bytes = hex::decode(pubkey_x_only_hex).map_err(|e| format!("pk hex: {}", e))?;
     if pk_bytes.len() != 32 {
         return Err(format!("x-only pubkey must be 32 bytes, got {}", pk_bytes.len()));
     }
     let msg = hex::decode(event_hash_hex).map_err(|e| format!("msg hex: {}", e))?;
+    if msg.len() != 32 {
+        return Err(format!("event_hash must be 32 bytes (pre-hashed), got {}", msg.len()));
+    }
     let sig_bytes = hex::decode(signature_hex).map_err(|e| format!("sig hex: {}", e))?;
     if sig_bytes.len() != 64 {
         return Err(format!("signature must be 64 bytes, got {}", sig_bytes.len()));
@@ -888,7 +891,10 @@ fn verify_bip340_impl(
     let vk = VerifyingKey::from_bytes(&pk_bytes).map_err(|e| format!("pubkey parse: {}", e))?;
     let sig = SchnorrSig::try_from(sig_bytes.as_slice())
         .map_err(|e| format!("sig parse: {}", e))?;
-    Ok(vk.verify(&msg, &sig).is_ok())
+    // verify_prehash treats msg as an already-hashed 32-byte digest.
+    // Nostr NIP-01 event IDs are sha256(serialized_event) — the digest
+    // is what we sign and verify over, NOT sha256(digest).
+    Ok(vk.verify_prehash(&msg, &sig).is_ok())
 }
 
 // -----------------------------------------------------------------------------
@@ -1063,29 +1069,21 @@ mod signing_tests {
     // both parties through the primitives, verify the aggregated
     // signature with k256's Schnorr verifier (BIP-340).
     #[test]
-    #[ignore = "P4b WIP - Rust BIP-340 math verifies-under-k256 mismatch; investigate"]
     fn full_flow_produces_valid_bip340() {
-        let mut rng = OsRng;
-        // DKG polynomials
+        // Deterministic RNG so failures are reproducible.
+        use k256::elliptic_curve::rand_core::SeedableRng;
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([7u8; 32]);
         let a0 = Scalar::random(&mut rng);
         let a1 = Scalar::random(&mut rng);
         let b0 = Scalar::random(&mut rng);
         let b1 = Scalar::random(&mut rng);
-
-        // Joint pubkey
         let joint = ProjectivePoint::GENERATOR * a0 + ProjectivePoint::GENERATOR * b0;
 
-        // Shares
         let idx_signer = scalar_from_u64(SIGNER_INDEX);
         let idx_user = scalar_from_u64(USER_INDEX);
-        let f_signer = a0 + a1 * idx_signer;
-        let g_signer = b0 + b1 * idx_signer;
-        let f_user = a0 + a1 * idx_user;
-        let g_user = b0 + b1 * idx_user;
-        let user_share = f_user + g_user;
-        let signer_share = f_signer + g_signer;
+        let user_share = (a0 + a1 * idx_user) + (b0 + b1 * idx_user);
+        let signer_share = (a0 + a1 * idx_signer) + (b0 + b1 * idx_signer);
 
-        // Nonces
         let d_user = Scalar::random(&mut rng);
         let e_user = Scalar::random(&mut rng);
         let d_signer = Scalar::random(&mut rng);
@@ -1097,19 +1095,15 @@ mod signing_tests {
 
         let event_hash = [0x42u8; 32];
 
-        // Build nonce state hex for each
         let mut user_state = Vec::new();
         user_state.extend_from_slice(&d_user.to_bytes());
         user_state.extend_from_slice(&e_user.to_bytes());
-        let user_state_hex = hex::encode(&user_state);
         let mut signer_state = Vec::new();
         signer_state.extend_from_slice(&d_signer.to_bytes());
         signer_state.extend_from_slice(&e_signer.to_bytes());
-        let signer_state_hex = hex::encode(&signer_state);
 
-        // Compute partials
         let user_partial = compute_partial_signature_impl(
-            &user_state_hex,
+            &hex::encode(&user_state),
             &scalar_to_hex(&user_share),
             &point_to_hex(&d_user_pt),
             &point_to_hex(&e_user_pt),
@@ -1121,7 +1115,7 @@ mod signing_tests {
         )
         .expect("user partial");
         let signer_partial = compute_partial_signature_impl(
-            &signer_state_hex,
+            &hex::encode(&signer_state),
             &scalar_to_hex(&signer_share),
             &point_to_hex(&d_signer_pt),
             &point_to_hex(&e_signer_pt),
@@ -1149,6 +1143,6 @@ mod signing_tests {
         let joint_x_only = hex::encode(&joint_encoded.as_bytes()[1..]);
         let ok = verify_bip340_impl(&joint_x_only, &hex::encode(&event_hash), &sig_hex)
             .expect("verify");
-        assert!(ok, "aggregated BIP-340 signature must verify under k256 schnorr");
+        assert!(ok, "aggregated BIP-340 signature must verify under k256::schnorr");
     }
 }
