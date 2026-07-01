@@ -177,6 +177,13 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/frost/sign/round1", h.handleFrostSignRound1)
 	mux.HandleFunc("/api/v1/frost/sign/round2", h.handleFrostSignRound2)
 
+	// FROST P5: cross-device share transfer for keys that lack a
+	// phrase-derived share (Path A/B migrations). Upload the share
+	// AES-GCM-encrypted under a pairing-password-derived KEK; the
+	// signer relays the ciphertext to the destination device.
+	mux.HandleFunc("/api/v1/frost/share-transfer/upload", h.handleFrostShareTransferUpload)
+	mux.HandleFunc("/api/v1/frost/share-transfer/", h.handleFrostShareTransferDownload)
+
 	// P7 Path A: convert an existing user-owned local (Vault-encrypted-
 	// nsec) key to FROST-user (2-of-2) shape without changing the pubkey.
 	// See docs/frost-2-of-n-design.md §13.2.
