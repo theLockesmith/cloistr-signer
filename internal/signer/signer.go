@@ -1402,6 +1402,127 @@ type CosignResponsePayload struct {
 	PartialSignature  string           `json:"partial_signature_hex,omitempty"`
 }
 
+// publishCosignRequest sends a kind:24135 cosign request to the user's
+// browser via the key's relays. Content is NIP-44 encrypted for
+// clientPubkey (browser session ephemeral). The signer signs the event
+// with a fresh ephemeral keypair generated per cosign session so no
+// long-lived signer identity is tied to the cosign channel.
+//
+// Returns the ephemeral signer pubkey (which the caller uses when
+// setting up the response subscription filter).
+func (s *Signer) publishCosignRequest(ctx context.Context, payload *CosignRequestPayload, clientPubkey string, relays []string) (string, error) {
+	// Fresh ephemeral keypair for this cosign session.
+	sk := nostr.GeneratePrivateKey()
+	signerPubkey, err := nostr.GetPublicKey(sk)
+	if err != nil {
+		return "", fmt.Errorf("derive cosign signer pubkey: %w", err)
+	}
+
+	// Serialize + NIP-44 encrypt payload for the browser.
+	plaintext, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal cosign payload: %w", err)
+	}
+	convKey, err := nip44.GenerateConversationKey(clientPubkey, sk)
+	if err != nil {
+		return "", fmt.Errorf("nip44 conversation key: %w", err)
+	}
+	ciphertext, err := nip44.Encrypt(string(plaintext), convKey)
+	if err != nil {
+		return "", fmt.Errorf("nip44 encrypt: %w", err)
+	}
+
+	// Build + sign the cosign-request event.
+	event := &nostr.Event{
+		PubKey:    signerPubkey,
+		CreatedAt: nostr.Now(),
+		Kind:      KindCosignRequest,
+		Tags: nostr.Tags{
+			{"p", clientPubkey},
+			{"session", payload.SessionID},
+			{"key_id", payload.KeyID},
+		},
+		Content: ciphertext,
+	}
+	if err := event.Sign(sk); err != nil {
+		return "", fmt.Errorf("sign cosign event: %w", err)
+	}
+
+	// Publish to the user's relays. On failure of ALL relays, propagate.
+	if len(relays) == 0 {
+		return "", errors.New("no relays configured for cosign channel")
+	}
+	pubCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	published := 0
+	for _, relayURL := range relays {
+		if err := s.relayClient.PublishToRelay(pubCtx, relayURL, event); err != nil {
+			slog.Warn("cosign publish failed on relay", "relay", relayURL, "error", err)
+			continue
+		}
+		published++
+	}
+	if published == 0 {
+		return "", errors.New("failed to publish cosign request to any relay")
+	}
+	slog.Info("published cosign request",
+		"session_id", payload.SessionID,
+		"key_id", payload.KeyID,
+		"client_pubkey", clientPubkey[:16]+"...",
+		"published_to", published,
+	)
+	return signerPubkey, nil
+}
+
+// waitForCosignResponse subscribes to kind:24136 events tagged with the
+// signer's ephemeral pubkey and the matching session ID, waits for one
+// (or timeout), NIP-44 decrypts and returns the parsed payload.
+func (s *Signer) waitForCosignResponse(ctx context.Context, signerEphemeralSK, signerEphemeralPK, sessionID string, relays []string, timeout time.Duration) (*CosignResponsePayload, error) {
+	_ = relays // Client.Subscribe uses all connected relays; user's relay set is a subset via existing connect logic
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	filters := nostr.Filters{
+		{
+			Kinds: []int{KindCosignResponse},
+			Tags: nostr.TagMap{
+				"p":       []string{signerEphemeralPK},
+				"session": []string{sessionID},
+			},
+		},
+	}
+
+	respCh := make(chan *nostr.Event, 1)
+	s.relayClient.Subscribe(waitCtx, filters, func(ev *nostr.Event) {
+		select {
+		case respCh <- ev:
+		default:
+		}
+	})
+
+	select {
+	case <-waitCtx.Done():
+		return nil, fmt.Errorf("cosign wait timeout: %w", waitCtx.Err())
+	case ev := <-respCh:
+		convKey, err := nip44.GenerateConversationKey(ev.PubKey, signerEphemeralSK)
+		if err != nil {
+			return nil, fmt.Errorf("nip44 conversation key: %w", err)
+		}
+		plaintext, err := nip44.Decrypt(ev.Content, convKey)
+		if err != nil {
+			return nil, fmt.Errorf("nip44 decrypt: %w", err)
+		}
+		var resp CosignResponsePayload
+		if err := json.Unmarshal([]byte(plaintext), &resp); err != nil {
+			return nil, fmt.Errorf("unmarshal cosign response: %w", err)
+		}
+		if resp.V != 1 {
+			return nil, fmt.Errorf("unsupported cosign response version: %d", resp.V)
+		}
+		return &resp, nil
+	}
+}
+
 // handleFrostUserSignEvent routes a NIP-46 sign_event for a FROST-user
 // key through the browser cosigning ceremony (docs/frost-cosigning-design.md).
 //
