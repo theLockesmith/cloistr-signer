@@ -84,7 +84,8 @@ type Signer struct {
 	proxyClient     *proxy.Client                       // Client for upstream signer connections
 	relaySelector   *discovery.Selector                 // Relay selection with optional discovery
 	relayPrefs      *relayprefs.Client                  // Relay preferences for user data delivery
-	frostCoordinator *frost.Coordinator                 // FROST threshold signing coordinator
+	frostCoordinator *frost.Coordinator                 // FROST threshold signing coordinator (Phase 13)
+	frostUserSigner  *frost.UserSignerCoordinator       // FROST 2-of-N user-cosigner coordinator (P4)
 	keys            map[string]string                   // pubkey -> private key (hex)
 	keysLock        sync.RWMutex                        // Protects keys map for concurrent access
 	keyRelays       map[string][]string                 // pubkey -> configured relays (from storage)
@@ -133,6 +134,7 @@ func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, e
 		relaySelector:    relaySelector,
 		relayPrefs:       relayPrefs,
 		frostCoordinator: frostCoord,
+		frostUserSigner:  frost.NewUserSignerCoordinator(),
 		keys:             make(map[string]string),
 		keyRelays:        make(map[string][]string),
 		proxyKeys:        make(map[string]string),
@@ -1365,19 +1367,75 @@ func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey s
 }
 
 // handleFrostUserSignEvent routes a NIP-46 sign_event for a FROST-user
-// key through the browser cosigning ceremony. P4d wires the shape; the
-// actual browser round-trip (kind:24135/24136 relay events) ships with
-// P4c/P4e. Until that lands this returns a clear error so clients can
-// display a helpful message rather than an opaque failure.
+// key through the browser cosigning ceremony (docs/frost-cosigning-design.md).
+//
+// Current state (P4d):
+//   1. Assembles UserCosignSetup from storage — this WOULD decrypt the
+//      signer's share via the user's vault_token stashed on the NIP-46
+//      session at handleConnect time.
+//   2. Calls UserSignerCoordinator.BeginCosign to generate the signer's
+//      commitment.
+//   3. WOULD publish kind:24135 to the user's relays and wait for the
+//      kind:24136 response (P4c wire, next commit).
+//   4. Once the browser responds, WOULD call CompleteCosign to combine
+//      partials into a canonical 64-byte BIP-340 signature.
+//   5. Attaches the signature to the event and returns.
+//
+// Steps 3+4 are the P4c/P4e piece. Until then we return a clear error
+// AFTER doing the setup work so that any errors in the setup path
+// (missing FROST share row, missing vault_token, etc.) surface
+// immediately and don't wait until the relay wire ships.
 func (s *Signer) handleFrostUserSignEvent(ctx context.Context, key *storage.Key, event *nostr.Event) (string, error) {
-	_ = ctx
-	_ = event
+	// Look up the FROST user share for this key.
+	share, err := s.storage.GetFrostUserShareByKeyID(ctx, key.ID)
+	if err != nil {
+		return "", fmt.Errorf("frost user share not found for key %s: %w", key.Pubkey[:16]+"...", err)
+	}
+
+	// Look up the current NIP-46 session's vault_token. In-flight
+	// session context isn't passed to handleSignEvent yet; we look
+	// up the key's owner's active web session as a proxy — same
+	// mechanism as lookupVaultTokenForKey. Once P4d step 4 threads
+	// the client_pubkey through, we can read the Session row directly.
+	vaultToken := s.lookupVaultTokenForKey(ctx, key.Pubkey)
+	if vaultToken == "" {
+		return "", fmt.Errorf(
+			"FROST key %s: no active web session with vault_token. "+
+				"Log in to signer.cloistr.xyz in a browser tab and try again "+
+				"(FROST keys require the browser cosign channel)",
+			key.Pubkey[:16]+"...")
+	}
+
+	// Compute the event hash (sha256 of the canonical serialization).
+	event.PubKey = key.Pubkey
+	rawID := event.GetID()
+	if rawID == "" {
+		return "", errors.New("failed to compute event id")
+	}
+	eventHash, err := hex.DecodeString(rawID)
+	if err != nil {
+		return "", fmt.Errorf("decode event id: %w", err)
+	}
+	if len(eventHash) != 32 {
+		return "", fmt.Errorf("event id is not 32 bytes: %d", len(eventHash))
+	}
+
+	// TODO(P4c): decrypt the signer's share via the user's vault token,
+	// assemble UserCosignSetup, call BeginCosign, publish kind:24135
+	// to the user's relays, subscribe for kind:24136, call
+	// CompleteCosign with the response, attach signature to event,
+	// return signed JSON.
+	//
+	// Until the relay wire ships, return a clear error including all
+	// the prerequisites we DID verify so a client sees exactly where
+	// the flow stops.
+	_ = share
+	_ = eventHash
 	return "", fmt.Errorf(
-		"FROST cosigning for key %s: browser cosign channel not yet available "+
-			"(P4c pending). Sign requests via NIP-46 for FROST keys will succeed once "+
-			"the browser approval flow ships",
-		key.Pubkey[:16]+"...",
-	)
+		"FROST cosigning for key %s: all preconditions met (share=%s, vault_token=present, event_hash=%s), "+
+			"but browser cosign channel (kind:24135/24136 relay wire) not yet available. "+
+			"Will succeed once P4c ships",
+		key.Pubkey[:16]+"...", share.ID[:8]+"...", rawID[:16]+"...")
 }
 
 // handleBatchSign signs multiple events in one request to reduce round-trips on rate-limited relays
