@@ -94,6 +94,13 @@ type Session struct {
 	Permissions  []string  `json:"permissions"`
 	CreatedAt    time.Time `json:"created_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
+	// VaultToken (P4d) is the user's Vault transit token, copied from
+	// their web-UI session at NIP-46 connection time. Needed to
+	// decrypt FROST shares when a FROST-key sign_event arrives on
+	// this session. Empty for sessions created without an active
+	// web-UI login (e.g. bunker URI flow); FROST-key sign requests on
+	// such sessions error with "connect via web UI for FROST".
+	VaultToken string `json:"-"`
 }
 
 // Policy defines a reusable permission template

@@ -232,6 +232,11 @@ func (ps *PostgresStorage) migrate() error {
 	-- Add vault_token column for per-user Vault encryption (encrypted at rest)
 	ALTER TABLE signer_web_sessions ADD COLUMN IF NOT EXISTS vault_token TEXT;
 
+	-- P4d: vault_token on NIP-46 sessions (populated at web-UI connect
+	-- time), required for FROST-key cosign dispatch. NULL for
+	-- bunker-URI-initiated sessions where no web UI is involved.
+	ALTER TABLE signer_nip46_sessions ADD COLUMN IF NOT EXISTS vault_token TEXT;
+
 	CREATE INDEX IF NOT EXISTS idx_signer_web_sessions_user ON signer_web_sessions(user_id);
 	CREATE INDEX IF NOT EXISTS idx_signer_web_sessions_expires ON signer_web_sessions(expires_at);
 

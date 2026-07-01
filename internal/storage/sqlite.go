@@ -172,7 +172,11 @@ func (ss *SQLiteStorage) initSchema() error {
 		client_pubkey TEXT NOT NULL,
 		permissions TEXT,  -- JSON array
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
-		expires_at TEXT NOT NULL
+		expires_at TEXT NOT NULL,
+		-- vault_token (P4d) copied from the user's web session at NIP-46
+		-- connect time. Required for FROST-key sign requests. NULL/empty
+		-- for bunker-URI-initiated sessions where no web UI is involved.
+		vault_token TEXT
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_nip46_sessions_key ON signer_nip46_sessions(key_id);
