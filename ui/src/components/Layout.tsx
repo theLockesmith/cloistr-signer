@@ -24,8 +24,18 @@ export function Layout() {
 
   return (
     <div className="app-layout">
-      {/* Shared Cloistr navbar (service menu + Nostr auth) */}
-      <Header activeServiceId="signer" />
+      {/* Shared Cloistr navbar (service menu + auth). The signer manages its own
+          JWT session (bootstrapped from Nostr), so we feed the Header explicit
+          auth state instead of letting it use the Nostr context. */}
+      <Header
+        activeServiceId="signer"
+        auth={{
+          authenticated: isAuthenticated,
+          pubkey: user?.pubkey,
+          onLogout: logout,
+          onSignIn: showLoginModal,
+        }}
+      />
 
       {/* Main Content */}
       <div className="app-main">
