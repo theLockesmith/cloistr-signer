@@ -51,21 +51,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bytemare/ecc"
-
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/frost"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
 // pathBSession is the transient server-side state between the init and
-// finalize rounds. Contains p_signer plaintext — must be dropped when
-// session completes or expires.
+// finalize rounds. In the corrected protocol the SIGNER holds no
+// share material until finalize — browser generates the split. This
+// session tracks reservation + ownership check only.
 type pathBSession struct {
-	pSigner     *ecc.Scalar
-	rSigner     *ecc.Element // p_signer·G
 	targetPubkeyHex string
-	userID      string
-	expiresAt   time.Time
+	targetName      string
+	userID          string
+	expiresAt       time.Time
 }
 
 var (
@@ -83,18 +81,28 @@ type FrostMigrateBInitRequest struct {
 	Name string `json:"name"`
 }
 
-// FrostMigrateBInitResponse returns the signer's commitment.
+// FrostMigrateBInitResponse confirms the reservation. No crypto
+// material transmitted at init — the browser does all the math
+// in Round 2.
 type FrostMigrateBInitResponse struct {
-	SessionID          string `json:"session_id"`
-	RSignerHex         string `json:"r_signer_hex"` // compressed-SEC1 hex, 33 bytes
-	ExpiresAtUnix      int64  `json:"expires_at_unix"`
+	SessionID     string `json:"session_id"`
+	ExpiresAtUnix int64  `json:"expires_at_unix"`
 }
 
-// FrostMigrateBFinalizeRequest is the browser → signer round 2. Browser
-// has computed p_user locally and sends R_user = p_user·G as proof.
+// FrostMigrateBFinalizeRequest is the browser → signer round 2.
+// Browser has: (1) generated random p_user, (2) computed
+// p_signer = p - p_user (with p being the pasted nsec, DESTROYED
+// after this computation), (3) sent p_signer over the wire.
+// Browser retains p_user + destroys p_signer from its memory too.
+//
+// The nsec p only ever exists in browser memory for the duration
+// of the scalar subtraction. Never on the wire, never on the signer.
 type FrostMigrateBFinalizeRequest struct {
 	SessionID string `json:"session_id"`
-	RUserHex  string `json:"r_user_hex"` // compressed-SEC1 hex of p_user·G
+	// Signer's share, computed BY BROWSER as (p - p_user) mod n.
+	PSignerHex string `json:"p_signer_hex"` // 32-byte scalar hex
+	// R_user = p_user·G, the browser's verification-share commitment.
+	RUserHex string `json:"r_user_hex"` // 33-byte SEC1 hex
 	// Optional relays for the new Key row.
 	Relays []string `json:"relays,omitempty"`
 }
@@ -142,21 +150,6 @@ func (h *Handler) handleFrostMigrateBInit(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	group := frost.DefaultCiphersuite.Group()
-
-	// p_signer = uniform random.
-	var pSignerBytes [32]byte
-	if _, err := rand.Read(pSignerBytes[:]); err != nil {
-		h.errorResponse(w, http.StatusInternalServerError, "failed to sample randomness")
-		return
-	}
-	pSigner := group.NewScalar()
-	if err := pSigner.Decode(pSignerBytes[:]); err != nil {
-		h.errorResponse(w, http.StatusInternalServerError, "sampled signer share out of range; retry")
-		return
-	}
-	rSigner := group.Base().Multiply(pSigner)
-
 	// Fresh session id.
 	var sidBytes [16]byte
 	if _, err := rand.Read(sidBytes[:]); err != nil {
@@ -168,9 +161,8 @@ func (h *Handler) handleFrostMigrateBInit(w http.ResponseWriter, r *http.Request
 
 	pathBSessionsMu.Lock()
 	pathBSessions[sessionID] = &pathBSession{
-		pSigner:         pSigner,
-		rSigner:         rSigner,
 		targetPubkeyHex: pubkey,
+		targetName:      strings.TrimSpace(req.Name),
 		userID:          claims.UserID,
 		expiresAt:       expiresAt,
 	}
@@ -183,10 +175,8 @@ func (h *Handler) handleFrostMigrateBInit(w http.ResponseWriter, r *http.Request
 
 	h.jsonResponse(w, http.StatusOK, FrostMigrateBInitResponse{
 		SessionID:     sessionID,
-		RSignerHex:    hex.EncodeToString(rSigner.Encode()),
 		ExpiresAtUnix: expiresAt.Unix(),
 	})
-	_ = req.Name // Name is used by finalize; here only sanity-checked in future
 }
 
 // handleFrostMigrateBFinalize verifies R_signer + R_user == pubkey·G,
@@ -230,9 +220,22 @@ func (h *Handler) handleFrostMigrateBFinalize(w http.ResponseWriter, r *http.Req
 
 	group := frost.DefaultCiphersuite.Group()
 
+	// Decode browser-computed p_signer scalar.
+	pSignerBytes, err := hex.DecodeString(strings.TrimSpace(req.PSignerHex))
+	if err != nil || len(pSignerBytes) != 32 {
+		h.errorResponse(w, http.StatusBadRequest, "p_signer_hex must be a 32-byte hex-encoded scalar")
+		return
+	}
+	pSigner := group.NewScalar()
+	if err := pSigner.Decode(pSignerBytes); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "p_signer_hex is not a valid secp256k1 scalar")
+		return
+	}
+	rSigner := group.Base().Multiply(pSigner)
+
 	// Decode R_user.
 	rUser := group.NewElement()
-	if err := rUser.DecodeHex(req.RUserHex); err != nil {
+	if err := rUser.DecodeHex(strings.TrimSpace(req.RUserHex)); err != nil {
 		h.errorResponse(w, http.StatusBadRequest, "r_user_hex is not a valid compressed-SEC1 point")
 		return
 	}
@@ -245,15 +248,13 @@ func (h *Handler) handleFrostMigrateBFinalize(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Verification: R_user + R_signer == pubkey·G. If yes, the browser
-	// proved knowledge of p without transmitting it.
-	sum := session.rSigner.Copy().Add(rUser)
+	// Verification: p_signer·G + R_user == pubkey·G. If yes, the browser
+	// proved (p_signer + p_user) = p WITHOUT ever transmitting p or p_user.
+	// Neither the signer nor any wire intermediary saw the nsec.
+	sum := rSigner.Copy().Add(rUser)
 	if !sum.Equal(pubkeyPoint) {
-		// One of two things: the browser used the wrong nsec (does not
-		// derive to the claimed pubkey), or the browser is malicious.
-		// Either way, reject.
 		h.errorResponse(w, http.StatusBadRequest,
-			"proof does not match claimed pubkey — the nsec you provided does not derive to that pubkey")
+			"proof does not verify — the p_signer + r_user combination does not derive to the claimed pubkey")
 		return
 	}
 
@@ -264,7 +265,7 @@ func (h *Handler) handleFrostMigrateBFinalize(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	encryptedSignerShare, err := enc.EncryptBytes(session.pSigner.Encode())
+	encryptedSignerShare, err := enc.EncryptBytes(pSigner.Encode())
 	if err != nil {
 		slog.Error("migrate B: encrypt signer share failed", "error", err)
 		h.errorResponse(w, http.StatusInternalServerError, "failed to encrypt signer share")
@@ -313,7 +314,7 @@ func (h *Handler) handleFrostMigrateBFinalize(w http.ResponseWriter, r *http.Req
 		OwnerID:                  claims.UserID,
 		ShareIndex:               frost.SignerIndex,
 		EncryptedShare:           encryptedSignerShare,
-		VerificationShare:        session.rSigner.Encode(),
+		VerificationShare:        rSigner.Encode(),
 		Threshold:                2,
 		TotalShares:              2,
 		RotationGeneration:       0,
@@ -337,10 +338,10 @@ func (h *Handler) handleFrostMigrateBFinalize(w http.ResponseWriter, r *http.Req
 		"pubkey", session.targetPubkeyHex[:16]+"...")
 
 	h.jsonResponse(w, http.StatusOK, FrostMigrateBFinalizeResponse{
-		KeyID:                     keyID,
-		Pubkey:                    session.targetPubkeyHex,
-		SignerVerificationShareHex: hex.EncodeToString(session.rSigner.Encode()),
-		UserVerificationShareHex:  rUser.Hex(),
+		KeyID:                      keyID,
+		Pubkey:                     session.targetPubkeyHex,
+		SignerVerificationShareHex: hex.EncodeToString(rSigner.Encode()),
+		UserVerificationShareHex:   rUser.Hex(),
 	})
 }
 
