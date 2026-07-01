@@ -171,6 +171,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// so the signer knows where to p-tag kind:24135 cosign requests.
 	mux.HandleFunc("/api/v1/frost/cosign-listener/register", h.handleFrostCosignListenerRegister)
 
+	// FROST direct-sign for the SPA's own admin ops (P7 Path C +
+	// admin sign flow). Two-round HTTP handshake keyed by user
+	// auth + key_id; reuses UserSignerCoordinator internals.
+	mux.HandleFunc("/api/v1/frost/sign/round1", h.handleFrostSignRound1)
+	mux.HandleFunc("/api/v1/frost/sign/round2", h.handleFrostSignRound2)
+
 	// P7 Path A: convert an existing user-owned local (Vault-encrypted-
 	// nsec) key to FROST-user (2-of-2) shape without changing the pubkey.
 	// See docs/frost-2-of-n-design.md §13.2.

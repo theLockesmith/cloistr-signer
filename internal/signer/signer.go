@@ -989,6 +989,12 @@ func (s *Signer) handleConnect(ctx context.Context, targetPubkey, clientPubkey s
 	return fmt.Sprintf(`{"pubkey":"%s"}`, targetPubkey), nil
 }
 
+// FrostUserSigner exposes the FROST user-cosigner coordinator to the
+// API layer for the direct-sign HTTP endpoints (P7 Path C + admin UI).
+func (s *Signer) FrostUserSigner() *frost.UserSignerCoordinator {
+	return s.frostUserSigner
+}
+
 // RegisterCosignListener stores the ephemeral pubkey the browser
 // admin UI is currently listening on for FROST cosign requests.
 // Called from the API layer's POST /frost/cosign-listener/register.
