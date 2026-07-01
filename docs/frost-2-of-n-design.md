@@ -554,3 +554,143 @@ The other claims in §7 are unchanged.
 - `internal/frost/dkg_distributed.go` — existing signer-to-signer DKG implementation, reference for protocol shape
 - `internal/crypto/recovery_phrase.go` — BIP39 primitive, the phrase-to-share derivation hook
 - privacy-architecture.md §1.1, §3.3 — the "We Cannot Comply" principle and custody design
+
+---
+
+## 13. 2026-07-01 Design refinements (P5 + P7 + org scaling)
+
+Design conversation on 2026-07-01 resolved several open questions from
+§6, §7, and §9. These refinements supersede the corresponding
+subsections above where they conflict.
+
+### 13.1 P5 refinements (device add/remove/refresh)
+
+**Personal-only in v1.** Multi-device support ships for single-user
+accounts first; org-scale multi-device (§13.3) is a follow-up phase
+with its own UX and governance surface.
+
+**Pairing UX = short code, not QR.** Rejected the §6.1 QR flow because
+it requires camera access and forces desktop→mobile as the primary
+direction. Chosen: existing device generates a 6-word cloistr-<verb>-
+<noun>-<verb>-<noun>-<verb> pairing code valid for 60s. New device
+enters code + phrase; existing device confirms in a modal. Works
+symmetrically (mobile→desktop or desktop→mobile).
+
+**Refresh trigger = manual button on the Keys page** in v1. Deferred:
+scheduled auto-refresh (§6.3 "monthly"). Manual button first, measure
+usage, then decide whether automation is worth the complexity.
+
+**Device removal = refresh + narrow n.** §6.2's "share refresh"
+approach confirmed. Reduces n by 1 so the removed device's share is
+invalidated AND no longer counts toward quorum.
+
+### 13.2 P7 refinements (migration from existing keys)
+
+Three migration paths, all shipped simultaneously. User picks per key
+at conversion time.
+
+**Path A — Server-side conversion (default for signer-managed keys):**
+User clicks "Convert to FROST" on a Vault-encrypted key. Signer
+decrypts existing nsec via Vault, splits into `p_signer = random` +
+`p_user = p - p_signer`, Vault-encrypts both halves, stores
+`encrypted_user_share_at_dkg` for the P3e-b recovery path so the
+browser can fetch it. Same pubkey, same Nostr identity. Nsec exposed
+transiently to signer memory but that's identical to today's threat
+model (signer already decrypts on every sign). Migration eliminates
+future exposure without adding new exposure.
+
+**Path B — Interactive additive split (for keys living in a different
+client):** Signer sends `R_signer = r_signer·G`. Browser (with `p`
+briefly in memory) computes `r_user = p - r_signer`, sends only
+`R_user = r_user·G`. Signer verifies `R_user + R_signer == p·G`
+against the existing pubkey, stores `r_signer`. Browser stores
+`r_user`, wipes `p`. Nsec's total exposure is one HTTP round-trip in
+the browser JS heap; never touches the wire, never touches signer
+infrastructure. This is the theoretical floor for existing-key
+migration: someone has to hold `p` momentarily and this minimizes
+that.
+
+**Path C — Fresh FROST + kind:0 rotation (paranoid path):** Mint fresh
+FROST key, publish kind:0 profile update pointing at new pubkey,
+kind:1776-style migration signal for followers. Some follower loss
+over time; best cryptographic properties.
+
+**Migration is one-way.** Rejected downgrade-from-FROST. Users who
+want out mint a fresh non-FROST key and rotate via Path C. Simpler
+mental model, one less footgun.
+
+**Confirmation ceremony = password re-entry + "I understand my old
+key material will be irrecoverable" checkbox.** Guards against
+physical-access attacks on unlocked browsers.
+
+### 13.3 Org scaling (new; addresses §9 P5-P7 not-yet-covered surface)
+
+Org customers may want unusual (t, n) shapes (2/12 for social-media
+teams, 3/15 for finance approvers). No cryptographic ceiling on n —
+FROST math works for any t≥2, n≥t on secp256k1. Signing cost scales
+with t (aggregation is O(t)), NOT n. DKG/refresh is O(n²) but
+one-shot.
+
+Real ceilings are UX and governance, not crypto:
+
+- Refresh coordination: at n>25 herding all shareholders online for a
+  refresh ceremony is hard
+- Accountability loss: FROST aggregate sigs are cryptographically
+  anonymous over which t-of-n produced them; signer audit log records
+  participation but is a trust-the-signer surface
+- Governance surface: who gets a share, when revoked, offboarding
+  ceremony — all linear in n
+
+**Decision: soft-warn, do not hard-cap:**
+
+| Rule | Action |
+|---|---|
+| `t = 1` | refuse (no threshold security) |
+| `t = n` | warn (lost share bricks the key) |
+| `t < n/3` | warn (unusual outside social-media-team pattern) |
+| `n > 10` | warn (real coordination cost) |
+| `n > 25` | firmer warn (suggest two-tier — §13.3.1) |
+| `n > 50` | still allow but UI says "talk to us first" |
+
+**Default org onboarding presets:**
+
+- "Small team" preset: `2/3` (three people, any two to sign) — probably
+  60-70% of org users
+- "Governance-heavy team" preset: `3/5` (five key people, majority) —
+  another 20%
+- "Custom" mode with above warnings — everyone else
+
+#### 13.3.1 Two-tier pattern for orgs
+
+Rather than fighting orgs into a single wide-quorum key, offer a
+delegation shape:
+
+- **Master FROST key** with tight quorum (e.g. 5/9 board/ownership
+  group). Rarely signs. Used to delegate authority.
+- **Operational subkeys** with loose quorums (e.g. 2/12 social media
+  team, 3/15 finance approvers, etc.). Sign frequently. Owned by the
+  master key.
+
+Master signs a NIP-26-style delegation authorizing each subkey for
+specific kinds/rate limits/durations. Losing an operational subkey is
+a rotate-and-reissue; losing the master key is the org-level disaster
+we keep the quorum tight around.
+
+Architecturally same shape as the existing `KeyType 'proxy'`
+machinery. Extending proxy chaining to FROST is a small structural
+addition, not a rewrite.
+
+### 13.4 Roadmap impact
+
+The original §9 phases P5 and P7 stay valid, with the following
+scope adjustments:
+
+- **P5 now personal-only.** Org multi-device becomes a new phase P5-org
+  after P5 ships.
+- **P7 now covers all three migration paths.** UI presents them as a
+  choice; user picks per key. Path A first (most users), then Path B
+  (broadens address), then Path C (paranoid).
+- **Two-tier org support becomes a new phase P9** (master-subkey
+  delegation for FROST keys). Depends on P4 (cosigning must work) and
+  the existing proxy-key mechanism.
+
