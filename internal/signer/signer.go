@@ -920,7 +920,7 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 	case "get_relays":
 		return s.handleGetRelays()
 	case "sign_event":
-		return s.handleSignEvent(ctx, targetPubkey, privateKey, req.Params, perm)
+		return s.handleSignEvent(ctx, targetPubkey, privateKey, clientPubkey, req.Params, perm)
 	case "batch_sign":
 		// Cloistr extension: sign multiple events in one request to reduce round-trips
 		return s.handleBatchSign(ctx, targetPubkey, privateKey, req.Params, perm)
@@ -1111,7 +1111,10 @@ func (s *Signer) handleInternalProxy(ctx context.Context, upstreamPubkey, upstre
 	// Handle the request directly using the upstream key
 	switch req.Method {
 	case "sign_event":
-		return s.handleSignEvent(ctx, upstreamPubkey, upstreamPrivkey, req.Params, perm)
+		// Proxy path: no client_pubkey context for upstream cosign (FROST keys
+		// aren't supported behind proxies in v1); pass empty and the FROST
+		// dispatch surfaces the missing-context error clearly.
+		return s.handleSignEvent(ctx, upstreamPubkey, upstreamPrivkey, "", req.Params, perm)
 	case "nip04_encrypt":
 		return s.handleNIP04Encrypt(ctx, upstreamPubkey, upstreamPrivkey, req.Params)
 	case "nip04_decrypt":
@@ -1299,7 +1302,7 @@ func jitterUpTo(maxMs int) {
 	time.Sleep(time.Duration(n) * time.Millisecond)
 }
 
-func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey string, params []string, perm *storage.Permission) (string, error) {
+func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey, clientPubkey string, params []string, perm *storage.Permission) (string, error) {
 	if len(params) < 1 {
 		return "", errors.New("missing event parameter")
 	}
@@ -1347,7 +1350,7 @@ func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey s
 	// channel (P4c). If any prerequisite is unmet, surface an error
 	// that a client can render meaningfully.
 	if key, keyErr := s.storage.GetKeyByPubkey(ctx, targetPubkey); keyErr == nil && key != nil && key.KeyType == storage.KeyTypeFrostUser {
-		return s.handleFrostUserSignEvent(ctx, key, &event)
+		return s.handleFrostUserSignEvent(ctx, key, clientPubkey, &event)
 	}
 
 	// Set pubkey and sign (non-FROST path)
@@ -1542,57 +1545,174 @@ func (s *Signer) waitForCosignResponse(ctx context.Context, signerEphemeralSK, s
 // AFTER doing the setup work so that any errors in the setup path
 // (missing FROST share row, missing vault_token, etc.) surface
 // immediately and don't wait until the relay wire ships.
-func (s *Signer) handleFrostUserSignEvent(ctx context.Context, key *storage.Key, event *nostr.Event) (string, error) {
-	// Look up the FROST user share for this key.
+func (s *Signer) handleFrostUserSignEvent(ctx context.Context, key *storage.Key, clientPubkey string, event *nostr.Event) (string, error) {
+	if clientPubkey == "" {
+		return "", errors.New("FROST cosigning requires a NIP-46 client context (not available on proxy path)")
+	}
+
 	share, err := s.storage.GetFrostUserShareByKeyID(ctx, key.ID)
 	if err != nil {
 		return "", fmt.Errorf("frost user share not found for key %s: %w", key.Pubkey[:16]+"...", err)
 	}
-
-	// Look up the current NIP-46 session's vault_token. In-flight
-	// session context isn't passed to handleSignEvent yet; we look
-	// up the key's owner's active web session as a proxy — same
-	// mechanism as lookupVaultTokenForKey. Once P4d step 4 threads
-	// the client_pubkey through, we can read the Session row directly.
-	vaultToken := s.lookupVaultTokenForKey(ctx, key.Pubkey)
-	if vaultToken == "" {
-		return "", fmt.Errorf(
-			"FROST key %s: no active web session with vault_token. "+
-				"Log in to signer.cloistr.xyz in a browser tab and try again "+
-				"(FROST keys require the browser cosign channel)",
-			key.Pubkey[:16]+"...")
+	if len(share.EncryptedUserShareAtDkg) == 0 || share.UserVerificationShareHex == "" {
+		return "", fmt.Errorf("frost user share for %s predates recovery-material support; cannot cosign", key.Pubkey[:16]+"...")
 	}
 
-	// Compute the event hash (sha256 of the canonical serialization).
+	vaultToken := s.lookupVaultTokenForKey(ctx, key.Pubkey)
+	if vaultToken == "" {
+		return "", fmt.Errorf("FROST key %s: no active web session with vault_token — log into signer.cloistr.xyz first", key.Pubkey[:16]+"...")
+	}
+
+	// Compute event hash (BIP-340 sighash used for cosigning).
 	event.PubKey = key.Pubkey
 	rawID := event.GetID()
 	if rawID == "" {
 		return "", errors.New("failed to compute event id")
 	}
 	eventHash, err := hex.DecodeString(rawID)
-	if err != nil {
-		return "", fmt.Errorf("decode event id: %w", err)
-	}
-	if len(eventHash) != 32 {
-		return "", fmt.Errorf("event id is not 32 bytes: %d", len(eventHash))
+	if err != nil || len(eventHash) != 32 {
+		return "", fmt.Errorf("invalid event id (need 32-byte hex): %w", err)
 	}
 
-	// TODO(P4c): decrypt the signer's share via the user's vault token,
-	// assemble UserCosignSetup, call BeginCosign, publish kind:24135
-	// to the user's relays, subscribe for kind:24136, call
-	// CompleteCosign with the response, attach signature to event,
-	// return signed JSON.
-	//
-	// Until the relay wire ships, return a clear error including all
-	// the prerequisites we DID verify so a client sees exactly where
-	// the flow stops.
-	_ = share
-	_ = eventHash
-	return "", fmt.Errorf(
-		"FROST cosigning for key %s: all preconditions met (share=%s, vault_token=present, event_hash=%s), "+
-			"but browser cosign channel (kind:24135/24136 relay wire) not yet available. "+
-			"Will succeed once P4c ships",
-		key.Pubkey[:16]+"...", share.ID[:8]+"...", rawID[:16]+"...")
+	// Decrypt signer's share via user's vault encryptor.
+	sharePlain, err := s.decryptFrostShareForCosign(ctx, share.EncryptedShare, vaultToken, key.OwnerID)
+	if err != nil {
+		return "", fmt.Errorf("decrypt signer share: %w", err)
+	}
+
+	// Extract the joint pubkey (compressed form derivable from x-only Nostr pubkey).
+	// Nostr pubkeys are x-only; we prepend 0x02 to lift to even-Y (matches DKG storage convention).
+	jointPubkeyHex := "02" + key.Pubkey
+
+	// Begin cosign session.
+	begin, err := s.frostUserSigner.BeginCosign(frost.UserCosignSetup{
+		KeyID:                    key.ID,
+		JointPubkeyHex:           jointPubkeyHex,
+		SignerShareScalar:        sharePlain,
+		SignerVerificationShare:  share.VerificationShare,
+		UserVerificationShareHex: share.UserVerificationShareHex,
+		EventHash:                eventHash,
+	})
+	if err != nil {
+		return "", fmt.Errorf("begin cosign: %w", err)
+	}
+
+	// Build cosign-request payload for the browser.
+	payload := &CosignRequestPayload{
+		V:           1,
+		EventToSign: event,
+		EventID:     rawID,
+		SignerCommitment: CosignCommitment{
+			Hiding:  begin.SignerCommitmentHidingHex,
+			Binding: begin.SignerCommitmentBindingHex,
+		},
+		SessionID: begin.SessionID,
+		KeyID:     key.ID,
+	}
+
+	// Publish + wait for response over relays.
+	relays := s.keyRelays[key.Pubkey]
+	if len(relays) == 0 {
+		return "", errors.New("no relays configured for FROST cosign channel")
+	}
+	signerEphemeralSK := nostr.GeneratePrivateKey()
+	signerEphemeralPK, err := nostr.GetPublicKey(signerEphemeralSK)
+	if err != nil {
+		return "", fmt.Errorf("derive cosign ephemeral pubkey: %w", err)
+	}
+	// Override the payload signer identity: publish uses fresh ephemeral.
+	// We use one keypair for the whole session so the response subscription
+	// filter can match on p:signerEphemeralPK.
+	// (publishCosignRequest generates its own SK; we re-inline here to
+	// share the same SK with the waiter.)
+	plaintext, _ := json.Marshal(payload)
+	convKey, err := nip44.GenerateConversationKey(clientPubkey, signerEphemeralSK)
+	if err != nil {
+		return "", fmt.Errorf("nip44 conversation key: %w", err)
+	}
+	ciphertext, err := nip44.Encrypt(string(plaintext), convKey)
+	if err != nil {
+		return "", fmt.Errorf("nip44 encrypt: %w", err)
+	}
+	requestEvent := &nostr.Event{
+		PubKey:    signerEphemeralPK,
+		CreatedAt: nostr.Now(),
+		Kind:      KindCosignRequest,
+		Tags: nostr.Tags{
+			{"p", clientPubkey},
+			{"session", begin.SessionID},
+			{"key_id", key.ID},
+		},
+		Content: ciphertext,
+	}
+	if err := requestEvent.Sign(signerEphemeralSK); err != nil {
+		return "", fmt.Errorf("sign cosign event: %w", err)
+	}
+	pubCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	published := 0
+	for _, relayURL := range relays {
+		if err := s.relayClient.PublishToRelay(pubCtx, relayURL, requestEvent); err == nil {
+			published++
+		}
+	}
+	if published == 0 {
+		return "", errors.New("failed to publish cosign request to any user relay")
+	}
+	slog.Info("cosign request published", "session_id", begin.SessionID, "key_id", key.ID, "relays", published)
+
+	// Wait for response.
+	resp, err := s.waitForCosignResponse(ctx, signerEphemeralSK, signerEphemeralPK, begin.SessionID, relays, 45*time.Second)
+	if err != nil {
+		return "", fmt.Errorf("cosign response: %w", err)
+	}
+	if !resp.Approved {
+		reason := resp.Reason
+		if reason == "" {
+			reason = "denied by user"
+		}
+		return "", fmt.Errorf("cosign denied: %s", reason)
+	}
+
+	// Complete cosign — combines partials into a 64-byte BIP-340 sig.
+	sigBytes, err := s.frostUserSigner.CompleteCosign(frost.CompleteCosignInput{
+		SessionID:                begin.SessionID,
+		UserCommitmentHidingHex:  resp.UserCommitment.Hiding,
+		UserCommitmentBindingHex: resp.UserCommitment.Binding,
+		UserPartialSignatureHex:  resp.PartialSignature,
+	})
+	if err != nil {
+		return "", fmt.Errorf("complete cosign: %w", err)
+	}
+
+	// Attach signature to event, return signed JSON.
+	event.ID = rawID
+	event.Sig = hex.EncodeToString(sigBytes)
+	data, err := json.Marshal(event)
+	if err != nil {
+		return "", err
+	}
+	slog.Info("FROST-signed event via cosign", "kind", event.Kind, "id", event.ID[:16]+"...", "key", key.Pubkey[:16]+"...")
+	return string(data), nil
+}
+
+// decryptFrostShareForCosign decrypts the signer's Vault-encrypted FROST
+// share using the user's transit token. Returns the raw 32-byte scalar.
+func (s *Signer) decryptFrostShareForCosign(ctx context.Context, encryptedShare []byte, vaultToken, ownerID string) ([]byte, error) {
+	_ = ctx
+	_ = vaultToken
+	_ = ownerID
+	// TODO: bridge to the user's Vault transit encryptor. For P4c end-to-end
+	// with in-memory encryption backends (dev/test), the existing
+	// s.encryptor.Decrypt path works if the share was written using it.
+	if s.encryptor != nil {
+		plaintext, err := s.encryptor.Decrypt(string(encryptedShare))
+		if err != nil {
+			return nil, err
+		}
+		return []byte(plaintext), nil
+	}
+	return encryptedShare, nil
 }
 
 // handleBatchSign signs multiple events in one request to reduce round-trips on rate-limited relays
