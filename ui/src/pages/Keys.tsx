@@ -7,6 +7,7 @@ import {
   isValidFrostRecoveryPhrase,
   recoverFrostKey,
   migrateKeyToFrostPathA,
+  migrateKeyToFrostPathB,
   FrostRecoveryWrongPhraseError,
   type CreatedFrostKey,
 } from '../lib/frost';
@@ -28,6 +29,8 @@ export function KeysPage() {
   const [recoveryTarget, setRecoveryTarget] = useState<Key | null>(null);
   // P7 Path A: which existing local key the user is upgrading to FROST.
   const [migrateTarget, setMigrateTarget] = useState<Key | null>(null);
+  // P7 Path B: modal for pasting a nsec from a third-party client.
+  const [showImportFrostModal, setShowImportFrostModal] = useState(false);
 
   const { data: keys, isLoading } = useQuery({
     queryKey: ['keys'],
@@ -116,11 +119,32 @@ export function KeysPage() {
     },
   });
 
+  // P7 Path B: browser splits a pasted nsec, sends only the signer's
+  // share + verification-share point. Nsec never touches the wire.
+  const importFrostMutation = useMutation({
+    mutationFn: (args: { nsec: string; pubkey: string; name: string }) =>
+      migrateKeyToFrostPathB(args.nsec, args.pubkey, args.name),
+    onSuccess: (result: CreatedFrostKey) => {
+      queryClient.invalidateQueries({ queryKey: ['keys'] });
+      queryClient.invalidateQueries({ queryKey: ['frost-local-shares'] });
+      setFrostResult({ pubkey: result.pubkey });
+      setShowImportFrostModal(false);
+    },
+  });
+
   return (
     <div>
       <div className="page-header">
         <h1 className="page-title">Keys</h1>
         <div style={{ display: 'flex', gap: '8px' }}>
+          <button
+            className="btn btn-secondary"
+            onClick={() => setShowImportFrostModal(true)}
+            disabled={importFrostMutation.isPending}
+            title="Import an existing nsec from a third-party client (Damus, Amethyst, etc.) as a FROST key. The nsec never leaves this browser tab."
+          >
+            📥 Import to FROST
+          </button>
           <button
             className="btn btn-secondary"
             onClick={() => generatePhraseMutation.mutate()}
@@ -243,6 +267,20 @@ export function KeysPage() {
           }}
           onConfirm={() => frostCreateMutation.mutate(frostPhrase)}
           loading={frostCreateMutation.isPending}
+        />
+      )}
+
+      {showImportFrostModal && (
+        <FrostImportModal
+          onCancel={() => {
+            if (!importFrostMutation.isPending) {
+              setShowImportFrostModal(false);
+              importFrostMutation.reset();
+            }
+          }}
+          onImport={(args) => importFrostMutation.mutate(args)}
+          loading={importFrostMutation.isPending}
+          error={importFrostMutation.error}
         />
       )}
 
@@ -943,6 +981,137 @@ function FrostMigrateModal({
               {loading ? '⏳ Migrating…' : 'Upgrade to FROST'}
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// FrostImportModal is the P7 Path B UX: paste an nsec + target pubkey,
+// browser does the additive split locally, only the signer's future
+// share + a verification-share point travel over the wire.
+function FrostImportModal({
+  onCancel,
+  onImport,
+  loading,
+  error,
+}: {
+  onCancel: () => void;
+  onImport: (args: { nsec: string; pubkey: string; name: string }) => void;
+  loading: boolean;
+  error: Error | null;
+}) {
+  const [nsec, setNsec] = useState('');
+  const [pubkey, setPubkey] = useState('');
+  const [name, setName] = useState('');
+  const [ack, setAck] = useState(false);
+
+  const errMsg = error ? (error instanceof Error ? error.message : String(error)) : null;
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onImport({ nsec: nsec.trim(), pubkey: pubkey.trim(), name: name.trim() });
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal" style={{ maxWidth: '620px' }}>
+        <div className="modal-content">
+          <h2 style={{ marginTop: 0 }}>📥 Import existing key as FROST</h2>
+          <p style={{ fontSize: '14px', color: 'var(--signer-text-muted, #888)', marginBottom: '12px' }}>
+            For keys you currently hold in a third-party client (Damus, Amethyst,
+            etc.). The private key is split in this browser tab; only your
+            future share and a public verification point travel over the wire.
+            <strong> The nsec never leaves this browser.</strong>
+          </p>
+
+          <form onSubmit={handleSubmit}>
+            <label style={{ fontSize: '13px', display: 'block', marginBottom: '4px' }}>
+              Name (for display in your key list)
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={loading}
+              placeholder="e.g. Nostr identity from Damus"
+              style={{
+                width: '100%', padding: '8px', marginBottom: '12px', boxSizing: 'border-box',
+                background: 'var(--signer-bg)', color: 'var(--signer-text, #eee)',
+                border: '1px solid var(--signer-border, #444)', borderRadius: 6,
+              }}
+              required
+            />
+
+            <label style={{ fontSize: '13px', display: 'block', marginBottom: '4px' }}>
+              Target pubkey (x-only Nostr hex, 64 chars)
+            </label>
+            <input
+              type="text"
+              value={pubkey}
+              onChange={(e) => setPubkey(e.target.value)}
+              disabled={loading}
+              placeholder="paste as 64-char hex"
+              style={{
+                width: '100%', padding: '8px', marginBottom: '4px', boxSizing: 'border-box',
+                fontFamily: 'monospace', fontSize: 12,
+                background: 'var(--signer-bg)', color: 'var(--signer-text, #eee)',
+                border: '1px solid var(--signer-border, #444)', borderRadius: 6,
+              }}
+              required
+            />
+            <div style={{ fontSize: 11, color: 'var(--signer-text-muted, #888)', marginBottom: 12 }}>
+              We check that the nsec below actually derives to this pubkey before finalizing.
+            </div>
+
+            <label style={{ fontSize: '13px', display: 'block', marginBottom: '4px' }}>
+              nsec (32-byte hex, the private key you want to import)
+            </label>
+            <input
+              type="password"
+              value={nsec}
+              onChange={(e) => setNsec(e.target.value)}
+              disabled={loading}
+              placeholder="64-char hex"
+              autoComplete="off"
+              style={{
+                width: '100%', padding: '8px', marginBottom: '12px', boxSizing: 'border-box',
+                fontFamily: 'monospace', fontSize: 12,
+                background: 'var(--signer-bg)', color: 'var(--signer-text, #eee)',
+                border: '1px solid var(--signer-border, #444)', borderRadius: 6,
+              }}
+              required
+            />
+
+            <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 16, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={ack}
+                onChange={(e) => setAck(e.target.checked)}
+                disabled={loading}
+                style={{ marginTop: 3 }}
+              />
+              <span style={{ fontSize: 14 }}>
+                After import, this key becomes FROST 2-of-2: the signer only signs with this browser cooperating.
+                My old copies of the nsec in third-party clients keep working independently until I retire them there.
+              </span>
+            </label>
+
+            {errMsg && (
+              <div className="auth-error" style={{ marginBottom: 12 }}>
+                Import failed: {errMsg}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
+              <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={loading || !ack || !nsec || !pubkey || !name}>
+                {loading ? '⏳ Splitting nsec…' : 'Import to FROST'}
+              </button>
+            </div>
+          </form>
         </div>
       </div>
     </div>
