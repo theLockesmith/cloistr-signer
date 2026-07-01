@@ -960,7 +960,11 @@ func (s *Signer) extractEventKind(req *NIP46Request) int {
 }
 
 func (s *Signer) handleConnect(ctx context.Context, targetPubkey, clientPubkey string, params []string, perm *storage.Permission) (string, error) {
-	// Create or refresh session
+	// If the key is FROST-user type, copy the owner's active web-session
+	// vault_token onto the NIP-46 session so downstream sign_event can
+	// decrypt the signer's share. Silent no-op for non-FROST keys.
+	vaultToken := s.lookupVaultTokenForKey(ctx, targetPubkey)
+
 	session := &storage.Session{
 		ID:           fmt.Sprintf("%s:%s", targetPubkey[:8], clientPubkey[:8]),
 		KeyID:        targetPubkey,
@@ -968,6 +972,7 @@ func (s *Signer) handleConnect(ctx context.Context, targetPubkey, clientPubkey s
 		Permissions:  perm.Methods,
 		CreatedAt:    time.Now(),
 		ExpiresAt:    time.Now().Add(24 * time.Hour),
+		VaultToken:   vaultToken,
 	}
 
 	if err := s.storage.CreateSession(ctx, session); err != nil {
@@ -979,6 +984,38 @@ func (s *Signer) handleConnect(ctx context.Context, targetPubkey, clientPubkey s
 	// Standard NIP-46 clients will receive this as the "ack" and still work
 	// (they typically just check for non-error response)
 	return fmt.Sprintf(`{"pubkey":"%s"}`, targetPubkey), nil
+}
+
+// lookupVaultTokenForKey returns the vault_token of an active web session
+// belonging to the owner of the given key. Empty string if the owner has
+// no active web session, or if the key isn't found. Called at NIP-46
+// connect time so that FROST-key sign_event dispatch (P4d) has the
+// token available without needing the user's web tab active per-signature.
+//
+// Non-FROST keys don't need this but we do it unconditionally because
+// (a) it's cheap, (b) uniform behavior, (c) future signing flows that
+// touch Vault (e.g. per-signature share re-derivation for P5 refresh)
+// will benefit.
+func (s *Signer) lookupVaultTokenForKey(ctx context.Context, targetPubkey string) string {
+	key, err := s.storage.GetKeyByPubkey(ctx, targetPubkey)
+	if err != nil || key == nil || key.OwnerID == "" {
+		return ""
+	}
+	sessions, err := s.storage.ListUserSessions(ctx, key.OwnerID)
+	if err != nil || len(sessions) == 0 {
+		return ""
+	}
+	now := time.Now()
+	for _, us := range sessions {
+		if us.VaultToken == "" {
+			continue
+		}
+		if us.ExpiresAt.Before(now) {
+			continue
+		}
+		return us.VaultToken
+	}
+	return ""
 }
 
 func (s *Signer) handleGetRelays() (string, error) {
@@ -1297,11 +1334,21 @@ func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey s
 			"key_pubkey", targetPubkey[:16]+"...")
 	}
 
-	// Set pubkey and sign
-	// NOTE: FROST keys are not supported via NIP-46 because NIP-46 requires decryption
-	// of incoming requests using the target key's private key. FROST keys don't have
-	// a single private key - they have distributed shares. FROST signing is available
-	// via the HTTP API at /api/v1/frost/keys/{id}/sign instead.
+	// FROST-user key dispatch: instead of ECDSA signing with a local
+	// private key, route through the user-cosigner ceremony (P4d).
+	// The user's browser produces its partial sig via WASM; the signer
+	// combines with its own partial to yield a canonical BIP-340 sig.
+	//
+	// Requires: (1) the NIP-46 session carrying a non-empty vault_token
+	// so the signer can decrypt its share, (2) the FROST user share
+	// row present, (3) the user's browser reachable via the cosign
+	// channel (P4c). If any prerequisite is unmet, surface an error
+	// that a client can render meaningfully.
+	if key, keyErr := s.storage.GetKeyByPubkey(ctx, targetPubkey); keyErr == nil && key != nil && key.KeyType == storage.KeyTypeFrostUser {
+		return s.handleFrostUserSignEvent(ctx, key, &event)
+	}
+
+	// Set pubkey and sign (non-FROST path)
 	event.PubKey = targetPubkey
 	if err := event.Sign(privateKey); err != nil {
 		return "", fmt.Errorf("signing failed: %w", err)
@@ -1315,6 +1362,22 @@ func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey s
 
 	slog.Info("signed event", "kind", event.Kind, "id", event.ID[:16]+"...")
 	return string(data), nil
+}
+
+// handleFrostUserSignEvent routes a NIP-46 sign_event for a FROST-user
+// key through the browser cosigning ceremony. P4d wires the shape; the
+// actual browser round-trip (kind:24135/24136 relay events) ships with
+// P4c/P4e. Until that lands this returns a clear error so clients can
+// display a helpful message rather than an opaque failure.
+func (s *Signer) handleFrostUserSignEvent(ctx context.Context, key *storage.Key, event *nostr.Event) (string, error) {
+	_ = ctx
+	_ = event
+	return "", fmt.Errorf(
+		"FROST cosigning for key %s: browser cosign channel not yet available "+
+			"(P4c pending). Sign requests via NIP-46 for FROST keys will succeed once "+
+			"the browser approval flow ships",
+		key.Pubkey[:16]+"...",
+	)
 }
 
 // handleBatchSign signs multiple events in one request to reduce round-trips on rate-limited relays
