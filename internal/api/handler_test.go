@@ -1362,6 +1362,7 @@ func TestHandleNostrConnect_InvalidURI(t *testing.T) {
 	body := `{"uri": "invalid://uri", "key_id": "testkey"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/nostrconnect", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	addAuthHeader(t, h, req) // /nostrconnect now requires auth before validation
 	rr := httptest.NewRecorder()
 
 	h.handleNostrConnect(rr, req)
@@ -1377,6 +1378,7 @@ func TestHandleNostrConnect_MissingURI(t *testing.T) {
 	body := `{"key_id": "testkey"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/nostrconnect", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	addAuthHeader(t, h, req) // /nostrconnect now requires auth before validation
 	rr := httptest.NewRecorder()
 
 	h.handleNostrConnect(rr, req)
@@ -1392,6 +1394,7 @@ func TestHandleNostrConnect_MissingKeyID(t *testing.T) {
 	body := `{"uri": "nostrconnect://eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee?relay=wss://relay.example.com"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/nostrconnect", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	addAuthHeader(t, h, req) // /nostrconnect now requires auth before validation
 	rr := httptest.NewRecorder()
 
 	h.handleNostrConnect(rr, req)

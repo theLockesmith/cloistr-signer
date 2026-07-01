@@ -2572,6 +2572,15 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Approving a nostrconnect:// URI grants an app signing authority over a
+	// key, so the caller must be authenticated (Bearer token or auth_token
+	// cookie) and — verified after the key is loaded — must own that key.
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	var req NostrConnectRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -2657,6 +2666,14 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Ownership check: the authenticated user must own the key they are
+	// authorizing an app to sign with. Without this, any caller who knows a
+	// key_id (pubkey[:16]) could grant a client signing authority over it.
+	if key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusForbidden, "key does not belong to the authenticated user")
 		return
 	}
 
