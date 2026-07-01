@@ -1146,3 +1146,150 @@ mod signing_tests {
         assert!(ok, "aggregated BIP-340 signature must verify under k256::schnorr");
     }
 }
+
+// -----------------------------------------------------------------------------
+// P7 Path B: interactive additive split.
+//
+// Browser has a nsec `p`; splits into (p_signer, p_user) such that
+// p_signer + p_user == p (mod n), and produces R_user = p_user*G as the
+// public verification-share commitment. Browser retains p_user for
+// IndexedDB storage; sends p_signer + R_user to the signer.
+// -----------------------------------------------------------------------------
+
+/// Result of splitting a nsec into (p_signer, p_user) additive shares.
+/// Browser retains p_user_hex in IndexedDB (via storeShare). Browser
+/// sends p_signer_hex + r_user_hex to the signer. Browser destroys the
+/// nsec `p` from memory after this call.
+#[wasm_bindgen]
+pub fn split_nsec_for_path_b(nsec_hex: &str) -> Result<JsValue, JsValue> {
+    split_nsec_for_path_b_impl(nsec_hex).map_err(JsValue::from)
+}
+
+fn split_nsec_for_path_b_impl(nsec_hex: &str) -> Result<JsValue, String> {
+    // Parse the nsec into a scalar.
+    let nsec_bytes = hex::decode(nsec_hex.trim())
+        .map_err(|e| format!("nsec_hex: {}", e))?;
+    if nsec_bytes.len() != 32 {
+        return Err(format!("nsec must be 32 bytes, got {}", nsec_bytes.len()));
+    }
+    let mut p_arr = [0u8; 32];
+    p_arr.copy_from_slice(&nsec_bytes);
+    let p = Scalar::from_repr(p_arr.into())
+        .into_option()
+        .ok_or_else(|| "nsec is not a valid secp256k1 scalar (>= n)".to_string())?;
+
+    // Derive pubkey (informational — returned to the caller so the UI
+    // can render/confirm without needing a separate derivation step).
+    let pubkey_pt = ProjectivePoint::GENERATOR * p;
+    let pubkey_encoded = pubkey_pt.to_affine().to_encoded_point(true);
+    let pubkey_x_only = hex::encode(&pubkey_encoded.as_bytes()[1..]);
+
+    // Sample p_user uniformly random.
+    let mut rng = OsRng;
+    let p_user = Scalar::random(&mut rng);
+
+    // p_signer = p - p_user (mod n).
+    let p_signer = p - p_user;
+
+    // R_user = p_user·G (public commitment).
+    let r_user = ProjectivePoint::GENERATOR * p_user;
+
+    // Sanity check: p_signer + p_user == p, so R_signer + R_user == pubkey.
+    // We don't compute R_signer here (server does), but the additive
+    // relationship holds by construction.
+
+    let obj = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &obj,
+        &JsValue::from_str("p_signer_hex"),
+        &JsValue::from_str(&scalar_to_hex(&p_signer)),
+    )
+    .map_err(|e| format!("reflect p_signer: {:?}", e))?;
+    js_sys::Reflect::set(
+        &obj,
+        &JsValue::from_str("p_user_hex"),
+        &JsValue::from_str(&scalar_to_hex(&p_user)),
+    )
+    .map_err(|e| format!("reflect p_user: {:?}", e))?;
+    js_sys::Reflect::set(
+        &obj,
+        &JsValue::from_str("r_user_hex"),
+        &JsValue::from_str(&point_to_hex(&r_user)),
+    )
+    .map_err(|e| format!("reflect r_user: {:?}", e))?;
+    js_sys::Reflect::set(
+        &obj,
+        &JsValue::from_str("derived_pubkey_x_only"),
+        &JsValue::from_str(&pubkey_x_only),
+    )
+    .map_err(|e| format!("reflect pubkey: {:?}", e))?;
+    Ok(obj.into())
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    // Native (non-WASM) helper for testing.
+    fn split_native(nsec_hex: &str) -> Result<(Scalar, Scalar, ProjectivePoint, String), String> {
+        let nsec_bytes = hex::decode(nsec_hex.trim())
+            .map_err(|e| format!("nsec_hex: {}", e))?;
+        if nsec_bytes.len() != 32 {
+            return Err(format!("nsec must be 32 bytes, got {}", nsec_bytes.len()));
+        }
+        let mut p_arr = [0u8; 32];
+        p_arr.copy_from_slice(&nsec_bytes);
+        let p = Scalar::from_repr(p_arr.into())
+            .into_option()
+            .ok_or_else(|| "nsec >= n".to_string())?;
+        let pubkey_pt = ProjectivePoint::GENERATOR * p;
+        let pubkey_x_only = hex::encode(
+            &pubkey_pt.to_affine().to_encoded_point(true).as_bytes()[1..],
+        );
+
+        let mut rng = OsRng;
+        let p_user = Scalar::random(&mut rng);
+        let p_signer = p - p_user;
+        let r_user = ProjectivePoint::GENERATOR * p_user;
+        Ok((p_signer, p_user, r_user, pubkey_x_only))
+    }
+
+    #[test]
+    fn split_shares_reconstruct_original_scalar() {
+        // Deterministic nsec for the sanity check.
+        let nsec_hex = "1111111111111111111111111111111111111111111111111111111111111111";
+        let (p_signer, p_user, _r_user, _pk) = split_native(nsec_hex).expect("split");
+        let sum = p_signer + p_user;
+        let mut p_arr = [0u8; 32];
+        p_arr.copy_from_slice(&hex::decode(nsec_hex).unwrap());
+        let p = Scalar::from_repr(p_arr.into()).unwrap();
+        assert_eq!(sum, p, "p_signer + p_user must equal p");
+    }
+
+    #[test]
+    fn split_verification_shares_sum_to_pubkey() {
+        let nsec_hex = "2222222222222222222222222222222222222222222222222222222222222222";
+        let (p_signer, _p_user, r_user, _pk) = split_native(nsec_hex).expect("split");
+        let mut p_arr = [0u8; 32];
+        p_arr.copy_from_slice(&hex::decode(nsec_hex).unwrap());
+        let p = Scalar::from_repr(p_arr.into()).unwrap();
+        let pubkey_pt = ProjectivePoint::GENERATOR * p;
+        // Signer's verification share:
+        let r_signer = ProjectivePoint::GENERATOR * p_signer;
+        // Their sum must equal the pubkey point.
+        let sum = r_signer + r_user;
+        assert_eq!(sum, pubkey_pt, "R_signer + R_user must equal pubkey*G");
+    }
+
+    #[test]
+    fn split_rejects_scalar_at_or_above_group_order() {
+        // Group order n itself → invalid (not < n).
+        let n_hex = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141";
+        assert!(split_native(n_hex).is_err());
+    }
+
+    #[test]
+    fn split_rejects_wrong_length() {
+        assert!(split_native("deadbeef").is_err());
+    }
+}
