@@ -50,6 +50,18 @@ func main() {
 	}
 	defer store.Close()
 
+	// Route all outbound Nostr relay connections through Tor if configured.
+	// Uses process-wide HTTP_PROXY / HTTPS_PROXY / ALL_PROXY env vars,
+	// which coder/websocket (transitively via go-nostr) respects. This
+	// is the "all outbound through Tor" mode - per-key gating requires
+	// the upstream dialer hook work documented in TorConfig.
+	if cfg.Tor.SOCKS5URL != "" {
+		os.Setenv("HTTP_PROXY", cfg.Tor.SOCKS5URL)
+		os.Setenv("HTTPS_PROXY", cfg.Tor.SOCKS5URL)
+		os.Setenv("ALL_PROXY", cfg.Tor.SOCKS5URL)
+		slog.Info("Tor egress enabled - all outbound relay traffic routes through SOCKS5", "url", cfg.Tor.SOCKS5URL)
+	}
+
 	// Initialize relay client
 	relayClient := nostr.NewClient(cfg.Relays)
 
