@@ -182,6 +182,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 		}
 		h.handleKeyByID(w, r)
 	})
+
+	// P7 Path B: interactive additive split for keys NOT currently in
+	// the signer. Two-round protocol; nsec never leaves the browser.
+	// See docs/frost-2-of-n-design.md §13.2 Path B.
+	mux.HandleFunc("/api/v1/keys/frost-migrate-b/init", h.handleFrostMigrateBInit)
+	mux.HandleFunc("/api/v1/keys/frost-migrate-b/finalize", h.handleFrostMigrateBFinalize)
 }
 
 // Health check response
