@@ -1366,6 +1366,42 @@ func (s *Signer) handleSignEvent(ctx context.Context, targetPubkey, privateKey s
 	return string(data), nil
 }
 
+// P4c cosign wire kinds (docs/frost-cosigning-design.md §2.2). Both
+// ephemeral, both NIP-44-encrypted between the signer and the user's
+// session ephemeral pubkey.
+const (
+	KindCosignRequest  = 24135
+	KindCosignResponse = 24136
+)
+
+// CosignRequestPayload is the plaintext-before-NIP-44 form of the
+// signer → browser cosign request.
+type CosignRequestPayload struct {
+	V                int              `json:"v"`
+	EventToSign      *nostr.Event     `json:"event_to_sign"`
+	EventID          string           `json:"event_id"`
+	SignerCommitment CosignCommitment `json:"signer_commitment"`
+	SessionID        string           `json:"session_id"`
+	KeyID            string           `json:"key_id"`
+}
+
+// CosignCommitment is the on-the-wire form of a FROST nonce pair
+// commitment (D, E) — 33-byte compressed-SEC1 hex on each.
+type CosignCommitment struct {
+	Hiding  string `json:"hiding"`
+	Binding string `json:"binding"`
+}
+
+// CosignResponsePayload is the plaintext-before-NIP-44 form of the
+// browser → signer cosign response.
+type CosignResponsePayload struct {
+	V                 int              `json:"v"`
+	Approved          bool             `json:"approved"`
+	Reason            string           `json:"reason,omitempty"`
+	UserCommitment    CosignCommitment `json:"user_commitment,omitempty"`
+	PartialSignature  string           `json:"partial_signature_hex,omitempty"`
+}
+
 // handleFrostUserSignEvent routes a NIP-46 sign_event for a FROST-user
 // key through the browser cosigning ceremony (docs/frost-cosigning-design.md).
 //
