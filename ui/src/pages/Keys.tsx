@@ -6,6 +6,7 @@ import {
   generateFrostRecoveryPhrase,
   isValidFrostRecoveryPhrase,
   recoverFrostKey,
+  migrateKeyToFrostPathA,
   FrostRecoveryWrongPhraseError,
   type CreatedFrostKey,
 } from '../lib/frost';
@@ -25,6 +26,8 @@ export function KeysPage() {
   // Recovery flow: which existing FROST key (id + pubkey) the user is
   // trying to recover.
   const [recoveryTarget, setRecoveryTarget] = useState<Key | null>(null);
+  // P7 Path A: which existing local key the user is upgrading to FROST.
+  const [migrateTarget, setMigrateTarget] = useState<Key | null>(null);
 
   const { data: keys, isLoading } = useQuery({
     queryKey: ['keys'],
@@ -98,6 +101,18 @@ export function KeysPage() {
       queryClient.invalidateQueries({ queryKey: ['keys'] });
       queryClient.invalidateQueries({ queryKey: ['frost-local-shares'] });
       setRecoveryTarget(null);
+    },
+  });
+
+  // P7 Path A: server splits the nsec, browser stores its half in
+  // IndexedDB. Same pubkey preserved.
+  const migrateMutation = useMutation({
+    mutationFn: (keyId: string) => migrateKeyToFrostPathA(keyId),
+    onSuccess: (result: CreatedFrostKey) => {
+      queryClient.invalidateQueries({ queryKey: ['keys'] });
+      queryClient.invalidateQueries({ queryKey: ['frost-local-shares'] });
+      setFrostResult({ pubkey: result.pubkey });
+      setMigrateTarget(null);
     },
   });
 
@@ -182,6 +197,7 @@ export function KeysPage() {
               }
               onDelete={() => setKeyToDelete(key)}
               onRecover={() => setRecoveryTarget(key)}
+              onMigrate={() => setMigrateTarget(key)}
             />
           ))}
         </div>
@@ -227,6 +243,21 @@ export function KeysPage() {
           }}
           onConfirm={() => frostCreateMutation.mutate(frostPhrase)}
           loading={frostCreateMutation.isPending}
+        />
+      )}
+
+      {migrateTarget && (
+        <FrostMigrateModal
+          keyData={migrateTarget}
+          onCancel={() => {
+            if (!migrateMutation.isPending) {
+              setMigrateTarget(null);
+              migrateMutation.reset();
+            }
+          }}
+          onConfirm={() => migrateMutation.mutate(migrateTarget.id)}
+          loading={migrateMutation.isPending}
+          error={migrateMutation.error}
         />
       )}
 
@@ -305,7 +336,7 @@ function DeleteKeyModal({
   );
 }
 
-function KeyCard({ keyData, hasLocalShare, onDelete, onRecover }: { keyData: Key; hasLocalShare: boolean; onDelete: () => void; onRecover: () => void }) {
+function KeyCard({ keyData, hasLocalShare, onDelete, onRecover, onMigrate }: { keyData: Key; hasLocalShare: boolean; onDelete: () => void; onRecover: () => void; onMigrate: () => void }) {
   const queryClient = useQueryClient();
   const [showBunkerUrl, setShowBunkerUrl] = useState(false);
   const [bunkerUrl, setBunkerUrl] = useState<string | null>(null);
@@ -416,6 +447,18 @@ function KeyCard({ keyData, hasLocalShare, onDelete, onRecover }: { keyData: Key
             title="Recover this FROST share on this device by entering your 24-word phrase."
           >
             🔑 Recover from phrase
+          </button>
+        </div>
+      )}
+      {(!keyData.key_type || keyData.key_type === 'local') && !keyData.is_proxy && (
+        <div style={{ marginTop: '12px' }}>
+          <button
+            className="btn btn-secondary"
+            onClick={onMigrate}
+            style={{ fontSize: '14px' }}
+            title="Upgrade this key to FROST 2-of-2. Pubkey is preserved; signer will no longer be able to sign without this browser."
+          >
+            🛡️ Upgrade to FROST
           </button>
         </div>
       )}
@@ -820,6 +863,86 @@ function FrostRecoveryModal({
               </button>
             </div>
           </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// FrostMigrateModal shows a confirmation gate before Path A migration.
+// The user must acknowledge (a) that the pubkey is preserved,
+// (b) that signing will require this browser going forward, and
+// (c) that they've backed up their FROST recovery phrase somewhere
+// safe (Path A doesn't generate a fresh phrase — it inherits the
+// existing custody model, so this is more of an informational
+// checkbox than a phrase-write-down).
+function FrostMigrateModal({
+  keyData,
+  onCancel,
+  onConfirm,
+  loading,
+  error,
+}: {
+  keyData: Key;
+  onCancel: () => void;
+  onConfirm: () => void;
+  loading: boolean;
+  error: Error | null;
+}) {
+  const [ack, setAck] = useState(false);
+  const errMsg = error ? (error instanceof Error ? error.message : String(error)) : null;
+  return (
+    <div className="modal-overlay">
+      <div className="modal" style={{ maxWidth: '560px' }}>
+        <div className="modal-content">
+          <h2 style={{ marginTop: 0 }}>🛡️ Upgrade to FROST 2-of-2</h2>
+          <p style={{ fontSize: '14px', color: 'var(--signer-text-muted, #888)', marginBottom: '12px' }}>
+            Key: <code style={{ wordBreak: 'break-all' }}>{keyData.pubkey}</code>
+          </p>
+          <div style={{ fontSize: '14px', marginBottom: '16px' }}>
+            <p style={{ marginTop: 0 }}>
+              This converts your existing key to a FROST 2-of-2 shape:
+            </p>
+            <ul style={{ paddingLeft: '20px', marginBottom: '12px' }}>
+              <li>Your pubkey stays the same — followers, NIP-05, and existing app connections are unaffected.</li>
+              <li>The signer will hold one share; your browser will hold the other.</li>
+              <li>Signing will require this browser being open and connected. If the tab is closed, sign requests will fail with a clear error.</li>
+              <li>The old private-key ciphertext is deleted after migration completes.</li>
+            </ul>
+            <p style={{ marginBottom: 0 }}>
+              This is a one-way operation. If you want to go back, mint a fresh non-FROST key and rotate identities.
+            </p>
+          </div>
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', marginBottom: '16px', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={ack}
+              onChange={(e) => setAck(e.target.checked)}
+              disabled={loading}
+              style={{ marginTop: '3px' }}
+            />
+            <span style={{ fontSize: '14px' }}>
+              I understand that after this upgrade, the signer alone cannot sign for this key. Signing requires my browser cooperating each time.
+            </span>
+          </label>
+          {errMsg && (
+            <div className="auth-error" style={{ marginBottom: '12px' }}>
+              Upgrade failed: {errMsg}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+            <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={onConfirm}
+              disabled={!ack || loading}
+            >
+              {loading ? '⏳ Migrating…' : 'Upgrade to FROST'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
