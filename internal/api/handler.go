@@ -166,6 +166,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// token) plus the user-reported verification share for client-side
 	// reconstruction validation.
 	mux.HandleFunc("/api/v1/frost/user-dkg/recovery/", h.handleFrostUserDKGRecovery)
+
+	// P4e: browser-side cosign listener registers its ephemeral pubkey
+	// so the signer knows where to p-tag kind:24135 cosign requests.
+	mux.HandleFunc("/api/v1/frost/cosign-listener/register", h.handleFrostCosignListenerRegister)
 }
 
 // Health check response

@@ -86,6 +86,7 @@ type Signer struct {
 	relayPrefs      *relayprefs.Client                  // Relay preferences for user data delivery
 	frostCoordinator *frost.Coordinator                 // FROST threshold signing coordinator (Phase 13)
 	frostUserSigner  *frost.UserSignerCoordinator       // FROST 2-of-N user-cosigner coordinator (P4)
+	cosignListenerRegistry sync.Map                     // user_id (string) → cosign listener ephemeral pubkey (string), P4e
 	keys            map[string]string                   // pubkey -> private key (hex)
 	keysLock        sync.RWMutex                        // Protects keys map for concurrent access
 	keyRelays       map[string][]string                 // pubkey -> configured relays (from storage)
@@ -988,6 +989,28 @@ func (s *Signer) handleConnect(ctx context.Context, targetPubkey, clientPubkey s
 	return fmt.Sprintf(`{"pubkey":"%s"}`, targetPubkey), nil
 }
 
+// RegisterCosignListener stores the ephemeral pubkey the browser
+// admin UI is currently listening on for FROST cosign requests.
+// Called from the API layer's POST /frost/cosign-listener/register.
+// Empty pubkey clears the entry (used at logout).
+func (s *Signer) RegisterCosignListener(userID, ephemeralPubkey string) {
+	if ephemeralPubkey == "" {
+		s.cosignListenerRegistry.Delete(userID)
+		return
+	}
+	s.cosignListenerRegistry.Store(userID, ephemeralPubkey)
+}
+
+// GetCosignListener returns the currently-registered listener pubkey
+// for a user (empty if none). Public helper for the API layer.
+func (s *Signer) GetCosignListener(userID string) string {
+	v, ok := s.cosignListenerRegistry.Load(userID)
+	if !ok {
+		return ""
+	}
+	return v.(string)
+}
+
 // lookupVaultTokenForKey returns the vault_token of an active web session
 // belonging to the owner of the given key. Empty string if the owner has
 // no active web session, or if the key isn't found. Called at NIP-46
@@ -1546,9 +1569,20 @@ func (s *Signer) waitForCosignResponse(ctx context.Context, signerEphemeralSK, s
 // (missing FROST share row, missing vault_token, etc.) surface
 // immediately and don't wait until the relay wire ships.
 func (s *Signer) handleFrostUserSignEvent(ctx context.Context, key *storage.Key, clientPubkey string, event *nostr.Event) (string, error) {
-	if clientPubkey == "" {
-		return "", errors.New("FROST cosigning requires a NIP-46 client context (not available on proxy path)")
+	// For FROST cosigning we DON'T talk to the NIP-46 client (Damus etc);
+	// we talk to the browser running the signer admin UI, which
+	// registered its ephemeral pubkey via
+	// POST /api/v1/frost/cosign-listener/register. If no listener has
+	// registered for this key's owner, the user's browser isn't
+	// currently listening and the sign request cannot complete.
+	_ = clientPubkey // reserved for future per-connection dispatch
+	listenerPubkey, ok := s.cosignListenerRegistry.Load(key.OwnerID)
+	if !ok {
+		return "", errors.New("FROST key owner has no active cosign listener; open the signer admin UI in a browser tab first")
 	}
+	// Downstream code uses listenerPubkey for the p-tag; replace the
+	// clientPubkey local so the rest of the function reads naturally.
+	clientPubkey = listenerPubkey.(string)
 
 	share, err := s.storage.GetFrostUserShareByKeyID(ctx, key.ID)
 	if err != nil {

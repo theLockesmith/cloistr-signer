@@ -207,6 +207,12 @@ type UserSession struct {
 	UserID         string     `json:"user_id"`
 	Token          string     `json:"-"` // JWT token hash for revocation check
 	VaultToken     string     `json:"-"` // User's Vault token for key operations (encrypted at rest)
+	// P4e: browser-side cosign listener's ephemeral pubkey. Populated
+	// via POST /api/v1/frost/cosign-listener/register when the SPA
+	// starts up. Read at FROST-key sign_event time to determine the
+	// p-tag on outgoing kind:24135 requests. Empty for sessions that
+	// haven't registered yet.
+	CosignListenerPubkey string `json:"-"`
 	UserAgent      string     `json:"user_agent,omitempty"`
 	IPAddress      string     `json:"ip_address,omitempty"`
 	RememberDevice bool       `json:"remember_device"`            // If true, use extended expiry instead of inactivity timeout
