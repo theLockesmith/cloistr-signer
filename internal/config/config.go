@@ -29,10 +29,24 @@ type Config struct {
 // TorConfig holds Tor egress configuration.
 //
 // When SOCKS5URL is set (e.g. socks5h://cloistr-tor.cloistr.svc.cluster.local:9050),
-// the go-nostr relay dialer routes outbound connections for keys with
-// tor_egress=true through this proxy. The `socks5h` scheme forces DNS
-// resolution through Tor (required — without it, hostname lookups leak
-// the circuit metadata).
+// outbound relay connections for keys with tor_egress=true route through
+// this proxy. The `socks5h` scheme forces DNS resolution through Tor
+// (required - without it, hostname lookups leak circuit metadata).
+//
+// Runtime wiring status (2026-07-01): the Atlas cloistr-tor role
+// deploys the proxy pod; this config field surfaces the endpoint. The
+// go-nostr connection layer (nbd-wtf/go-nostr@v0.52.3/connection.go)
+// does not currently expose a custom-dialer hook, so per-key SOCKS5
+// routing requires either:
+//   (a) HTTPS_PROXY/HTTP_PROXY/ALL_PROXY env vars on the signer process
+//       (routes ALL traffic through Tor, not per-key selectable)
+//   (b) An upstream go-nostr patch to inject a custom http.Client into
+//       getConnectionOptions
+//   (c) A local SOCKS5-terminating WebSocket proxy sidecar
+//
+// Follow-up commit will pick one - option (b) upstream patch is the
+// preferred long-term path since per-key gating is the whole point of
+// the tor_egress flag.
 type TorConfig struct {
 	SOCKS5URL string `yaml:"socks5_url"` // e.g. "socks5h://tor.cloistr.svc.cluster.local:9050"; empty = disabled
 }
