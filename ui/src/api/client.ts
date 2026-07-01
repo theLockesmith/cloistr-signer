@@ -197,6 +197,17 @@ class ApiClient {
     return this.fetch(`/frost/user-dkg/recovery/${encodeURIComponent(keyId)}`);
   }
 
+  /** Register this browser's ephemeral cosign-listener pubkey with the
+   * signer. The signer p-tags kind:24135 cosign requests to this
+   * pubkey so the browser can filter for them. */
+  async frostRegisterCosignListener(ephemeralPubkey: string): Promise<void> {
+    return this.fetch('/frost/cosign-listener/register', {
+      method: 'POST',
+      body: JSON.stringify({ ephemeral_pubkey: ephemeralPubkey }),
+    });
+  }
+
+
   // Request endpoints
   async listRequests(): Promise<PendingRequest[]> {
     return this.fetch('/requests');
