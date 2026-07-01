@@ -7,6 +7,7 @@ import (
 	"github.com/bytemare/ecc"
 	frostlib "github.com/bytemare/frost"
 	"github.com/bytemare/secret-sharing/keys"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
 // userSignerFixture runs the user-cosigner DKG in-process, returns the
@@ -351,3 +352,102 @@ var _ ecc.Group = DefaultCiphersuite.Group()
 var _ = (*keysPlaceholder)(nil)
 
 type keysPlaceholder struct{}
+
+
+// The bytemare/frost signature scheme (FROST-secp256k1-SHA256-v1) is
+// Schnorr-over-secp256k1 but uses a DIFFERENT challenge hash from BIP-340.
+// Specifically:
+//   - bytemare/frost: HashToScalar(context||"chal", R_33bytes||P_33bytes||msg)
+//   - BIP-340:        tagged_hash("BIP0340/challenge", R_x||P_x||msg) mod n
+// These produce different scalars, so a valid bytemare/frost signature
+// does NOT verify as a BIP-340 signature. Since Nostr uses BIP-340 for
+// event verification (btcec/schnorr.Signature.Verify), FROST keys signed
+// via this path currently produce Nostr signatures that WILL BE REJECTED
+// by real relays.
+//
+// This test pins the failure so we don't regress once we build the
+// BIP-340-compatible signing path. When P4b ships with a
+// BIP-340-native signing coordinator, the "want" in this test flips
+// from FAILS_BIP340 to VERIFIES_BIP340.
+func TestUserSignerCoordinator_KnownIssue_FrostSigDoesNotVerifyAsBIP340(t *testing.T) {
+	fx := newUserSignerFixture(t)
+	coord := NewUserSignerCoordinator()
+	eventHash := sha256.Sum256([]byte("nostr event body"))
+
+	begin, err := coord.BeginCosign(UserCosignSetup{
+		KeyID:                    "test-key",
+		JointPubkeyHex:           fx.jointPubkeyHex,
+		SignerShareScalar:        fx.signerShareScalar,
+		SignerVerificationShare:  fx.signerVerificationShare,
+		UserVerificationShareHex: fx.userVerificationShare,
+		EventHash:                eventHash[:],
+	})
+	if err != nil {
+		t.Fatalf("BeginCosign: %v", err)
+	}
+	userConfig := buildUserConfig(t, fx)
+	userSigner, err := userConfig.Signer(toKeyShare(t, fx.userKeyShare))
+	if err != nil {
+		t.Fatalf("user signer: %v", err)
+	}
+	userCommit := userSigner.Commit()
+	signerCommit := decodeCommitment(t, begin.SignerCommitmentHidingHex, begin.SignerCommitmentBindingHex, SignerIndex)
+	commitments := frostlib.CommitmentList{userCommit, signerCommit}
+	commitments.Sort()
+	userSigShare, err := userSigner.Sign(eventHash[:], commitments)
+	if err != nil {
+		t.Fatalf("user Sign: %v", err)
+	}
+	sigBytes, err := coord.CompleteCosign(CompleteCosignInput{
+		SessionID:                begin.SessionID,
+		UserCommitmentHidingHex:  userCommit.HidingNonceCommitment.Hex(),
+		UserCommitmentBindingHex: userCommit.BindingNonceCommitment.Hex(),
+		UserPartialSignatureHex:  userSigShare.SignatureShare.Hex(),
+	})
+	if err != nil {
+		t.Fatalf("CompleteCosign: %v", err)
+	}
+
+	// bytemare/frost.Signature.Encode() = [group_id(1) || R(33) || z(32)]
+	// Extract x-coordinate of R (bytes 2..34, skipping group_id + parity prefix)
+	// and z (bytes 34..66) to attempt a BIP-340-shaped signature.
+	if len(sigBytes) != 66 {
+		t.Fatalf("expected 66-byte bytemare/frost sig, got %d", len(sigBytes))
+	}
+	bip340Sig := make([]byte, 64)
+	copy(bip340Sig[:32], sigBytes[2:34]) // R x-coord
+	copy(bip340Sig[32:], sigBytes[34:66]) // z scalar
+
+	// Extract the joint pubkey as x-only for BIP-340.
+	group := DefaultCiphersuite.Group()
+	jointPub := group.NewElement()
+	if err := jointPub.DecodeHex(fx.jointPubkeyHex); err != nil {
+		t.Fatalf("decode joint pubkey: %v", err)
+	}
+	jointPubBytes := jointPub.Encode() // 33-byte compressed
+	pubkeyXOnly := jointPubBytes[1:] // 32-byte x-only
+
+	// Attempt BIP-340 verification via btcec/schnorr.
+	sig, err := schnorr.ParseSignature(bip340Sig)
+	if err != nil {
+		// Parse failure is one flavor of the incompatibility surface.
+		t.Logf("BIP-340 ParseSignature failed as expected: %v", err)
+		return
+	}
+	parsedPub, err := schnorr.ParsePubKey(pubkeyXOnly)
+	if err != nil {
+		t.Logf("BIP-340 ParsePubKey failed (parity/encoding): %v", err)
+		return
+	}
+	verified := sig.Verify(eventHash[:], parsedPub)
+	if verified {
+		t.Error("UNEXPECTED: bytemare/frost signature verified as BIP-340; " +
+			"this test is meant to document the known incompatibility. " +
+			"Either the fix has landed (great — flip the assertion) or " +
+			"the test setup produced an accidental collision (investigate).")
+	} else {
+		t.Log("Confirmed: bytemare/frost FROST-secp256k1 signature does NOT " +
+			"verify under BIP-340. This test guards the pending fix; " +
+			"see docs/frost-cosigning-design.md §BIP-340 for the plan.")
+	}
+}

@@ -470,3 +470,132 @@ Decomposed into shippable PRs, each one self-contained and testable:
   doc extends
 - docs/privacy-architecture.md §1.1 — We Cannot Comply (driving
   constraint for the vault-token-on-session decision)
+
+---
+
+## 9. Update 2026-07-01 — BIP-340 vs FROST-secp256k1 discovery
+
+Deep research during P4b implementation surfaced a foundational issue
+that changes the shape of P4a–e:
+
+**bytemare/frost produces FROST-secp256k1-SHA256-v1 Schnorr signatures,
+NOT BIP-340 Schnorr signatures.** These are same-curve, same-shape (R, s)
+signatures with different challenge hashes:
+
+- **bytemare/frost**: `H2(ctx||"chal", R_33bytes || P_33bytes || msg)`
+  where H2 is `HashToScalar_secp256k1` with the FROST context string
+- **BIP-340**: `int(tagged_hash("BIP0340/challenge", R_x_32bytes ||
+  P_x_32bytes || msg)) mod n`
+
+They produce different scalars, so a valid bytemare/frost signature does
+**not** verify under `btcec/schnorr.Signature.Verify` (which is what
+`go-nostr.Event.CheckSignature` uses and what real relays run).
+
+**Implication:** any FROST-signed Nostr event using the current
+signing path would be rejected by relays. This bug pre-dates P4 —
+it affects the existing Phase 13 FROST feature too (see
+`internal/signer/signer.go:1131`, `internal/api/handler.go:3281`).
+
+Empirical proof lives in
+`internal/frost/user_signer_test.go::TestUserSignerCoordinator_KnownIssue_FrostSigDoesNotVerifyAsBIP340`.
+The test currently passes by confirming the failure; when P4b lands,
+its assertion flips.
+
+### 9.1 The fix — roll our own BIP-340-mode FROST on both sides
+
+Rejected: patching bytemare/frost with a new ciphersuite (drift risk;
+we don't want to maintain a fork of a signature library).
+Rejected: swapping to `frost-secp256k1` (ZcashFoundation) on the WASM
+side — the DKG interop cost we paid in P3a would recur here, and Go
+side would still need its own path.
+
+**Chosen:** hand-roll BIP-340-mode FROST signing on both sides,
+against `k256` (Rust) and `btcec/v2` + native ecc ops (Go). Same
+approach as the DKG (docs/frost-2-of-n-design.md §P3a). We already
+have the primitives; we control the wire format on both sides; no
+external library maintenance cost.
+
+### 9.2 BIP-340-mode FROST math (concrete)
+
+Diffs from vanilla FROST-secp256k1:
+
+**Nonce commitments:** same as before — `D_i = d_i·G`, `E_i = e_i·G`,
+33-byte compressed SEC1 encoding on the wire.
+
+**Binding factor:** instead of the FROST-secp256k1 context hash, use
+BIP-340-compatible domain separation:
+
+```
+rho_input = SHA256("cloistr-frost-v1/binding" || pubkey_x(32) || msg(32)
+                   || sorted_commitments) || participant_id(2)
+rho_i = int(SHA256(rho_input)) mod n
+```
+
+(Custom domain — no external spec dictates this since we're defining
+a new mode. Keep the domain tag versioned so we can rev if needed.)
+
+**Group commitment R:** `R = sum(D_i + rho_i·E_i)` (unchanged math).
+
+**Even-Y normalization:** BIP-340 requires R to have even Y. After
+aggregating:
+- If `R.y` is even: use `(R, r_partial_signs)` as-is.
+- If `R.y` is odd: negate `R` (yields even-Y variant), and every
+  partial signer must negate their `d_i + rho_i·e_i` contribution
+  (equivalently, negate the group commitment and negate `z_agg` at
+  the end). Implementation-wise this happens at aggregation time,
+  not during partial signing.
+
+**Challenge:** true BIP-340:
+
+```
+c = int(tagged_hash("BIP0340/challenge", R_x(32) || P_x(32) || msg(32))) mod n
+```
+
+**Partial signature:** `z_i = d_i + rho_i·e_i + lambda_i · s_i · c`
+(unchanged formula).
+
+**Aggregate:** `z = sum(z_i) mod n`. If the even-Y flip happened,
+`z = -sum(z_i) mod n`.
+
+**Final signature:** `bytes(R_x) || bytes(z)` — canonical BIP-340
+64-byte format. Directly parseable by `btcec/schnorr.ParseSignature`
+and verifiable by `sig.Verify(msg, pubkey)`.
+
+### 9.3 Revised P4a-e plan
+
+P4a stays landed but is now **library-only** — the coordinator API
+is fine, only its internals (currently `bytemare/frost.Signer`,
+`AggregateSignatures`) need to be replaced with the BIP-340-mode
+math above.
+
+New sub-phase inserted:
+
+- **P4a′ (NEW)** — replace `bytemare/frost` internals in
+  `internal/frost/user_signer.go` with hand-rolled BIP-340-mode FROST
+  math. Extend the existing test suite; the KnownIssue test asserts
+  the fix has landed. Also update the existing
+  `internal/frost/coordinator.go` (Phase 13 signer-to-signer FROST)
+  since it has the same bug — otherwise the existing FROST feature
+  stays broken for Nostr.
+
+- **P4b (unchanged plan, updated math)** — WASM primitives match
+  the BIP-340-mode wire format defined in §9.2, not
+  bytemare/frost's.
+
+- **P4c–e (unchanged)** — pub/sub, dispatch, UI. Wire format is
+  now BIP-340-native throughout.
+
+- **P4f (unchanged)** — deferred until manual works, unless
+  testable against the test account after P4e.
+
+### 9.4 Scope impact
+
+P4 grew from "wire signing primitives" to "wire signing primitives
+AND replace two Go coordinators' underlying signing implementations."
+That is roughly 2× the code volume of the original P4 plan. It also
+affects the existing Phase 13 FROST code, so Phase 13 gets audited
+and fixed as part of this work.
+
+The KnownIssue regression test (§9 lead paragraph) is the safety net.
+When it flips from "confirms failure" to "confirms success," the
+implementation is done.
