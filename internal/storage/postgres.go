@@ -235,7 +235,7 @@ func (ps *PostgresStorage) migrate() error {
 	-- P4d: vault_token on NIP-46 sessions (populated at web-UI connect
 	-- time), required for FROST-key cosign dispatch. NULL for
 	-- bunker-URI-initiated sessions where no web UI is involved.
-	ALTER TABLE signer_nip46_sessions ADD COLUMN IF NOT EXISTS vault_token TEXT;
+	ALTER TABLE signer_sessions ADD COLUMN IF NOT EXISTS vault_token TEXT;
 
 	CREATE INDEX IF NOT EXISTS idx_signer_web_sessions_user ON signer_web_sessions(user_id);
 	CREATE INDEX IF NOT EXISTS idx_signer_web_sessions_expires ON signer_web_sessions(expires_at);
@@ -744,43 +744,53 @@ func (ps *PostgresStorage) UpdatePermissionName(ctx context.Context, keyID, user
 
 func (ps *PostgresStorage) CreateSession(ctx context.Context, session *Session) error {
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO signer_sessions (id, key_id, client_pubkey, permissions, created_at, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO signer_sessions (id, key_id, client_pubkey, permissions, created_at, expires_at, vault_token)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (key_id, client_pubkey) DO UPDATE SET
 			id = EXCLUDED.id,
 			permissions = EXCLUDED.permissions,
 			created_at = EXCLUDED.created_at,
-			expires_at = EXCLUDED.expires_at`,
-		session.ID, session.KeyID, session.ClientPubkey, pq.Array(session.Permissions), session.CreatedAt, session.ExpiresAt)
+			expires_at = EXCLUDED.expires_at,
+			vault_token = EXCLUDED.vault_token`,
+		session.ID, session.KeyID, session.ClientPubkey, pq.Array(session.Permissions), session.CreatedAt, session.ExpiresAt,
+		nullString(session.VaultToken))
 	return err
 }
 
 func (ps *PostgresStorage) GetSession(ctx context.Context, id string) (*Session, error) {
 	session := &Session{}
+	var vaultToken sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at
+		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at, vault_token
 		FROM signer_sessions WHERE id = $1 AND expires_at > NOW()`, id).
-		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, pq.Array(&session.Permissions), &session.CreatedAt, &session.ExpiresAt)
+		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, pq.Array(&session.Permissions), &session.CreatedAt, &session.ExpiresAt, &vaultToken)
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	if vaultToken.Valid {
+		session.VaultToken = vaultToken.String
 	}
 	return session, nil
 }
 
 func (ps *PostgresStorage) GetSessionByClient(ctx context.Context, keyID, clientPubkey string) (*Session, error) {
 	session := &Session{}
+	var vaultToken sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at
+		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at, vault_token
 		FROM signer_sessions WHERE key_id = $1 AND client_pubkey = $2 AND expires_at > NOW()`, keyID, clientPubkey).
-		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, pq.Array(&session.Permissions), &session.CreatedAt, &session.ExpiresAt)
+		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, pq.Array(&session.Permissions), &session.CreatedAt, &session.ExpiresAt, &vaultToken)
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	if vaultToken.Valid {
+		session.VaultToken = vaultToken.String
 	}
 	return session, nil
 }

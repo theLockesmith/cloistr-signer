@@ -1938,21 +1938,22 @@ func (ss *SQLiteStorage) DeleteFrostUserShare(ctx context.Context, id string) er
 
 func (ss *SQLiteStorage) CreateSession(ctx context.Context, session *Session) error {
 	_, err := ss.db.ExecContext(ctx, `
-		INSERT INTO signer_nip46_sessions (id, key_id, client_pubkey, permissions, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		INSERT INTO signer_nip46_sessions (id, key_id, client_pubkey, permissions, created_at, expires_at, vault_token)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		session.ID, session.KeyID, session.ClientPubkey, stringsToJSONArray(session.Permissions),
-		formatTime(session.CreatedAt), formatTime(session.ExpiresAt))
+		formatTime(session.CreatedAt), formatTime(session.ExpiresAt),
+		nullStr(session.VaultToken))
 	return err
 }
 
 func (ss *SQLiteStorage) GetSession(ctx context.Context, id string) (*Session, error) {
 	session := &Session{}
-	var permissions, createdAt, expiresAt sql.NullString
+	var permissions, createdAt, expiresAt, vaultToken sql.NullString
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at
+		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at, vault_token
 		FROM signer_nip46_sessions WHERE id = ?`, id).
-		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, &permissions, &createdAt, &expiresAt)
+		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, &permissions, &createdAt, &expiresAt, &vaultToken)
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
 	}
@@ -1968,6 +1969,9 @@ func (ss *SQLiteStorage) GetSession(ctx context.Context, id string) (*Session, e
 	}
 	if expiresAt.Valid {
 		session.ExpiresAt = parseTime(expiresAt.String)
+	}
+	if vaultToken.Valid {
+		session.VaultToken = vaultToken.String
 	}
 
 	if time.Now().After(session.ExpiresAt) {
@@ -1979,13 +1983,13 @@ func (ss *SQLiteStorage) GetSession(ctx context.Context, id string) (*Session, e
 
 func (ss *SQLiteStorage) GetSessionByClient(ctx context.Context, keyID, clientPubkey string) (*Session, error) {
 	session := &Session{}
-	var permissions, createdAt, expiresAt sql.NullString
+	var permissions, createdAt, expiresAt, vaultToken sql.NullString
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at
+		SELECT id, key_id, client_pubkey, permissions, created_at, expires_at, vault_token
 		FROM signer_nip46_sessions WHERE key_id = ? AND client_pubkey = ? AND expires_at > ?`,
 		keyID, clientPubkey, formatTime(time.Now())).
-		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, &permissions, &createdAt, &expiresAt)
+		Scan(&session.ID, &session.KeyID, &session.ClientPubkey, &permissions, &createdAt, &expiresAt, &vaultToken)
 	if err == sql.ErrNoRows {
 		return nil, ErrSessionNotFound
 	}
@@ -2001,6 +2005,9 @@ func (ss *SQLiteStorage) GetSessionByClient(ctx context.Context, keyID, clientPu
 	}
 	if expiresAt.Valid {
 		session.ExpiresAt = parseTime(expiresAt.String)
+	}
+	if vaultToken.Valid {
+		session.VaultToken = vaultToken.String
 	}
 
 	return session, nil
