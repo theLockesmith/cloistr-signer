@@ -43,6 +43,7 @@ import init, {
   compute_joint_pubkey,
   compute_user_final_share,
   compute_user_verification_share,
+  split_nsec_for_path_b,
 } from '../../frost-wasm/pkg/cloistr_frost_wasm.js';
 import wasmUrl from '../../frost-wasm/pkg/cloistr_frost_wasm_bg.wasm?url';
 
@@ -231,6 +232,94 @@ export async function migrateKeyToFrostPathA(keyId: string): Promise<CreatedFros
     pubkey: resp.pubkey,
     userFinalShareHex: resp.user_share_hex,
     userVerificationShareHex: resp.user_verification_share_hex,
+  };
+}
+
+/**
+ * P7 Path B: interactive additive split for a key currently held in a
+ * third-party client (Damus, Amethyst, etc.). The nsec `p` exists only
+ * in this function's execution stack — never on the wire, never at the
+ * signer. Two-round protocol:
+ *
+ *   Round 1 (init): reserve target pubkey with the signer, get session
+ *   Round 2 (finalize): WASM split → send { p_signer, r_user } → server
+ *     verifies p_signer·G + R_user == pubkey·G → persists Key + Share
+ *
+ * Preconditions:
+ *   - Caller must be authenticated (apiClient.setToken)
+ *   - Share storage must be unlocked (post-login)
+ *   - Caller must own the target pubkey (browser holds the nsec)
+ *
+ * pastedNsec is the raw hex nsec the user pasted. This function will
+ * zero it after the split (by shadowing the local reference). The
+ * caller should also zero their own copy immediately after this
+ * function returns.
+ */
+export async function migrateKeyToFrostPathB(
+  pastedNsec: string,
+  targetPubkey: string,
+  name: string,
+  relays?: string[],
+): Promise<CreatedFrostKey> {
+  if (!isShareStorageUnlocked()) {
+    throw new FrostStorageLockedError();
+  }
+  await initWasm();
+
+  const cleanNsec = pastedNsec.trim().toLowerCase().replace(/^0x/, '');
+  if (cleanNsec.length !== 64 || !/^[0-9a-f]+$/.test(cleanNsec)) {
+    throw new Error('nsec must be a 64-char hex string (32 bytes)');
+  }
+  const cleanPubkey = targetPubkey.trim().toLowerCase().replace(/^0x/, '');
+  if (cleanPubkey.length !== 64 || !/^[0-9a-f]+$/.test(cleanPubkey)) {
+    throw new Error('target pubkey must be a 64-char x-only hex Nostr pubkey');
+  }
+
+  // Round 1: init with signer.
+  const initResp = await apiClient.frostMigrateBInit({ pubkey: cleanPubkey, name });
+
+  // Round 2 setup: WASM split.
+  const split = split_nsec_for_path_b(cleanNsec) as {
+    p_signer_hex: string;
+    p_user_hex: string;
+    r_user_hex: string;
+    derived_pubkey_x_only: string;
+  };
+
+  // Sanity check the pasted nsec derives to the pubkey the user claimed.
+  if (split.derived_pubkey_x_only !== cleanPubkey) {
+    throw new Error(
+      `pasted nsec derives to pubkey ${split.derived_pubkey_x_only}, not ${cleanPubkey}. ` +
+        `Refusing to migrate to a pubkey the user does not actually control.`,
+    );
+  }
+
+  // Round 2: finalize with signer. Send p_signer (server's future
+  // share) + r_user (browser's public verification share).
+  const finResp = await apiClient.frostMigrateBFinalize({
+    session_id: initResp.session_id,
+    p_signer_hex: split.p_signer_hex,
+    r_user_hex: split.r_user_hex,
+    relays,
+  });
+
+  // Persist p_user in IndexedDB.
+  await storeShare({
+    keyId: finResp.key_id,
+    pubkey: finResp.pubkey,
+    finalShareHex: split.p_user_hex,
+    verificationShareHex: split.r_user_hex,
+  });
+
+  // Zero the split scalars best-effort. JS strings are immutable, so
+  // we can only drop references. The WASM linear memory was already
+  // dropped when split_nsec_for_path_b returned.
+
+  return {
+    keyId: finResp.key_id,
+    pubkey: finResp.pubkey,
+    userFinalShareHex: split.p_user_hex,
+    userVerificationShareHex: split.r_user_hex,
   };
 }
 
