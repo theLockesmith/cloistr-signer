@@ -240,6 +240,34 @@ class ApiClient {
     });
   }
 
+
+  /** P7 Path C / admin direct-sign round 1: begin a FROST signing session
+   * for an event the SPA wants to sign with a FROST-user key we own. */
+  async frostSignRound1(body: { key_id: string; event_hash_hex: string }): Promise<{
+    session_id: string;
+    signer_hiding_hex: string;
+    signer_binding_hex: string;
+  }> {
+    return this.fetch('/frost/sign/round1', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** P7 Path C / admin direct-sign round 2: send WASM-computed partial +
+   * commitment, receive 64-byte BIP-340 signature. */
+  async frostSignRound2(body: {
+    session_id: string;
+    user_hiding_hex: string;
+    user_binding_hex: string;
+    user_partial_hex: string;
+  }): Promise<{ signature_hex: string }> {
+    return this.fetch('/frost/sign/round2', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
   async frostMigratePathA(keyId: string): Promise<{
     key_id: string;
     pubkey: string;

@@ -44,6 +44,8 @@ import init, {
   compute_user_final_share,
   compute_user_verification_share,
   split_nsec_for_path_b,
+  generate_signing_nonce_pair,
+  compute_user_partial_signature,
 } from '../../frost-wasm/pkg/cloistr_frost_wasm.js';
 import wasmUrl from '../../frost-wasm/pkg/cloistr_frost_wasm_bg.wasm?url';
 
@@ -412,4 +414,145 @@ export async function recoverFrostKey(
       userStateHex = null;
     }
   }
+}
+
+// -----------------------------------------------------------------------------
+// P7 Path C / admin sign: direct FROST signing via HTTP handshake.
+//
+// Distinct from the NIP-46 cosign path — this is the SPA signing its own
+// events with a FROST-user key it owns.
+// -----------------------------------------------------------------------------
+
+/**
+ * Sign a Nostr event with the given FROST-user key. Returns the signed
+ * event with id + sig populated. The caller supplies pubkey/kind/tags/
+ * content/created_at and this function does the rest.
+ */
+export async function signEventWithFrostKey(
+  keyId: string,
+  pubkeyXOnly: string,
+  finalShareHex: string,
+  event: {
+    pubkey: string;
+    created_at: number;
+    kind: number;
+    tags: string[][];
+    content: string;
+  },
+): Promise<{ id: string; sig: string } & typeof event> {
+  if (!isShareStorageUnlocked()) {
+    throw new FrostStorageLockedError();
+  }
+  await initWasm();
+
+  // Compute event id per NIP-01: sha256 of the canonical serialization
+  // [0, pubkey, created_at, kind, tags, content].
+  const serialized = JSON.stringify([
+    0,
+    event.pubkey,
+    event.created_at,
+    event.kind,
+    event.tags,
+    event.content,
+  ]);
+  const enc = new TextEncoder();
+  const idBuf = await crypto.subtle.digest('SHA-256', enc.encode(serialized));
+  const idBytes = new Uint8Array(idBuf);
+  const eventIdHex = Array.from(idBytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  // Round 1: get signer's nonce commitment.
+  const r1 = await apiClient.frostSignRound1({
+    key_id: keyId,
+    event_hash_hex: eventIdHex,
+  });
+
+  // Browser side: generate our nonce + commitments, compute partial sig.
+  const nonce = generate_signing_nonce_pair() as {
+    nonce_state_hex: string;
+    hiding_commitment_hex: string;
+    binding_commitment_hex: string;
+  };
+  const jointPubkeyCompressed = '02' + pubkeyXOnly;
+  const partialHex = compute_user_partial_signature(
+    nonce.nonce_state_hex,
+    finalShareHex,
+    nonce.hiding_commitment_hex,
+    nonce.binding_commitment_hex,
+    r1.signer_hiding_hex,
+    r1.signer_binding_hex,
+    jointPubkeyCompressed,
+    eventIdHex,
+  ) as string;
+
+  // Round 2: signer combines and returns 64-byte BIP-340 signature.
+  const r2 = await apiClient.frostSignRound2({
+    session_id: r1.session_id,
+    user_hiding_hex: nonce.hiding_commitment_hex,
+    user_binding_hex: nonce.binding_commitment_hex,
+    user_partial_hex: partialHex,
+  });
+
+  return {
+    ...event,
+    id: eventIdHex,
+    sig: r2.signature_hex,
+  };
+}
+
+/**
+ * P7 Path C rotation: build a kind:0 profile event using a fresh FROST
+ * key, sign it via direct-sign, publish to given relays. Optional
+ * `rotatedFromPubkey` embeds a rotated-from field so followers of the
+ * old identity have a machine-readable pointer.
+ */
+export async function publishFrostRotationProfile(
+  frostKeyId: string,
+  newPubkeyXOnly: string,
+  finalShareHex: string,
+  profile: {
+    name?: string;
+    about?: string;
+    picture?: string;
+    nip05?: string;
+    lud16?: string;
+  },
+  rotatedFromPubkey: string | null,
+  relays: string[],
+): Promise<{ signedEvent: { id: string; sig: string; pubkey: string; kind: number; tags: string[][]; content: string; created_at: number }; publishedTo: string[] }> {
+  const content = {
+    ...profile,
+    ...(rotatedFromPubkey ? { rotated_from: rotatedFromPubkey } : {}),
+  };
+  const signed = await signEventWithFrostKey(
+    frostKeyId,
+    newPubkeyXOnly,
+    finalShareHex,
+    {
+      pubkey: newPubkeyXOnly,
+      created_at: Math.floor(Date.now() / 1000),
+      kind: 0,
+      tags: [],
+      content: JSON.stringify(content),
+    },
+  );
+
+  // Publish via nostr-tools SimplePool.
+  const { SimplePool } = await import('nostr-tools');
+  const pool = new SimplePool();
+  const published: string[] = [];
+  await Promise.allSettled(
+    relays.map(async (url) => {
+      try {
+        const relay = await pool.ensureRelay(url);
+        await relay.publish(signed);
+        published.push(url);
+      } catch (e) {
+        console.warn(`[frost rotation] publish to ${url} failed:`, e);
+      }
+    }),
+  );
+
+  return { signedEvent: signed, publishedTo: published };
 }
