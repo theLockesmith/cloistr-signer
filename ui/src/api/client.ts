@@ -114,6 +114,21 @@ class ApiClient {
     });
   }
 
+  /**
+   * Approve a client-initiated nostrconnect:// URI ("Login With Cloistr").
+   * Grants the app signing authority over the selected key. Requires a session
+   * and that the authenticated user owns the key.
+   */
+  async nostrConnect(data: {
+    uri: string;
+    key_id: string;
+  }): Promise<{ success: boolean; app_name?: string; app_url?: string; client_pubkey: string }> {
+    return this.fetch('/nostrconnect', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
   async importKey(data: ImportKeyRequest): Promise<Key> {
     return this.fetch('/keys/import', {
       method: 'POST',
