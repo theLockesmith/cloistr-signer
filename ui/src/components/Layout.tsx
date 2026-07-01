@@ -2,6 +2,10 @@ import { Outlet, Link, useLocation } from 'react-router-dom';
 import { Header, Footer } from '@cloistr/ui/components';
 import { useSignerAuth } from '../hooks/useSignerAuth';
 import { SignerLoginModal } from './SignerLoginModal';
+import { useFrostCosignListener } from '../hooks/useFrostCosignListener';
+import { FrostCosignApprovalModal } from './FrostCosignApprovalModal';
+import { useQuery } from '@tanstack/react-query';
+import apiClient from '../api/client';
 
 /**
  * Navigation links for the signer
@@ -21,6 +25,27 @@ const NAV_LINKS = [
 export function Layout() {
   const location = useLocation();
   const { isAuthenticated, user, logout, showLoginModal, hideLoginModal, loginModalOpen } = useSignerAuth();
+
+  // FROST cosign listener - runs whenever the user is logged in and has
+  // at least one FROST key with a locally stored share. Collects
+  // incoming cosign requests, renders the approval modal for the
+  // head of the queue.
+  const { data: keys } = useQuery({
+    queryKey: ['keys'],
+    queryFn: () => apiClient.listKeys(),
+    enabled: isAuthenticated,
+  });
+  const frostRelays = Array.from(
+    new Set(
+      (keys ?? [])
+        .filter((k) => k.key_type === 'frost-user')
+        .flatMap((k) => k.relays ?? []),
+    ),
+  );
+  const { queue: cosignQueue, dismissHead: dismissCosignHead } = useFrostCosignListener({
+    relays: frostRelays,
+    enabled: isAuthenticated && frostRelays.length > 0,
+  });
 
   return (
     <div className="app-layout">
@@ -95,6 +120,15 @@ export function Layout() {
 
       {/* Login Modal */}
       <SignerLoginModal isOpen={loginModalOpen} onClose={hideLoginModal} />
+
+      {/* FROST cosign approval modal — shows the head of the queue when
+          the listener has pending requests. */}
+      {cosignQueue.length > 0 && (
+        <FrostCosignApprovalModal
+          handle={cosignQueue[0]}
+          onDismiss={dismissCosignHead}
+        />
+      )}
     </div>
   );
 }
