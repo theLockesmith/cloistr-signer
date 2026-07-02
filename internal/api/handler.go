@@ -1942,18 +1942,24 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// Authenticate to Vault to get user's token for key operations
 	var vaultToken string
 	if h.vaultClient != nil && h.config.Vault.Enabled {
+		// The Vault userpass token is only needed for later key operations, not for
+		// the login session itself. Cap this whole step at 5s and treat any failure
+		// as non-fatal, so a slow/unreachable Vault can never block (or 502) login —
+		// the session is issued regardless and the token is re-fetched on first key op.
+		vaultCtx, vaultCancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer vaultCancel()
 		// Authenticate to Vault using user's credentials (userID is the Vault username)
-		vaultAuth, err := h.vaultClient.AuthenticateUserpass(r.Context(), user.ID, req.Password)
+		vaultAuth, err := h.vaultClient.AuthenticateUserpass(vaultCtx, user.ID, req.Password)
 		if err != nil {
 			// User may exist in signer DB but not have Vault userpass account
 			// (e.g., migrated from pre-Vault or registration failed to provision)
 			// Try to provision and retry auth
 			slog.Info("vault auth failed, attempting to provision userpass account", "user_id", user.ID, "error", err)
-			if provisionErr := h.vaultClient.ProvisionUser(r.Context(), user.ID, user.Username, req.Password); provisionErr != nil {
+			if provisionErr := h.vaultClient.ProvisionUser(vaultCtx, user.ID, user.Username, req.Password); provisionErr != nil {
 				slog.Warn("failed to provision vault user on login", "error", provisionErr, "user_id", user.ID)
 			} else {
 				// Retry auth after provisioning
-				vaultAuth, err = h.vaultClient.AuthenticateUserpass(r.Context(), user.ID, req.Password)
+				vaultAuth, err = h.vaultClient.AuthenticateUserpass(vaultCtx, user.ID, req.Password)
 				if err != nil {
 					slog.Warn("vault auth still failed after provisioning", "error", err, "user_id", user.ID)
 				} else {
@@ -2033,10 +2039,15 @@ func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get token from Authorization header
+	// Logout is idempotent: always clear the parent-domain cookie, even if the
+	// caller has no signer session (e.g. logged in via nostrconnect, not password).
+	// Returning 401 here would leave the .cloistr.xyz cookie set and make "sign out"
+	// appear not to work. Server-side cleanup runs only when a session exists.
+	http.SetCookie(w, h.clearAuthCookie())
+
 	claims, err := h.validateAuthHeader(r)
 	if err != nil {
-		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		h.jsonResponse(w, http.StatusOK, map[string]string{"message": "logged out"})
 		return
 	}
 
@@ -2063,11 +2074,6 @@ func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 	// Revoke all SSO app consents so cross-subdomain apps must re-consent
 	// after next login (unified-auth-design §5 central logout).
 	h.storage.RevokeAllAppConsents(r.Context(), claims.UserID)
-
-	// Clear the parent-domain session cookie. Matching the Domain attribute of
-	// the login Set-Cookie is required — omitting it would leave a stale cookie
-	// on *.cloistr.xyz after the session row is deleted.
-	http.SetCookie(w, h.clearAuthCookie())
 
 	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "logged out successfully"})
 }
