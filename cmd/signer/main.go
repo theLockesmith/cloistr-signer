@@ -177,8 +177,12 @@ func main() {
 	// Add Prometheus metrics endpoint
 	mux.Handle("/metrics", metrics.Handler())
 
-	// Wrap with metrics middleware
-	handler := metrics.Middleware(mux)
+	// Wrap with metrics middleware, then with CORS middleware for
+	// cross-subdomain SSO (unified-auth-design §5). CORS wraps metrics so that
+	// preflight OPTIONS requests get the ACAO headers before any metric
+	// recording. NIP-05 sets its own Access-Control-Allow-Origin: * and is not
+	// affected because CORSMiddleware only activates on /api/v1/* paths.
+	handler := api.CORSMiddleware(cfg)(metrics.Middleware(mux))
 
 	server := &http.Server{
 		Addr:         cfg.Server.Address,

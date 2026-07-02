@@ -863,6 +863,46 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// newAuthCookie builds a Secure HttpOnly Lax auth_token cookie.
+// When cfg.Auth.CookieDomain is non-empty (e.g. ".cloistr.xyz" in prod), the
+// Domain attribute is set so the cookie is shared across all *.cloistr.xyz
+// subdomains (cross-subdomain SSO). When empty (dev/localhost), Domain is
+// omitted and the browser scopes the cookie to the issuing host only.
+func (h *Handler) newAuthCookie(token string, expiresAt time.Time) *http.Cookie {
+	c := &http.Cookie{
+		Name:     "auth_token",
+		Value:    token,
+		Path:     "/",
+		Expires:  expiresAt,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	if h.config.Auth.CookieDomain != "" {
+		c.Domain = h.config.Auth.CookieDomain
+	}
+	return c
+}
+
+// clearAuthCookie returns a cookie that immediately expires auth_token.
+// The Domain attribute must match the one used when the cookie was set.
+func (h *Handler) clearAuthCookie() *http.Cookie {
+	c := &http.Cookie{
+		Name:     "auth_token",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	if h.config.Auth.CookieDomain != "" {
+		c.Domain = h.config.Auth.CookieDomain
+	}
+	return c
+}
+
 // API handlers
 
 // handleAPILogin handles login form submission
@@ -963,16 +1003,8 @@ func (h *Handler) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set cookie
-	http.SetCookie(w, &http.Cookie{
-		Name:     "auth_token",
-		Value:    token,
-		Path:     "/",
-		Expires:  expiresAt,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	// Set parent-domain session cookie for cross-subdomain SSO.
+	http.SetCookie(w, h.newAuthCookie(token, expiresAt))
 
 	slog.Info("user logged in", "username", user.Username, "remember", req.Remember)
 
@@ -1030,15 +1062,7 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 			h.jsonError(w, http.StatusInternalServerError, "Failed to generate token")
 			return
 		}
-		http.SetCookie(w, &http.Cookie{
-			Name:     "auth_token",
-			Value:    token,
-			Path:     "/",
-			Expires:  expiresAt,
-			HttpOnly: true,
-			Secure:   true,
-			SameSite: http.SameSiteLaxMode,
-		})
+		http.SetCookie(w, h.newAuthCookie(token, expiresAt))
 		slog.Info("admin logged in via NIP-07 (config)", "pubkey", req.Pubkey[:16]+"...")
 		h.jsonResponse(w, http.StatusOK, map[string]interface{}{
 			"success":  true,
@@ -1091,15 +1115,7 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "auth_token",
-		Value:    token,
-		Path:     "/",
-		Expires:  expiresAt,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	http.SetCookie(w, h.newAuthCookie(token, expiresAt))
 
 	slog.Info("user logged in via NIP-07", "username", user.Username, "pubkey", req.Pubkey[:16]+"...", "remember", req.Remember)
 
@@ -1219,16 +1235,8 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clear the auth cookie by setting it to expire in the past
-	http.SetCookie(w, &http.Cookie{
-		Name:     "auth_token",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		Expires:  time.Unix(0, 0),
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-	})
+	// Clear the parent-domain cookie. Domain must match the issuing Set-Cookie.
+	http.SetCookie(w, h.clearAuthCookie())
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
 

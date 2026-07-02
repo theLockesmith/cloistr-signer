@@ -32,6 +32,7 @@ var (
 	ErrInvalidMFACode      = errors.New("invalid MFA code")
 	ErrBunkerSecretInvalid = errors.New("invalid bunker secret")
 	ErrSettingNotFound     = errors.New("setting not found")
+	ErrConsentNotFound     = errors.New("app consent not found")
 )
 
 // KeyType represents the type of key storage
@@ -221,6 +222,17 @@ type UserSession struct {
 	CreatedAt      time.Time  `json:"created_at"`
 }
 
+// AppConsent records that a user has approved a cross-subdomain nostrconnect
+// from a specific app (identified by its client pubkey). Once recorded, the
+// signer auto-approves subsequent connections without prompting the user again.
+// See unified-auth-design §5 ("first-time consent then silent").
+type AppConsent struct {
+	UserID     string    `json:"user_id"`
+	AppID      string    `json:"app_id"`            // nostrconnect client pubkey
+	AppName    string    `json:"app_name,omitempty"`
+	ApprovedAt time.Time `json:"approved_at"`
+}
+
 // BunkerSecret represents a secret for bunker:// URI validation
 type BunkerSecret struct {
 	ID        string    `json:"id"`
@@ -386,6 +398,15 @@ type Storage interface {
 	DeleteUserSessions(ctx context.Context, userID string) error
 	CleanExpiredUserSessions(ctx context.Context) error
 
+	// App consent management for cross-subdomain SSO (unified-auth-design §5).
+	// AppID is the nostrconnect client pubkey from the nostrconnect:// URI.
+	// First-time connections require consent; subsequent ones auto-approve.
+	RecordAppConsent(ctx context.Context, userID, appID, appName string) error
+	HasAppConsent(ctx context.Context, userID, appID string) (bool, error)
+	ListAppConsents(ctx context.Context, userID string) ([]*AppConsent, error)
+	RevokeAppConsent(ctx context.Context, userID, appID string) error
+	RevokeAllAppConsents(ctx context.Context, userID string) error
+
 	// Bunker secret management
 	CreateBunkerSecret(ctx context.Context, secret *BunkerSecret) error
 	ValidateBunkerSecret(ctx context.Context, keyPubkey, secret string) (*BunkerSecret, error)
@@ -477,6 +498,8 @@ type MemoryStorage struct {
 	frostSharesByKey   map[string]map[int]*FrostShare   // keyID -> index -> FrostShare
 	frostUserShares    map[string]*FrostUserShare       // id -> FrostUserShare
 	frostUserShareByKey map[string]*FrostUserShare      // key_id -> FrostUserShare (one signer-held share per key)
+	// App consents for cross-subdomain SSO (unified-auth-design §5)
+	appConsents        map[string]map[string]*AppConsent // userID -> appID -> AppConsent
 }
 
 // NewMemoryStorage creates a new in-memory storage
@@ -505,6 +528,7 @@ func NewMemoryStorage() *MemoryStorage {
 		frostSharesByKey:   make(map[string]map[int]*FrostShare),
 		frostUserShares:    make(map[string]*FrostUserShare),
 		frostUserShareByKey: make(map[string]*FrostUserShare),
+		appConsents:        make(map[string]map[string]*AppConsent),
 	}
 }
 
@@ -1740,6 +1764,65 @@ func (m *MemoryStorage) DeleteFrostUserShare(ctx context.Context, id string) err
 
 	delete(m.frostUserShares, id)
 	delete(m.frostUserShareByKey, share.KeyID)
+	return nil
+}
+
+// App consent management (MemoryStorage implementation).
+
+func (m *MemoryStorage) RecordAppConsent(ctx context.Context, userID, appID, appName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.appConsents[userID]; !ok {
+		m.appConsents[userID] = make(map[string]*AppConsent)
+	}
+	m.appConsents[userID][appID] = &AppConsent{
+		UserID:     userID,
+		AppID:      appID,
+		AppName:    appName,
+		ApprovedAt: time.Now(),
+	}
+	return nil
+}
+
+func (m *MemoryStorage) HasAppConsent(ctx context.Context, userID, appID string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if byApp, ok := m.appConsents[userID]; ok {
+		_, ok := byApp[appID]
+		return ok, nil
+	}
+	return false, nil
+}
+
+func (m *MemoryStorage) ListAppConsents(ctx context.Context, userID string) ([]*AppConsent, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	byApp, ok := m.appConsents[userID]
+	if !ok {
+		return []*AppConsent{}, nil
+	}
+	result := make([]*AppConsent, 0, len(byApp))
+	for _, c := range byApp {
+		result = append(result, c)
+	}
+	return result, nil
+}
+
+func (m *MemoryStorage) RevokeAppConsent(ctx context.Context, userID, appID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	byApp, ok := m.appConsents[userID]
+	if !ok || byApp[appID] == nil {
+		return ErrConsentNotFound
+	}
+	delete(byApp, appID)
+	return nil
+}
+
+func (m *MemoryStorage) RevokeAllAppConsents(ctx context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.appConsents, userID)
 	return nil
 }
 

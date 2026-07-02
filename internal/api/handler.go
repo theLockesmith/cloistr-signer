@@ -136,6 +136,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 	// Nostrconnect (client-initiated connection)
 	mux.HandleFunc("/api/v1/nostrconnect", h.handleNostrConnect)
+	// SSO: auto-approve nostrconnect with stored consent (unified-auth-design §5)
+	mux.HandleFunc("/api/v1/nostrconnect/session", h.handleNostrConnectSession)
+	// SSO: revoke all app consents and NIP-46 permissions for the caller
+	mux.HandleFunc("/api/v1/nostrconnect/revoke", h.handleNostrConnectRevoke)
 
 	// NIP-05
 	mux.HandleFunc("/.well-known/nostr.json", h.handleNIP05)
@@ -1996,6 +2000,12 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("user logged in", "username", req.Username, "user_id", user.ID)
 
+	// Set parent-domain session cookie so other *.cloistr.xyz subdomains share
+	// the auth session (cross-subdomain SSO, unified-auth-design §5).
+	// When CookieDomain is empty (dev/localhost) the Domain attribute is omitted
+	// and the browser scopes the cookie to the issuing host only.
+	http.SetCookie(w, h.newAuthCookie(token, expiresAt))
+
 	h.jsonResponse(w, http.StatusOK, LoginResponse{
 		Token:     token,
 		ExpiresAt: expiresAt,
@@ -2049,6 +2059,15 @@ func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 
 	// Delete all sessions for this user
 	h.storage.DeleteUserSessions(r.Context(), claims.UserID)
+
+	// Revoke all SSO app consents so cross-subdomain apps must re-consent
+	// after next login (unified-auth-design §5 central logout).
+	h.storage.RevokeAllAppConsents(r.Context(), claims.UserID)
+
+	// Clear the parent-domain session cookie. Matching the Domain attribute of
+	// the login Set-Cookie is required — omitting it would leave a stale cookie
+	// on *.cloistr.xyz after the session row is deleted.
+	http.SetCookie(w, h.clearAuthCookie())
 
 	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "logged out successfully"})
 }
@@ -2782,23 +2801,10 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create permission for the client with basic methods
-	perm := &storage.Permission{
-		KeyID:      key.Pubkey,
-		UserPubkey: clientPubkey,
-		Methods:    []string{"connect", "sign_event", "get_public_key", "nip44_encrypt", "nip44_decrypt"},
-		AppName:    appName,
-		AppURL:     appURL,
-		AppImage:   appImage,
-	}
-
-	if err := h.storage.SetPermission(r.Context(), perm); err != nil {
+	if err := h.approveNostrConnect(r.Context(), key, clientPubkey, relay, secret, appName, appURL, appImage); err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
 		return
 	}
-
-	// Send connect response via signer
-	h.signer.SendNostrConnectResponse(r.Context(), key.Pubkey, clientPubkey, relay, secret)
 
 	slog.Info("nostrconnect established",
 		"app", appName,
@@ -2814,6 +2820,314 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 		AppImage:     appImage,
 		ClientPubkey: clientPubkey,
 	})
+}
+
+// approveNostrConnect stores permission and sends the NIP-46 connect response.
+// It is the shared approval path used by both the manual nostrconnect handler
+// and the SSO auto-approval handler (handleNostrConnectSession).
+func (h *Handler) approveNostrConnect(ctx context.Context, key *storage.Key, clientPubkey, relay, secret, appName, appURL, appImage string) error {
+	perm := &storage.Permission{
+		KeyID:      key.Pubkey,
+		UserPubkey: clientPubkey,
+		Methods:    []string{"connect", "sign_event", "get_public_key", "nip44_encrypt", "nip44_decrypt"},
+		AppName:    appName,
+		AppURL:     appURL,
+		AppImage:   appImage,
+	}
+	if err := h.storage.SetPermission(ctx, perm); err != nil {
+		return err
+	}
+	h.signer.SendNostrConnectResponse(ctx, key.Pubkey, clientPubkey, relay, secret)
+	return nil
+}
+
+// NostrConnectSessionRequest is the body for POST /api/v1/nostrconnect/session.
+// The caller must hold a valid session (Bearer token or auth_token cookie).
+type NostrConnectSessionRequest struct {
+	URI     string `json:"uri"`               // nostrconnect:// URI from the connecting app
+	KeyID   string `json:"key_id"`            // ID of the signing key to authorize
+	Consent bool   `json:"consent,omitempty"` // If true, record consent and approve on first-time connections
+}
+
+// NostrConnectSessionResponse is returned when consent_required is false (auto-approved).
+type NostrConnectSessionResponse struct {
+	Success         bool   `json:"success,omitempty"`
+	ConsentRequired bool   `json:"consent_required,omitempty"`
+	AppID           string `json:"app_id,omitempty"`   // client pubkey; present when consent_required
+	AppName         string `json:"app_name,omitempty"`
+	AppURL          string `json:"app_url,omitempty"`
+	AppImage        string `json:"app_image,omitempty"`
+	ClientPubkey    string `json:"client_pubkey,omitempty"`
+}
+
+// handleNostrConnectSession handles POST /api/v1/nostrconnect/session.
+//
+// Flow (unified-auth-design §5):
+//  1. Authenticated user posts a nostrconnect:// URI + key_id.
+//  2. Parse the URI, verify key ownership.
+//  3. HasAppConsent(user, clientPubkey)?
+//     - Yes → approve immediately (silent re-auth).
+//     - No + consent==true → record consent, then approve.
+//     - No + consent==false → return 200 {consent_required:true, app_id, app_name}
+//       so the client can display a consent prompt and re-POST with consent=true.
+func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	var req NostrConnectSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.URI == "" {
+		h.errorResponse(w, http.StatusBadRequest, "uri is required")
+		return
+	}
+	if req.KeyID == "" {
+		h.errorResponse(w, http.StatusBadRequest, "key_id is required")
+		return
+	}
+
+	// Only nostrconnect:// URIs are accepted here; bunker:// is for outbound use.
+	if strings.HasPrefix(req.URI, "bunker://") {
+		h.errorResponse(w, http.StatusBadRequest, "bunker:// URIs are for apps to use; paste a nostrconnect:// URI")
+		return
+	}
+	if !strings.HasPrefix(req.URI, "nostrconnect://") {
+		h.errorResponse(w, http.StatusBadRequest, "invalid URI — must start with nostrconnect://")
+		return
+	}
+
+	// Parse nostrconnect:// URI (same logic as handleNostrConnect).
+	uriWithoutScheme := strings.TrimPrefix(req.URI, "nostrconnect://")
+	parts := strings.SplitN(uriWithoutScheme, "?", 2)
+	if len(parts) == 0 || parts[0] == "" {
+		h.errorResponse(w, http.StatusBadRequest, "invalid URI — missing client pubkey")
+		return
+	}
+	clientPubkey := parts[0]
+	if len(clientPubkey) != 64 {
+		h.errorResponse(w, http.StatusBadRequest, "invalid client pubkey")
+		return
+	}
+
+	var relay, secret, appName, appURL, appImage string
+	if len(parts) > 1 {
+		for _, param := range strings.Split(parts[1], "&") {
+			kv := strings.SplitN(param, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			val := kv[1]
+			if decoded, err := urlDecode(val); err == nil {
+				val = decoded
+			}
+			switch kv[0] {
+			case "relay":
+				relay = val
+			case "secret":
+				secret = val
+			case "name":
+				appName = val
+			case "url":
+				appURL = val
+			case "image":
+				appImage = val
+			}
+		}
+	}
+	if relay == "" {
+		h.errorResponse(w, http.StatusBadRequest, "invalid URI — missing relay")
+		return
+	}
+
+	// Verify key ownership — the caller must own the key they are authorizing.
+	key, err := h.storage.GetKey(r.Context(), req.KeyID)
+	if err != nil {
+		if err == storage.ErrKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+	if key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusForbidden, "key does not belong to the authenticated user")
+		return
+	}
+
+	// Check consent: does this user already trust this app?
+	hasConsent, err := h.storage.HasAppConsent(r.Context(), claims.UserID, clientPubkey)
+	if err != nil {
+		slog.Warn("failed to check app consent", "error", err)
+		// Treat storage error as no-consent to avoid silent approval on failure.
+		hasConsent = false
+	}
+
+	switch {
+	case hasConsent:
+		// Silent re-auth: prior consent exists, approve immediately.
+		if err := h.approveNostrConnect(r.Context(), key, clientPubkey, relay, secret, appName, appURL, appImage); err != nil {
+			h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+			return
+		}
+		slog.Info("nostrconnect auto-approved (prior consent)",
+			"app", appName, "client", clientPubkey[:16]+"...", "key", req.KeyID)
+		h.jsonResponse(w, http.StatusOK, NostrConnectSessionResponse{
+			Success:      true,
+			AppName:      appName,
+			AppURL:       appURL,
+			AppImage:     appImage,
+			ClientPubkey: clientPubkey,
+		})
+
+	case req.Consent:
+		// First-time approval: user explicitly consented in the request.
+		if err := h.storage.RecordAppConsent(r.Context(), claims.UserID, clientPubkey, appName); err != nil {
+			slog.Warn("failed to record app consent", "error", err)
+			// Non-fatal: approve anyway so the user is not blocked.
+		}
+		if err := h.approveNostrConnect(r.Context(), key, clientPubkey, relay, secret, appName, appURL, appImage); err != nil {
+			h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+			return
+		}
+		slog.Info("nostrconnect approved with first-time consent",
+			"app", appName, "client", clientPubkey[:16]+"...", "key", req.KeyID)
+		h.jsonResponse(w, http.StatusOK, NostrConnectSessionResponse{
+			Success:      true,
+			AppName:      appName,
+			AppURL:       appURL,
+			AppImage:     appImage,
+			ClientPubkey: clientPubkey,
+		})
+
+	default:
+		// No prior consent and caller has not confirmed: ask the client to
+		// show a consent prompt, then re-POST with consent=true.
+		slog.Info("nostrconnect consent required",
+			"app", appName, "client", clientPubkey[:16]+"...", "user", claims.UserID)
+		h.jsonResponse(w, http.StatusOK, NostrConnectSessionResponse{
+			ConsentRequired: true,
+			AppID:           clientPubkey,
+			AppName:         appName,
+		})
+	}
+}
+
+// handleNostrConnectRevoke handles POST /api/v1/nostrconnect/revoke.
+//
+// Revokes all SSO app consents for the authenticated user and removes all
+// NIP-46 signing permissions for that user's keys. The caller stays logged
+// in; this only ends active app connections.
+//
+// Optional body: {"app_id": "<client_pubkey>"}  — if present, revokes a
+// single app; if absent (or empty string), revokes all apps.
+func (h *Handler) handleNostrConnectRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	var body struct {
+		AppID string `json:"app_id,omitempty"`
+	}
+	// Body is optional; ignore decode errors (empty body = revoke all).
+	json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+
+	userKeys, err := h.storage.ListKeys(r.Context(), claims.UserID)
+	if err != nil {
+		slog.Warn("revoke: failed to list user keys", "error", err, "user_id", claims.UserID)
+		userKeys = nil
+	}
+
+	if body.AppID != "" {
+		// Revoke a specific app.
+		if rErr := h.storage.RevokeAppConsent(r.Context(), claims.UserID, body.AppID); rErr != nil && rErr != storage.ErrConsentNotFound {
+			slog.Warn("revoke: failed to revoke app consent", "error", rErr, "app_id", body.AppID)
+		}
+		for _, k := range userKeys {
+			if dErr := h.storage.DeletePermission(r.Context(), k.Pubkey, body.AppID); dErr != nil {
+				slog.Debug("revoke: delete permission", "error", dErr, "key", k.Pubkey[:16]+"...", "app", body.AppID[:16]+"...")
+			}
+		}
+		slog.Info("nostrconnect revoked for app", "app_id", body.AppID[:16]+"...", "user_id", claims.UserID)
+		h.jsonResponse(w, http.StatusOK, map[string]string{"message": "app connection revoked"})
+		return
+	}
+
+	// Revoke all apps.
+	if rErr := h.storage.RevokeAllAppConsents(r.Context(), claims.UserID); rErr != nil {
+		slog.Warn("revoke: failed to revoke all app consents", "error", rErr)
+	}
+	for _, k := range userKeys {
+		perms, err := h.storage.ListPermissions(r.Context(), k.Pubkey)
+		if err != nil {
+			continue
+		}
+		for _, p := range perms {
+			if dErr := h.storage.DeletePermission(r.Context(), k.Pubkey, p.UserPubkey); dErr != nil {
+				slog.Debug("revoke: delete permission", "error", dErr)
+			}
+		}
+	}
+	slog.Info("all nostrconnect apps revoked", "user_id", claims.UserID)
+	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "all app connections revoked"})
+}
+
+// newAuthCookie builds a Secure HttpOnly Lax auth_token cookie.
+// When cfg.Auth.CookieDomain is non-empty (e.g. ".cloistr.xyz" in prod), the
+// Domain attribute is set so the cookie is shared across all *.cloistr.xyz
+// subdomains (cross-subdomain SSO). When empty (dev/localhost), the Domain
+// attribute is omitted and the browser scopes the cookie to the issuing host.
+func (h *Handler) newAuthCookie(token string, expiresAt time.Time) *http.Cookie {
+	c := &http.Cookie{
+		Name:     "auth_token",
+		Value:    token,
+		Path:     "/",
+		Expires:  expiresAt,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	if h.config.Auth.CookieDomain != "" {
+		c.Domain = h.config.Auth.CookieDomain
+	}
+	return c
+}
+
+// clearAuthCookie returns a cookie that immediately expires auth_token.
+// The Domain attribute must match the one used when the cookie was set so that
+// the browser actually removes the parent-domain cookie and not just a
+// host-scoped shadow.
+func (h *Handler) clearAuthCookie() *http.Cookie {
+	c := &http.Cookie{
+		Name:     "auth_token",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	}
+	if h.config.Auth.CookieDomain != "" {
+		c.Domain = h.config.Auth.CookieDomain
+	}
+	return c
 }
 
 // urlDecode decodes a URL-encoded string

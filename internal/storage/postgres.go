@@ -317,6 +317,18 @@ func (ps *PostgresStorage) migrate() error {
 		ADD COLUMN IF NOT EXISTS encrypted_user_share_at_dkg BYTEA;
 	ALTER TABLE signer_frost_user_shares
 		ADD COLUMN IF NOT EXISTS user_verification_share TEXT;
+
+	-- App consent records for cross-subdomain SSO (unified-auth-design §5).
+	-- app_id is the nostrconnect client pubkey from the nostrconnect:// URI.
+	-- First-time connections require user consent; subsequent ones auto-approve.
+	CREATE TABLE IF NOT EXISTS signer_app_consents (
+		user_id     TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
+		app_id      TEXT NOT NULL,
+		app_name    TEXT,
+		approved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, app_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_app_consents_user ON signer_app_consents(user_id);
 	`
 
 	_, err := ps.db.Exec(schema)
@@ -2310,6 +2322,74 @@ func (ps *PostgresStorage) DeleteFrostUserShare(ctx context.Context, id string) 
 		return ErrFrostUserShareNotFound
 	}
 	return nil
+}
+
+// App consent management (PostgresStorage implementation).
+
+func (ps *PostgresStorage) RecordAppConsent(ctx context.Context, userID, appID, appName string) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO signer_app_consents (user_id, app_id, app_name, approved_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (user_id, app_id) DO UPDATE
+			SET app_name = EXCLUDED.app_name, approved_at = NOW()`,
+		userID, appID, appName)
+	return err
+}
+
+func (ps *PostgresStorage) HasAppConsent(ctx context.Context, userID, appID string) (bool, error) {
+	var count int
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM signer_app_consents WHERE user_id = $1 AND app_id = $2`,
+		userID, appID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (ps *PostgresStorage) ListAppConsents(ctx context.Context, userID string) ([]*AppConsent, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT user_id, app_id, COALESCE(app_name, ''), approved_at
+		FROM signer_app_consents
+		WHERE user_id = $1
+		ORDER BY approved_at DESC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*AppConsent
+	for rows.Next() {
+		c := &AppConsent{}
+		if err := rows.Scan(&c.UserID, &c.AppID, &c.AppName, &c.ApprovedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, c)
+	}
+	return result, rows.Err()
+}
+
+func (ps *PostgresStorage) RevokeAppConsent(ctx context.Context, userID, appID string) error {
+	result, err := ps.db.ExecContext(ctx,
+		`DELETE FROM signer_app_consents WHERE user_id = $1 AND app_id = $2`, userID, appID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrConsentNotFound
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) RevokeAllAppConsents(ctx context.Context, userID string) error {
+	_, err := ps.db.ExecContext(ctx,
+		`DELETE FROM signer_app_consents WHERE user_id = $1`, userID)
+	return err
 }
 
 func (ps *PostgresStorage) Close() error {

@@ -270,6 +270,17 @@ func (ss *SQLiteStorage) initSchema() error {
 		user_verification_share     TEXT
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_frost_user_shares_owner ON signer_frost_user_shares(owner_id);
+
+	-- App consent records for cross-subdomain SSO (unified-auth-design §5).
+	-- app_id is the nostrconnect client pubkey from the nostrconnect:// URI.
+	CREATE TABLE IF NOT EXISTS signer_app_consents (
+		user_id     TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
+		app_id      TEXT NOT NULL,
+		app_name    TEXT,
+		approved_at TEXT NOT NULL DEFAULT (datetime('now')),
+		PRIMARY KEY (user_id, app_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_app_consents_user ON signer_app_consents(user_id);
 	`
 
 	_, err := ss.db.Exec(schema)
@@ -2334,4 +2345,72 @@ func (ss *SQLiteStorage) RevokeServiceAccess(ctx context.Context, pubkey, servic
 func (ss *SQLiteStorage) ListServices(ctx context.Context) ([]*Service, error) {
 	// Not available in SQLite mode
 	return nil, nil
+}
+
+// App consent management (SQLiteStorage implementation).
+
+func (ss *SQLiteStorage) RecordAppConsent(ctx context.Context, userID, appID, appName string) error {
+	_, err := ss.db.ExecContext(ctx, `
+		INSERT INTO signer_app_consents (user_id, app_id, app_name, approved_at)
+		VALUES (?, ?, ?, datetime('now'))
+		ON CONFLICT(user_id, app_id) DO UPDATE
+			SET app_name = excluded.app_name, approved_at = datetime('now')`,
+		userID, appID, appName)
+	return err
+}
+
+func (ss *SQLiteStorage) HasAppConsent(ctx context.Context, userID, appID string) (bool, error) {
+	var count int
+	err := ss.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM signer_app_consents WHERE user_id = ? AND app_id = ?`,
+		userID, appID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (ss *SQLiteStorage) ListAppConsents(ctx context.Context, userID string) ([]*AppConsent, error) {
+	rows, err := ss.db.QueryContext(ctx, `
+		SELECT user_id, app_id, COALESCE(app_name, ''), approved_at
+		FROM signer_app_consents WHERE user_id = ? ORDER BY approved_at DESC`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*AppConsent
+	for rows.Next() {
+		c := &AppConsent{}
+		var approvedAt string
+		if err := rows.Scan(&c.UserID, &c.AppID, &c.AppName, &approvedAt); err != nil {
+			return nil, err
+		}
+		c.ApprovedAt = parseTime(approvedAt)
+		result = append(result, c)
+	}
+	return result, rows.Err()
+}
+
+func (ss *SQLiteStorage) RevokeAppConsent(ctx context.Context, userID, appID string) error {
+	result, err := ss.db.ExecContext(ctx,
+		`DELETE FROM signer_app_consents WHERE user_id = ? AND app_id = ?`, userID, appID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrConsentNotFound
+	}
+	return nil
+}
+
+func (ss *SQLiteStorage) RevokeAllAppConsents(ctx context.Context, userID string) error {
+	_, err := ss.db.ExecContext(ctx,
+		`DELETE FROM signer_app_consents WHERE user_id = ?`, userID)
+	return err
 }

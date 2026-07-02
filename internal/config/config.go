@@ -91,6 +91,9 @@ type AuthConfig struct {
 	MFAIssuer                string   `yaml:"mfa_issuer"`                 // Issuer name for TOTP (default: Cloistr)
 	MaxFailedLogins          int      `yaml:"max_failed_logins"`          // Max failed logins before lockout (default: 5)
 	LockoutMinutes           int      `yaml:"lockout_minutes"`            // Lockout duration in minutes (default: 15)
+	// Cross-subdomain SSO (unified-auth-design §5)
+	CookieDomain   string   `yaml:"cookie_domain"`   // Parent-domain for auth cookie, e.g. ".cloistr.xyz". Empty = host-only (dev/localhost).
+	AllowedOrigins []string `yaml:"allowed_origins"` // Extra CORS origins beyond *.cloistr.xyz and localhost (escape hatch).
 }
 
 // VaultConfig holds HashiCorp Vault configuration
@@ -278,6 +281,14 @@ func Load() (*Config, error) {
 
 	if rememberDays := os.Getenv("REMEMBER_DEVICE_DAYS"); rememberDays != "" {
 		cfg.Auth.RememberDeviceDays = getEnvInt("REMEMBER_DEVICE_DAYS", 30)
+	}
+
+	// Cross-subdomain SSO cookie and CORS configuration
+	if cookieDomain := os.Getenv("COOKIE_DOMAIN"); cookieDomain != "" {
+		cfg.Auth.CookieDomain = cookieDomain
+	}
+	if allowedOrigins := os.Getenv("ALLOWED_ORIGINS"); allowedOrigins != "" {
+		cfg.Auth.AllowedOrigins = strings.Split(allowedOrigins, ",")
 	}
 
 	// Vault configuration
