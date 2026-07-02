@@ -57,6 +57,8 @@ export interface SignerAuthContextValue extends SignerAuthState {
   hideLoginModal: () => void;
   /** Whether login modal is visible */
   loginModalOpen: boolean;
+  /** Hydrate auth state from an externally-obtained session (e.g. LoginModal mode=session) */
+  loginWithSession: (data: { token: string; expiresAt: string; user: unknown; password: string; username: string }) => Promise<void>;
 }
 
 // ============================================
@@ -194,6 +196,22 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     setError(null);
   }, []);
 
+  const loginWithSession = useCallback(async (data: {
+    token: string;
+    expiresAt: string;
+    user: unknown;
+    password: string;
+    username: string;
+  }) => {
+    const user = data.user as User;
+    saveAuthState(data.token, data.expiresAt, user);
+    try {
+      await unlockShareStorage(data.password, user.id);
+    } catch (unlockErr) {
+      console.warn('FROST share storage unlock failed', unlockErr);
+    }
+  }, [saveAuthState]);
+
   // ==========================================
   // Sync Nostr auth to signer backend
   // ==========================================
@@ -272,6 +290,7 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     showLoginModal,
     hideLoginModal,
     loginModalOpen,
+    loginWithSession,
   }), [
     user,
     token,
@@ -284,6 +303,7 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     showLoginModal,
     hideLoginModal,
     loginModalOpen,
+    loginWithSession,
   ]);
 
   return (

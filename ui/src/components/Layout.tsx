@@ -1,7 +1,6 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { Header, Footer } from '@cloistr/ui/components';
+import { Header, Footer, LoginModal } from '@cloistr/ui/components';
 import { useSignerAuth } from '../hooks/useSignerAuth';
-import { SignerLoginModal } from './SignerLoginModal';
 import { useFrostCosignListener } from '../hooks/useFrostCosignListener';
 import { FrostCosignApprovalModal } from './FrostCosignApprovalModal';
 import { useQuery } from '@tanstack/react-query';
@@ -24,7 +23,7 @@ const NAV_LINKS = [
  */
 export function Layout() {
   const location = useLocation();
-  const { isAuthenticated, user, logout, showLoginModal, hideLoginModal, loginModalOpen } = useSignerAuth();
+  const { isAuthenticated, user, logout, showLoginModal, hideLoginModal, loginModalOpen, loginWithSession } = useSignerAuth();
 
   // FROST cosign listener - runs whenever the user is logged in and has
   // at least one FROST key with a locally stored share. Collects
@@ -119,7 +118,13 @@ export function Layout() {
       <Footer />
 
       {/* Login Modal */}
-      <SignerLoginModal isOpen={loginModalOpen} onClose={hideLoginModal} />
+      <LoginModal
+        isOpen={loginModalOpen}
+        onClose={hideLoginModal}
+        signerUrl="https://signer.cloistr.xyz"
+        mode="session"
+        onSession={loginWithSession}
+      />
 
       {/* FROST cosign approval modal — shows the head of the queue when
           the listener has pending requests. */}
