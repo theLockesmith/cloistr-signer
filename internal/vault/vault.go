@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -848,4 +849,82 @@ func (c *Client) ProvisionUser(ctx context.Context, userID, username, password s
 	}
 
 	return nil
+}
+
+// RenewSelf renews the client's own Vault token and returns the new lease
+// duration in seconds. The signer's service token has a finite lease; without
+// renewal it expires and every transit-key operation 403s ("invalid token"),
+// silently breaking per-user key provisioning.
+func (c *Client) RenewSelf(ctx context.Context) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", c.address+"/v1/auth/token/renew-self", strings.NewReader("{}"))
+	if err != nil {
+		return 0, fmt.Errorf("failed to create renew request: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", c.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("token renew request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("vault renew error (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result struct {
+		Auth struct {
+			LeaseDuration int `json:"lease_duration"`
+		} `json:"auth"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("failed to decode renew response: %w", err)
+	}
+	return result.Auth.LeaseDuration, nil
+}
+
+// StartTokenRenewal keeps the signer's Vault token alive for the life of the
+// process. It renews at roughly half the lease each cycle (floored at 1m,
+// capped at 12h) so a periodic token never lapses. Intended to run in a
+// goroutine; returns when ctx is cancelled. This is the fix for the token
+// silently expiring at its TTL and 403-ing all key operations.
+func (c *Client) StartTokenRenewal(ctx context.Context) {
+	// Initial renew confirms the token is valid + reveals the lease duration.
+	lease, err := c.RenewSelf(ctx)
+	if err != nil {
+		// A root/non-renewable/already-dead token can't be renewed. Log loudly
+		// and fall back to a conservative interval so we keep re-checking
+		// (e.g. after an operator re-mints) without spinning hot.
+		slog.Warn("initial vault token renewal failed — token may be expired, root, or non-renewable", "error", err)
+		lease = 3600
+	} else {
+		slog.Info("vault token auto-renewal started", "lease_seconds", lease)
+	}
+
+	for {
+		wait := time.Duration(lease/2) * time.Second
+		if wait < time.Minute {
+			wait = time.Minute
+		}
+		if wait > 12*time.Hour {
+			wait = 12 * time.Hour
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+
+		newLease, err := c.RenewSelf(ctx)
+		if err != nil {
+			slog.Error("vault token renewal failed", "error", err)
+			lease = 300 // retry sooner on failure
+			continue
+		}
+		lease = newLease
+		slog.Debug("vault token renewed", "lease_seconds", lease)
+	}
 }

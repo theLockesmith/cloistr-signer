@@ -196,6 +196,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Keep the signer's Vault token alive for the life of the process. Vault
+	// service tokens have a finite lease; without renewal the token expires
+	// (default 768h) and every transit-key op 403s, silently breaking per-user
+	// key provisioning. Pair with a periodic token minted by the Atlas playbook.
+	if vaultClient != nil {
+		go vaultClient.StartTokenRenewal(ctx)
+	}
+
 	if err := nip46Signer.Start(ctx); err != nil {
 		slog.Error("failed to start signer", "error", err)
 		os.Exit(1)
