@@ -5,7 +5,11 @@ import path from 'path';
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    dedupe: ['react', 'react-dom', '@cloistr/collab-common'],
+    // @cloistr/auth MUST be deduped: @cloistr/ui's SharedAuthProvider and the
+    // signer's useSignerAuth both import it, and without dedupe Vite bundles two
+    // AuthContext instances (provider populates one, hook reads the other) →
+    // "useNostrAuth must be used within an AuthProvider" crash on mount.
+    dedupe: ['react', 'react-dom', '@cloistr/collab-common', '@cloistr/auth'],
   },
   build: {
     outDir: path.resolve(__dirname, '../internal/web/dist'),
