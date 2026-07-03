@@ -20,7 +20,12 @@ import {
   useMemo,
   type ReactNode,
 } from 'react';
-import { useNostrAuth } from '@cloistr/collab-common';
+// Import useNostrAuth from @cloistr/auth (the singleton peer), NOT from
+// @cloistr/collab-common. collab-common vendors its OWN copy of @cloistr/auth,
+// so its useNostrAuth reads a different AuthContext than the one @cloistr/ui's
+// SharedAuthProvider populates (which uses the @cloistr/auth singleton) — the
+// mismatch threw "useNostrAuth must be used within an AuthProvider".
+import { useNostrAuth } from '@cloistr/auth';
 import apiClient from '../api/client';
 import { unlockShareStorage, lockShareStorage } from '../lib/frostStorage';
 import type { User, LoginRequest, RegisterRequest } from '../types/api';
