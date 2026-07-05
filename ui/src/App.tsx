@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { SharedAuthProvider } from '@cloistr/ui';
+import { SharedAuthProvider, ThemeProvider } from '@cloistr/ui';
 
 // Layout & Pages
 import { Layout } from './components/Layout';
@@ -148,14 +148,16 @@ function AppRoutes() {
  */
 export default function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <SharedAuthProvider>
-        <SignerAuthProvider>
-          <BrowserRouter>
-            <AppRoutes />
-          </BrowserRouter>
-        </SignerAuthProvider>
-      </SharedAuthProvider>
-    </QueryClientProvider>
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <SharedAuthProvider>
+          <SignerAuthProvider>
+            <BrowserRouter>
+              <AppRoutes />
+            </BrowserRouter>
+          </SignerAuthProvider>
+        </SharedAuthProvider>
+      </QueryClientProvider>
+    </ThemeProvider>
   );
 }
