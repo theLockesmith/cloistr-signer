@@ -8,20 +8,22 @@
    ========================================== */
 
 :root {
-  /* Colors */
-  --signer-bg: #0d1117;
-  --signer-bg-secondary: #161b22;
-  --signer-bg-tertiary: #21262d;
-  --signer-border: #30363d;
-  --signer-text: #c9d1d9;
-  --signer-text-muted: #8b949e;
-  --signer-text-heading: #f0f6fc;
-  --signer-primary: #58a6ff;
-  --signer-primary-hover: #79b8ff;
-  --signer-success: #3fb950;
-  --signer-warning: #d29922;
-  --signer-danger: #f85149;
-  --signer-purple: #a371f7;
+  /* Colors — mapped to the theme-aware @cloistr/ui tokens (from @cloistr/ui/styles)
+     so the whole signer UI follows light/dark/system instead of the old dark-only
+     GitHub palette. The --signer-* aliases stay so existing rules keep working. */
+  --signer-bg: var(--cloistr-bg);
+  --signer-bg-secondary: var(--cloistr-bg-elevated);
+  --signer-bg-tertiary: var(--cloistr-bg-hover);
+  --signer-border: var(--cloistr-border);
+  --signer-text: var(--cloistr-text);
+  --signer-text-muted: var(--cloistr-text-muted);
+  --signer-text-heading: var(--cloistr-text);
+  --signer-primary: var(--cloistr-primary);
+  --signer-primary-hover: var(--cloistr-primary-hover);
+  --signer-success: var(--cloistr-success);
+  --signer-warning: var(--cloistr-warning);
+  --signer-danger: var(--cloistr-error);
+  --signer-purple: var(--cloistr-primary-light);
 
   /* Layout */
   --sidebar-width: 220px;
