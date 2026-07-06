@@ -24,7 +24,15 @@ type Config struct {
 	Service            ServiceConfig     `yaml:"service"`
 	Proxy              ProxyConfig       `yaml:"proxy"`
 	Discovery          DiscoveryConfig   `yaml:"discovery"`
-	Tor                TorConfig         `yaml:"tor"` // Optional SOCKS5 egress for per-key Tor routing (privacy §3.5)
+	Tor                TorConfig         `yaml:"tor"`       // Optional SOCKS5 egress for per-key Tor routing (privacy §3.5)
+	Lightning          LightningConfig   `yaml:"lightning"` // LNURL-auth (LUD-04)
+}
+
+// LightningConfig holds LNURL-auth configuration.
+type LightningConfig struct {
+	// Domain is used as the callback domain in LNURL-auth URLs.
+	// Defaults to "signer.cloistr.xyz". Override with LNURL_AUTH_DOMAIN env var.
+	Domain string `yaml:"domain"`
 }
 
 // TorConfig holds Tor egress configuration.
@@ -207,6 +215,9 @@ func Load() (*Config, error) {
 			Timeout:         5,     // 5 seconds
 			MaxRelays:       3,     // Max 3 relays from discovery
 			IncludeInBunker: true,  // Include in bunker URI by default
+		},
+		Lightning: LightningConfig{
+			Domain: "signer.cloistr.xyz",
 		},
 	}
 
@@ -404,6 +415,11 @@ func Load() (*Config, error) {
 	}
 	if discoveryInclude := os.Getenv("DISCOVERY_INCLUDE_IN_BUNKER"); discoveryInclude != "" {
 		cfg.Discovery.IncludeInBunker = discoveryInclude == "true" || discoveryInclude == "1"
+	}
+
+	// Lightning / LNURL-auth configuration
+	if domain := os.Getenv("LNURL_AUTH_DOMAIN"); domain != "" {
+		cfg.Lightning.Domain = domain
 	}
 
 	return cfg, nil

@@ -1033,9 +1033,34 @@ func (h *Handler) handleAPINIP07Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Verify signature against challenge
-	// For now, we trust that the signature was verified client-side
-	// In production, we should verify the signature server-side
+	// Verify the NIP-07 Schnorr signature before trusting the pubkey claim.
+	// The client sends a signed kind-27235 nostr event in the Signature field.
+	// We verify: (1) event.PubKey == req.Pubkey, (2) the "challenge" tag matches
+	// req.Challenge, (3) the BIP-340 Schnorr signature is valid.
+	var authEvent nostr.Event
+	if err := json.Unmarshal([]byte(req.Signature), &authEvent); err != nil {
+		h.jsonError(w, http.StatusBadRequest, "Invalid signature: expected signed event JSON")
+		return
+	}
+	if authEvent.PubKey != req.Pubkey {
+		h.jsonError(w, http.StatusUnauthorized, "Pubkey mismatch")
+		return
+	}
+	challengeOK := false
+	for _, tag := range authEvent.Tags {
+		if len(tag) >= 2 && tag[0] == "challenge" && tag[1] == req.Challenge {
+			challengeOK = true
+			break
+		}
+	}
+	if !challengeOK {
+		h.jsonError(w, http.StatusUnauthorized, "Challenge mismatch")
+		return
+	}
+	if ok, err := authEvent.CheckSignature(); err != nil || !ok {
+		h.jsonError(w, http.StatusUnauthorized, "Invalid signature")
+		return
+	}
 
 	// Check if pubkey belongs to a registered user
 	user, err := h.storage.GetUserByPubkey(r.Context(), req.Pubkey)

@@ -360,6 +360,20 @@ func (ps *PostgresStorage) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_webauthn_sessions_user    ON signer_webauthn_sessions(user_id);
 	CREATE INDEX IF NOT EXISTS idx_signer_webauthn_sessions_expires ON signer_webauthn_sessions(expires_at);
+
+	-- LNURL-auth (LUD-04) linking keys. One row per wallet↔user binding.
+	-- linking_key is the 33-byte compressed secp256k1 pubkey hex derived by
+	-- the wallet deterministically from this domain per LUD-04 §4.
+	CREATE TABLE IF NOT EXISTS signer_lightning_keys (
+		id           TEXT PRIMARY KEY,
+		user_id      TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
+		linking_key  TEXT UNIQUE NOT NULL,
+		name         TEXT,
+		created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		last_used_at TIMESTAMPTZ
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_lightning_keys_user        ON signer_lightning_keys(user_id);
+	CREATE INDEX IF NOT EXISTS idx_signer_lightning_keys_linking_key ON signer_lightning_keys(linking_key);
 	`
 
 	_, err := ps.db.Exec(schema)
@@ -2597,6 +2611,83 @@ func (ps *PostgresStorage) DeleteWebAuthnSession(ctx context.Context, id string)
 		`DELETE FROM signer_webauthn_sessions WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete webauthn session: %w", err)
+	}
+	return nil
+}
+
+// ---- Lightning key (LNURL-auth LUD-04) Postgres implementations ----
+
+func (ps *PostgresStorage) CreateLightningKey(ctx context.Context, key *LightningKey) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO signer_lightning_keys (id, user_id, linking_key, name, created_at)
+		VALUES ($1, $2, $3, $4, $5)`,
+		key.ID, key.UserID, key.LinkingKey, key.Name, key.CreatedAt)
+	if err != nil {
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+			return ErrLightningKeyExists
+		}
+		return fmt.Errorf("create lightning key: %w", err)
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) GetLightningKeyByLinkingKey(ctx context.Context, linkingKey string) (*LightningKey, error) {
+	k := &LightningKey{}
+	var lastUsedAt sql.NullTime
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, user_id, linking_key, name, created_at, last_used_at
+		FROM signer_lightning_keys WHERE linking_key = $1`, linkingKey).
+		Scan(&k.ID, &k.UserID, &k.LinkingKey, &k.Name, &k.CreatedAt, &lastUsedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrLightningKeyNotFound
+		}
+		return nil, fmt.Errorf("get lightning key: %w", err)
+	}
+	if lastUsedAt.Valid {
+		k.LastUsedAt = &lastUsedAt.Time
+	}
+	return k, nil
+}
+
+func (ps *PostgresStorage) ListLightningKeys(ctx context.Context, userID string) ([]*LightningKey, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, user_id, linking_key, name, created_at, last_used_at
+		FROM signer_lightning_keys WHERE user_id = $1 ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list lightning keys: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*LightningKey
+	for rows.Next() {
+		k := &LightningKey{}
+		var lastUsedAt sql.NullTime
+		if err := rows.Scan(&k.ID, &k.UserID, &k.LinkingKey, &k.Name, &k.CreatedAt, &lastUsedAt); err != nil {
+			return nil, fmt.Errorf("scan lightning key: %w", err)
+		}
+		if lastUsedAt.Valid {
+			k.LastUsedAt = &lastUsedAt.Time
+		}
+		result = append(result, k)
+	}
+	return result, rows.Err()
+}
+
+func (ps *PostgresStorage) UpdateLightningKeyLastUsed(ctx context.Context, id string) error {
+	_, err := ps.db.ExecContext(ctx,
+		`UPDATE signer_lightning_keys SET last_used_at = NOW() WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("update lightning key last_used_at: %w", err)
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) DeleteLightningKey(ctx context.Context, id string) error {
+	_, err := ps.db.ExecContext(ctx,
+		`DELETE FROM signer_lightning_keys WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete lightning key: %w", err)
 	}
 	return nil
 }

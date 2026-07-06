@@ -2450,3 +2450,27 @@ func (ss *SQLiteStorage) GetWebAuthnSession(ctx context.Context, id string) (*We
 func (ss *SQLiteStorage) DeleteWebAuthnSession(ctx context.Context, id string) error {
 	return nil
 }
+
+// ---- Lightning key SQLite stubs ----
+// Lightning key storage requires Postgres in production. These stubs satisfy
+// the interface for SQLite (dev/test).
+
+func (ss *SQLiteStorage) CreateLightningKey(ctx context.Context, key *LightningKey) error {
+	return fmt.Errorf("lightning key storage requires postgres storage")
+}
+
+func (ss *SQLiteStorage) GetLightningKeyByLinkingKey(ctx context.Context, linkingKey string) (*LightningKey, error) {
+	return nil, ErrLightningKeyNotFound
+}
+
+func (ss *SQLiteStorage) ListLightningKeys(ctx context.Context, userID string) ([]*LightningKey, error) {
+	return nil, nil
+}
+
+func (ss *SQLiteStorage) UpdateLightningKeyLastUsed(ctx context.Context, id string) error {
+	return fmt.Errorf("lightning key storage requires postgres storage")
+}
+
+func (ss *SQLiteStorage) DeleteLightningKey(ctx context.Context, id string) error {
+	return fmt.Errorf("lightning key storage requires postgres storage")
+}

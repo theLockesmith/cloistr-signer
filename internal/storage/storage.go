@@ -33,6 +33,8 @@ var (
 	ErrBunkerSecretInvalid = errors.New("invalid bunker secret")
 	ErrSettingNotFound     = errors.New("setting not found")
 	ErrConsentNotFound     = errors.New("app consent not found")
+	ErrLightningKeyNotFound = errors.New("lightning key not found")
+	ErrLightningKeyExists   = errors.New("lightning key already exists")
 )
 
 // KeyType represents the type of key storage
@@ -259,6 +261,18 @@ type WebAuthnSession struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// LightningKey represents a linked LNURL-auth linking key for a user.
+// The linking key is a secp256k1 pubkey (33 bytes, hex-encoded) derived
+// deterministically by the wallet from the domain per LUD-04 §4.
+type LightningKey struct {
+	ID         string     `json:"id"`
+	UserID     string     `json:"user_id"`
+	LinkingKey string     `json:"linking_key"` // 33-byte compressed secp256k1 pubkey hex
+	Name       string     `json:"name,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+}
+
 // BunkerSecret represents a secret for bunker:// URI validation
 type BunkerSecret struct {
 	ID        string    `json:"id"`
@@ -481,6 +495,13 @@ type Storage interface {
 	GetWebAuthnSession(ctx context.Context, id string) (*WebAuthnSession, error)
 	DeleteWebAuthnSession(ctx context.Context, id string) error
 
+	// Lightning key management (LNURL-auth LUD-04)
+	CreateLightningKey(ctx context.Context, key *LightningKey) error
+	GetLightningKeyByLinkingKey(ctx context.Context, linkingKey string) (*LightningKey, error)
+	ListLightningKeys(ctx context.Context, userID string) ([]*LightningKey, error)
+	UpdateLightningKeyLastUsed(ctx context.Context, id string) error
+	DeleteLightningKey(ctx context.Context, id string) error
+
 	// Lifecycle
 	Close() error
 }
@@ -544,6 +565,10 @@ type MemoryStorage struct {
 	passkeyCredsByCredID     map[string]*PasskeyCredential  // base64(credentialID) -> cred
 	passkeyCredsByUser       map[string][]*PasskeyCredential // userID -> []cred
 	webauthnSessions         map[string]*WebAuthnSession    // id -> session
+
+	// Lightning key storage (LNURL-auth LUD-04)
+	lightningKeys              map[string]*LightningKey  // id -> key
+	lightningKeysByLinkingKey  map[string]*LightningKey  // linkingKey -> key
 }
 
 // NewMemoryStorage creates a new in-memory storage
@@ -578,6 +603,9 @@ func NewMemoryStorage() *MemoryStorage {
 		passkeyCredsByCredID: make(map[string]*PasskeyCredential),
 		passkeyCredsByUser:   make(map[string][]*PasskeyCredential),
 		webauthnSessions:     make(map[string]*WebAuthnSession),
+
+		lightningKeys:             make(map[string]*LightningKey),
+		lightningKeysByLinkingKey: make(map[string]*LightningKey),
 	}
 }
 
@@ -1968,6 +1996,70 @@ func (m *MemoryStorage) DeleteWebAuthnSession(ctx context.Context, id string) er
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.webauthnSessions, id)
+	return nil
+}
+
+// ---- Lightning key memory implementations ----
+
+func (m *MemoryStorage) CreateLightningKey(ctx context.Context, key *LightningKey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.lightningKeysByLinkingKey[key.LinkingKey]; exists {
+		return ErrLightningKeyExists
+	}
+	m.lightningKeys[key.ID] = key
+	m.lightningKeysByLinkingKey[key.LinkingKey] = key
+	return nil
+}
+
+func (m *MemoryStorage) GetLightningKeyByLinkingKey(ctx context.Context, linkingKey string) (*LightningKey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	key, ok := m.lightningKeysByLinkingKey[linkingKey]
+	if !ok {
+		return nil, ErrLightningKeyNotFound
+	}
+	return key, nil
+}
+
+func (m *MemoryStorage) ListLightningKeys(ctx context.Context, userID string) ([]*LightningKey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]*LightningKey, 0)
+	for _, key := range m.lightningKeys {
+		if key.UserID == userID {
+			result = append(result, key)
+		}
+	}
+	return result, nil
+}
+
+func (m *MemoryStorage) UpdateLightningKeyLastUsed(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key, ok := m.lightningKeys[id]
+	if !ok {
+		return ErrLightningKeyNotFound
+	}
+	now := time.Now()
+	key.LastUsedAt = &now
+	return nil
+}
+
+func (m *MemoryStorage) DeleteLightningKey(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key, ok := m.lightningKeys[id]
+	if !ok {
+		return ErrLightningKeyNotFound
+	}
+	delete(m.lightningKeys, id)
+	delete(m.lightningKeysByLinkingKey, key.LinkingKey)
 	return nil
 }
 

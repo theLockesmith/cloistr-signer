@@ -173,6 +173,16 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/users/passkey/login/begin", h.handlePasskeyLoginBegin)
 	mux.HandleFunc("/api/v1/users/passkey/login/finish", h.handlePasskeyLoginFinish)
 
+	// Lightning / LNURL-auth (LUD-04).
+	// challenge + status + callback: unauthenticated (wallet and poller endpoints).
+	// link/challenge + keys: authentication required.
+	mux.HandleFunc("/api/v1/users/lightning/challenge", h.handleLightningChallenge)
+	mux.HandleFunc("/api/v1/lnurl-auth/callback", h.handleLNURLAuthCallback)
+	mux.HandleFunc("/api/v1/users/lightning/status", h.handleLightningStatus)
+	mux.HandleFunc("/api/v1/users/lightning/link/challenge", h.handleLightningLinkChallenge)
+	mux.HandleFunc("/api/v1/users/lightning/keys", h.handleLightningKeys)
+	mux.HandleFunc("/api/v1/users/lightning/keys/", h.handleLightningKeyByID)
+
 	// Status
 	mux.HandleFunc("/api/v1/status", h.handleStatus)
 
