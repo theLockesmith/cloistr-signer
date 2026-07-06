@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { useSignerAuth } from '../hooks/useSignerAuth';
 import apiClient from '../api/client';
+import type { PasskeyRegistrationFinishRequest } from '../types/api';
 
 export function SettingsPage() {
   const { user, logout } = useSignerAuth();
@@ -42,6 +43,9 @@ export function SettingsPage() {
 
         {/* Change Password */}
         <ChangePasswordCard />
+
+        {/* Passkeys */}
+        <PasskeysCard />
 
         {/* Danger Zone */}
         <div className="card" style={{ borderColor: 'var(--signer-danger)' }}>
@@ -150,6 +154,163 @@ function ChangePasswordCard() {
           {changeMutation.isPending ? 'Changing...' : 'Change Password'}
         </button>
       </form>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// WebAuthn / Passkey helpers
+// ---------------------------------------------------------------------------
+
+function arrayBufferToBase64Url(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  bytes.forEach((b) => { binary += String.fromCharCode(b); });
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+function base64UrlToArrayBuffer(base64url: string): ArrayBuffer {
+  const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  const padding = '='.repeat((4 - (base64.length % 4)) % 4);
+  const binary = atob(base64 + padding);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+// ---------------------------------------------------------------------------
+// PasskeysCard
+// ---------------------------------------------------------------------------
+
+function PasskeysCard() {
+  const [name, setName] = useState('Passkey');
+  const [status, setStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [errorMessage, setErrorMessage] = useState('');
+
+  // Guard: hide the whole card if the browser does not support WebAuthn.
+  const webAuthnAvailable =
+    typeof window !== 'undefined' && typeof window.PublicKeyCredential !== 'undefined';
+
+  const registerPasskey = useCallback(async () => {
+    setStatus('idle');
+    setErrorMessage('');
+
+    try {
+      // Step 1 – get options from the server.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const options = await apiClient.passkeyRegisterBegin() as any;
+
+      // Step 2 – convert base64url fields to ArrayBuffer as required by
+      // the WebAuthn API.
+      options.publicKey.challenge = base64UrlToArrayBuffer(
+        options.publicKey.challenge as string,
+      );
+      options.publicKey.user.id = base64UrlToArrayBuffer(
+        options.publicKey.user.id as string,
+      );
+      if (Array.isArray(options.publicKey.excludeCredentials)) {
+        options.publicKey.excludeCredentials = (
+          options.publicKey.excludeCredentials as Array<{ id: string; [k: string]: unknown }>
+        ).map((cred) => ({
+          ...cred,
+          id: base64UrlToArrayBuffer(cred.id),
+        }));
+      }
+
+      // Step 3 – ask the authenticator to create a credential.
+      const credential = (await navigator.credentials.create({
+        publicKey: options.publicKey,
+      })) as PublicKeyCredential | null;
+
+      if (!credential) {
+        throw new Error('No credential returned from authenticator');
+      }
+
+      const attestation = credential.response as AuthenticatorAttestationResponse;
+
+      // Step 4 – serialise and send to the server.
+      const body: PasskeyRegistrationFinishRequest = {
+        id: credential.id,
+        rawId: arrayBufferToBase64Url(credential.rawId),
+        type: credential.type,
+        response: {
+          attestationObject: arrayBufferToBase64Url(attestation.attestationObject),
+          clientDataJSON: arrayBufferToBase64Url(attestation.clientDataJSON),
+        },
+      };
+
+      await apiClient.passkeyRegisterFinish(name.trim() || 'Passkey', body);
+      setStatus('success');
+    } catch (err) {
+      if (err instanceof Error && err.name === 'NotAllowedError') {
+        // User cancelled or dismissed the browser prompt — not an error.
+        return;
+      }
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Failed to register passkey',
+      );
+      setStatus('error');
+    }
+  }, [name]);
+
+  if (!webAuthnAvailable) {
+    return null;
+  }
+
+  return (
+    <div className="card">
+      <h2 className="card-title" style={{ marginBottom: '16px' }}>Passkeys</h2>
+      <p style={{ color: 'var(--signer-text-muted)', marginBottom: '16px' }}>
+        Add a passkey to sign in to any Cloistr app without your password.
+        Your device (fingerprint, Face ID, or hardware key) authenticates you.
+      </p>
+
+      {status === 'success' && (
+        <div
+          style={{
+            padding: '12px',
+            background: 'rgba(63, 185, 80, 0.1)',
+            borderRadius: '6px',
+            marginBottom: '16px',
+            color: 'var(--signer-success)',
+          }}
+        >
+          Passkey registered successfully!
+        </div>
+      )}
+
+      {status === 'error' && (
+        <div className="auth-error" style={{ marginBottom: '16px' }}>
+          {errorMessage}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-end' }}>
+        <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+          <label className="form-label">Passkey name (optional)</label>
+          <input
+            type="text"
+            className="form-input"
+            value={name}
+            onChange={(e) => {
+              setStatus('idle');
+              setName(e.target.value);
+            }}
+            placeholder="e.g. MacBook Touch ID"
+            maxLength={64}
+          />
+        </div>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={registerPasskey}
+          style={{ whiteSpace: 'nowrap' }}
+        >
+          Add a passkey
+        </button>
+      </div>
     </div>
   );
 }

@@ -24,6 +24,7 @@ import type {
   FrostUserDkgFinalizeRequest,
   FrostUserDkgFinalizeResponse,
   FrostUserDkgRecoveryResponse,
+  PasskeyRegistrationFinishRequest,
 } from '../types/api';
 
 const API_BASE = '/api/v1';
@@ -96,6 +97,37 @@ class ApiClient {
       method: 'PUT',
       body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     });
+  }
+
+  // Passkey (WebAuthn) registration endpoints.
+  // The server accepts the auth_token cookie; credentials:'include' is set
+  // globally on this.fetch via the RequestInit spread below and via the
+  // base fetch wrapper (it always passes credentials:'include').
+
+  /**
+   * Begin passkey registration. Returns raw W3C CredentialCreationOptions
+   * (the JSON value you pass as `navigator.credentials.create({ publicKey })`
+   * after converting challenge / user.id / excludeCredentials[].id from
+   * base64url to ArrayBuffer).
+   */
+  async passkeyRegisterBegin(): Promise<Record<string, unknown>> {
+    return this.fetch('/users/passkey/register/begin', { method: 'POST' });
+  }
+
+  /**
+   * Finish passkey registration. `name` is the user-supplied label for the
+   * new credential. `body` is the serialised PublicKeyCredential from the
+   * browser (rawId, id, type, and response.attestationObject +
+   * response.clientDataJSON encoded as base64url strings).
+   */
+  async passkeyRegisterFinish(
+    name: string,
+    body: PasskeyRegistrationFinishRequest,
+  ): Promise<{ success: boolean }> {
+    return this.fetch(
+      `/users/passkey/register/finish?name=${encodeURIComponent(name)}`,
+      { method: 'POST', body: JSON.stringify(body) },
+    );
   }
 
   // Key endpoints

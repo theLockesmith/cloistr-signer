@@ -193,6 +193,18 @@ export interface DashboardStats {
   total_users?: number;
 }
 
+// Passkey (WebAuthn) registration wire types
+
+export interface PasskeyRegistrationFinishRequest {
+  id: string;
+  rawId: string;
+  type: string;
+  response: {
+    attestationObject: string;
+    clientDataJSON: string;
+  };
+}
+
 // API error response
 export interface ApiError {
   error: string;
