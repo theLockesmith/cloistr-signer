@@ -2414,3 +2414,39 @@ func (ss *SQLiteStorage) RevokeAllAppConsents(ctx context.Context, userID string
 		`DELETE FROM signer_app_consents WHERE user_id = ?`, userID)
 	return err
 }
+
+// ---- Passkey / WebAuthn SQLite stubs ----
+// WebAuthn passkeys require Postgres in production. These stubs satisfy the
+// interface for SQLite (dev/test) but return ErrSessionNotFound / ErrUserNotFound.
+
+func (ss *SQLiteStorage) CreatePasskeyCredential(ctx context.Context, cred *PasskeyCredential) error {
+	return fmt.Errorf("passkey credentials require postgres storage")
+}
+
+func (ss *SQLiteStorage) GetPasskeyCredentialByCredentialID(ctx context.Context, credentialID []byte) (*PasskeyCredential, error) {
+	return nil, ErrUserNotFound
+}
+
+func (ss *SQLiteStorage) ListPasskeyCredentials(ctx context.Context, userID string) ([]*PasskeyCredential, error) {
+	return nil, nil
+}
+
+func (ss *SQLiteStorage) UpdatePasskeyCredentialUsage(ctx context.Context, credentialID []byte, signCount uint32) error {
+	return fmt.Errorf("passkey credentials require postgres storage")
+}
+
+func (ss *SQLiteStorage) DeletePasskeyCredential(ctx context.Context, id string) error {
+	return fmt.Errorf("passkey credentials require postgres storage")
+}
+
+func (ss *SQLiteStorage) CreateWebAuthnSession(ctx context.Context, session *WebAuthnSession) error {
+	return fmt.Errorf("webauthn sessions require postgres storage")
+}
+
+func (ss *SQLiteStorage) GetWebAuthnSession(ctx context.Context, id string) (*WebAuthnSession, error) {
+	return nil, ErrSessionNotFound
+}
+
+func (ss *SQLiteStorage) DeleteWebAuthnSession(ctx context.Context, id string) error {
+	return nil
+}

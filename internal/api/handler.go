@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/nbd-wtf/go-nostr/nip19"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/audit"
@@ -37,7 +39,8 @@ type Handler struct {
 	frostKeyGen      *frost.KeyGenerator
 	distributedDKG   *frost.DistributedDKG
 	remoteSigner     *frost.RemoteSigner
-	userDKG          *frost.UserDKG // FROST 2-of-N user-cosigner DKG (docs/frost-2-of-n-design.md)
+	userDKG          *frost.UserDKG   // FROST 2-of-N user-cosigner DKG (docs/frost-2-of-n-design.md)
+	webauthn         *webauthn.WebAuthn // nil when WebAuthn config is incomplete (e.g. no RPID)
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -64,6 +67,40 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 		frostKG = frost.NewKeyGenerator(adapter)
 	}
 
+	// Initialize WebAuthn. RPID and at least one origin are required; skip
+	// gracefully if not configured (e.g. unit tests with in-memory storage).
+	var wa *webauthn.WebAuthn
+	if cfg.WebAuthn.RPID != "" && len(cfg.WebAuthn.RPOrigins) > 0 {
+		waCfg := &webauthn.Config{
+			RPID:          cfg.WebAuthn.RPID,
+			RPDisplayName: cfg.WebAuthn.RPDisplayName,
+			RPOrigins:     cfg.WebAuthn.RPOrigins,
+			AttestationPreference: protocol.PreferNoAttestation,
+			AuthenticatorSelection: protocol.AuthenticatorSelection{
+				ResidentKey:      protocol.ResidentKeyRequirementPreferred,
+				UserVerification: protocol.VerificationPreferred,
+			},
+			Timeouts: webauthn.TimeoutsConfig{
+				Login: webauthn.TimeoutConfig{
+					Enforce: true,
+					Timeout: 5 * time.Minute,
+				},
+				Registration: webauthn.TimeoutConfig{
+					Enforce: true,
+					Timeout: 5 * time.Minute,
+				},
+			},
+		}
+		var err error
+		wa, err = webauthn.New(waCfg)
+		if err != nil {
+			slog.Error("failed to initialize WebAuthn — passkey endpoints will be unavailable", "error", err)
+			wa = nil
+		} else {
+			slog.Info("WebAuthn initialized", "rpid", cfg.WebAuthn.RPID, "origins", len(cfg.WebAuthn.RPOrigins))
+		}
+	}
+
 	return &Handler{
 		config:  cfg,
 		signer:  signer,
@@ -82,6 +119,7 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 		frostCoordinator: frostCoord,
 		frostKeyGen:      frostKG,
 		userDKG:          frost.NewUserDKG(),
+		webauthn:         wa,
 	}
 }
 
@@ -127,6 +165,13 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/users/mfa/verify", h.handleMFAVerify)
 	mux.HandleFunc("/api/v1/users/mfa/disable", h.handleMFADisable)
 	mux.HandleFunc("/api/v1/users/sessions", h.handleUserSessions)
+
+	// Passkey (WebAuthn) — registration requires an active session;
+	// discoverable login (/login/begin + /login/finish) is unauthenticated.
+	mux.HandleFunc("/api/v1/users/passkey/register/begin", h.handlePasskeyRegisterBegin)
+	mux.HandleFunc("/api/v1/users/passkey/register/finish", h.handlePasskeyRegisterFinish)
+	mux.HandleFunc("/api/v1/users/passkey/login/begin", h.handlePasskeyLoginBegin)
+	mux.HandleFunc("/api/v1/users/passkey/login/finish", h.handlePasskeyLoginFinish)
 
 	// Status
 	mux.HandleFunc("/api/v1/status", h.handleStatus)
@@ -1737,6 +1782,7 @@ type UserResponse struct {
 	ID         string     `json:"id"`
 	Username   string     `json:"username"`
 	Email      string     `json:"email,omitempty"`
+	Pubkey     string     `json:"pubkey,omitempty"` // Nostr public key (hex); populated by signer at registration
 	MFAEnabled bool       `json:"mfa_enabled"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastLogin  *time.Time `json:"last_login,omitempty"`
@@ -2100,6 +2146,7 @@ func (h *Handler) handleUserMe(w http.ResponseWriter, r *http.Request) {
 		ID:         user.ID,
 		Username:   user.Username,
 		Email:      user.Email,
+		Pubkey:     user.Pubkey,
 		MFAEnabled: user.MFAEnabled,
 		CreatedAt:  user.CreatedAt,
 		LastLogin:  user.LastLoginAt,

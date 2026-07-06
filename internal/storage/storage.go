@@ -233,6 +233,32 @@ type AppConsent struct {
 	ApprovedAt time.Time `json:"approved_at"`
 }
 
+// PasskeyCredential represents a stored WebAuthn/passkey credential for a user.
+// Corresponds to the signer_passkey_credentials table.
+type PasskeyCredential struct {
+	ID           string     `json:"id"`
+	UserID       string     `json:"user_id"`
+	CredentialID []byte     `json:"-"`
+	PublicKey    []byte     `json:"-"`
+	AAGUID       []byte     `json:"-"`
+	SignCount    uint32     `json:"sign_count"`
+	Transport    []string   `json:"transport,omitempty"`
+	Name         string     `json:"name"`
+	CreatedAt    time.Time  `json:"created_at"`
+	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
+}
+
+// WebAuthnSession holds gob-encoded go-webauthn SessionData for an in-flight
+// ceremony. user_id is NULL for discoverable (usernameless) login sessions.
+// Corresponds to the signer_webauthn_sessions table.
+type WebAuthnSession struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id,omitempty"` // empty for discoverable sessions
+	Data      []byte    `json:"-"`                 // gob-encoded webauthn.SessionData
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // BunkerSecret represents a secret for bunker:// URI validation
 type BunkerSecret struct {
 	ID        string    `json:"id"`
@@ -443,6 +469,18 @@ type Storage interface {
 	UpdateFrostUserShare(ctx context.Context, share *FrostUserShare) error
 	DeleteFrostUserShare(ctx context.Context, id string) error
 
+	// Passkey (WebAuthn) credential management
+	CreatePasskeyCredential(ctx context.Context, cred *PasskeyCredential) error
+	GetPasskeyCredentialByCredentialID(ctx context.Context, credentialID []byte) (*PasskeyCredential, error)
+	ListPasskeyCredentials(ctx context.Context, userID string) ([]*PasskeyCredential, error)
+	UpdatePasskeyCredentialUsage(ctx context.Context, credentialID []byte, signCount uint32) error
+	DeletePasskeyCredential(ctx context.Context, id string) error
+
+	// WebAuthn session management (short-lived ceremony state)
+	CreateWebAuthnSession(ctx context.Context, session *WebAuthnSession) error
+	GetWebAuthnSession(ctx context.Context, id string) (*WebAuthnSession, error)
+	DeleteWebAuthnSession(ctx context.Context, id string) error
+
 	// Lifecycle
 	Close() error
 }
@@ -500,6 +538,12 @@ type MemoryStorage struct {
 	frostUserShareByKey map[string]*FrostUserShare      // key_id -> FrostUserShare (one signer-held share per key)
 	// App consents for cross-subdomain SSO (unified-auth-design §5)
 	appConsents        map[string]map[string]*AppConsent // userID -> appID -> AppConsent
+
+	// WebAuthn / passkey storage
+	passkeyCredentials       map[string]*PasskeyCredential  // id -> cred
+	passkeyCredsByCredID     map[string]*PasskeyCredential  // base64(credentialID) -> cred
+	passkeyCredsByUser       map[string][]*PasskeyCredential // userID -> []cred
+	webauthnSessions         map[string]*WebAuthnSession    // id -> session
 }
 
 // NewMemoryStorage creates a new in-memory storage
@@ -529,6 +573,11 @@ func NewMemoryStorage() *MemoryStorage {
 		frostUserShares:    make(map[string]*FrostUserShare),
 		frostUserShareByKey: make(map[string]*FrostUserShare),
 		appConsents:        make(map[string]map[string]*AppConsent),
+
+		passkeyCredentials:   make(map[string]*PasskeyCredential),
+		passkeyCredsByCredID: make(map[string]*PasskeyCredential),
+		passkeyCredsByUser:   make(map[string][]*PasskeyCredential),
+		webauthnSessions:     make(map[string]*WebAuthnSession),
 	}
 }
 
@@ -1824,6 +1873,113 @@ func (m *MemoryStorage) RevokeAllAppConsents(ctx context.Context, userID string)
 	defer m.mu.Unlock()
 	delete(m.appConsents, userID)
 	return nil
+}
+
+// ---- Passkey / WebAuthn memory implementations ----
+
+func (m *MemoryStorage) CreatePasskeyCredential(ctx context.Context, cred *PasskeyCredential) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := credKey(cred.CredentialID)
+	m.passkeyCredentials[cred.ID] = cred
+	m.passkeyCredsByCredID[key] = cred
+	m.passkeyCredsByUser[cred.UserID] = append(m.passkeyCredsByUser[cred.UserID], cred)
+	return nil
+}
+
+func (m *MemoryStorage) GetPasskeyCredentialByCredentialID(ctx context.Context, credentialID []byte) (*PasskeyCredential, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	cred, ok := m.passkeyCredsByCredID[credKey(credentialID)]
+	if !ok {
+		return nil, ErrUserNotFound // reuse sentinel; caller checks
+	}
+	return cred, nil
+}
+
+func (m *MemoryStorage) ListPasskeyCredentials(ctx context.Context, userID string) ([]*PasskeyCredential, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	creds := m.passkeyCredsByUser[userID]
+	result := make([]*PasskeyCredential, len(creds))
+	copy(result, creds)
+	return result, nil
+}
+
+func (m *MemoryStorage) UpdatePasskeyCredentialUsage(ctx context.Context, credentialID []byte, signCount uint32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cred, ok := m.passkeyCredsByCredID[credKey(credentialID)]
+	if !ok {
+		return ErrUserNotFound
+	}
+	cred.SignCount = signCount
+	now := time.Now()
+	cred.LastUsedAt = &now
+	return nil
+}
+
+func (m *MemoryStorage) DeletePasskeyCredential(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cred, ok := m.passkeyCredentials[id]
+	if !ok {
+		return nil
+	}
+	delete(m.passkeyCredentials, id)
+	delete(m.passkeyCredsByCredID, credKey(cred.CredentialID))
+
+	// Remove from user slice
+	slice := m.passkeyCredsByUser[cred.UserID]
+	updated := slice[:0]
+	for _, c := range slice {
+		if c.ID != id {
+			updated = append(updated, c)
+		}
+	}
+	m.passkeyCredsByUser[cred.UserID] = updated
+	return nil
+}
+
+func (m *MemoryStorage) CreateWebAuthnSession(ctx context.Context, session *WebAuthnSession) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.webauthnSessions[session.ID] = session
+	return nil
+}
+
+func (m *MemoryStorage) GetWebAuthnSession(ctx context.Context, id string) (*WebAuthnSession, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	s, ok := m.webauthnSessions[id]
+	if !ok {
+		return nil, ErrSessionNotFound
+	}
+	return s, nil
+}
+
+func (m *MemoryStorage) DeleteWebAuthnSession(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.webauthnSessions, id)
+	return nil
+}
+
+// credKey converts raw credential ID bytes to a map key string.
+func credKey(b []byte) string {
+	const hex = "0123456789abcdef"
+	s := make([]byte, len(b)*2)
+	for i, c := range b {
+		s[i*2] = hex[c>>4]
+		s[i*2+1] = hex[c&0xf]
+	}
+	return string(s)
 }
 
 func (m *MemoryStorage) Close() error {

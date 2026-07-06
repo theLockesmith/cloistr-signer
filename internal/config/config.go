@@ -18,6 +18,7 @@ type Config struct {
 	MinPowDifficulty   int               `yaml:"min_pow_difficulty"`     // Minimum POW difficulty for publishing (0 = disabled)
 	Storage            StorageConfig     `yaml:"storage"`
 	Auth               AuthConfig        `yaml:"auth"`
+	WebAuthn           WebAuthnConfig    `yaml:"webauthn"`
 	Vault              VaultConfig       `yaml:"vault"`
 	Audit              AuditConfig       `yaml:"audit"`
 	Service            ServiceConfig     `yaml:"service"`
@@ -96,6 +97,22 @@ type AuthConfig struct {
 	AllowedOrigins []string `yaml:"allowed_origins"` // Extra CORS origins beyond *.cloistr.xyz and localhost (escape hatch).
 }
 
+// WebAuthnConfig holds WebAuthn/passkey configuration
+type WebAuthnConfig struct {
+	// RPID is the Relying Party ID — must be the registrable domain, not a subdomain.
+	// Credentials registered under this ID are usable from any origin whose eTLD+1
+	// matches this value (e.g. "cloistr.xyz" covers every *.cloistr.xyz origin).
+	RPID string `yaml:"rpid"`
+
+	// RPOrigins is the allowlist of origins that may exercise these credentials.
+	// Each entry must be an exact origin (scheme + host + optional port).
+	RPOrigins []string `yaml:"rp_origins"`
+
+	// RPDisplayName is the human-readable name shown to the user during
+	// registration in the browser authenticator dialog.
+	RPDisplayName string `yaml:"rp_display_name"`
+}
+
 // VaultConfig holds HashiCorp Vault configuration
 type VaultConfig struct {
 	Enabled    bool   `yaml:"enabled"`
@@ -146,6 +163,26 @@ func Load() (*Config, error) {
 			MFAIssuer:                "Cloistr",
 			MaxFailedLogins:          5,
 			LockoutMinutes:           15,
+		},
+		WebAuthn: WebAuthnConfig{
+			RPID:          "cloistr.xyz",
+			RPDisplayName: "Cloistr",
+			RPOrigins: []string{
+				"https://signer.cloistr.xyz",
+				"https://me.cloistr.xyz",
+				"https://discover.cloistr.xyz",
+				"https://docs.cloistr.xyz",
+				"https://sheets.cloistr.xyz",
+				"https://slides.cloistr.xyz",
+				"https://whiteboard.cloistr.xyz",
+				"https://space.cloistr.xyz",
+				"https://stash.cloistr.xyz",
+				"https://photos.cloistr.xyz",
+				"https://mail.cloistr.xyz",
+				"https://tasks.cloistr.xyz",
+				"https://workspace.cloistr.xyz",
+				"https://cloistr.xyz",
+			},
 		},
 		Vault: VaultConfig{
 			Enabled:   false,
@@ -289,6 +326,17 @@ func Load() (*Config, error) {
 	}
 	if allowedOrigins := os.Getenv("ALLOWED_ORIGINS"); allowedOrigins != "" {
 		cfg.Auth.AllowedOrigins = strings.Split(allowedOrigins, ",")
+	}
+
+	// WebAuthn configuration (overrides built-in defaults; useful for staging / dev)
+	if rpid := os.Getenv("WEBAUTHN_RPID"); rpid != "" {
+		cfg.WebAuthn.RPID = rpid
+	}
+	if origins := os.Getenv("WEBAUTHN_ORIGINS"); origins != "" {
+		cfg.WebAuthn.RPOrigins = strings.Split(origins, ",")
+	}
+	if displayName := os.Getenv("WEBAUTHN_DISPLAY_NAME"); displayName != "" {
+		cfg.WebAuthn.RPDisplayName = displayName
 	}
 
 	// Vault configuration

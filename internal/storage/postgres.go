@@ -329,6 +329,37 @@ func (ps *PostgresStorage) migrate() error {
 		PRIMARY KEY (user_id, app_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_app_consents_user ON signer_app_consents(user_id);
+
+	-- WebAuthn / passkey credential storage (IdP-foundation passkeys).
+	-- All passkeys are issued under RPID "cloistr.xyz" so they are usable
+	-- from every *.cloistr.xyz origin without re-registering.
+	CREATE TABLE IF NOT EXISTS signer_passkey_credentials (
+		id           TEXT PRIMARY KEY,
+		user_id      TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
+		credential_id BYTEA NOT NULL UNIQUE,
+		public_key   BYTEA NOT NULL,
+		aaguid       BYTEA,
+		sign_count   BIGINT NOT NULL DEFAULT 0,
+		transport    TEXT[],
+		name         TEXT,
+		created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		last_used_at TIMESTAMPTZ
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_passkey_creds_user    ON signer_passkey_credentials(user_id);
+	CREATE INDEX IF NOT EXISTS idx_signer_passkey_creds_credid  ON signer_passkey_credentials(credential_id);
+
+	-- Temporary ceremony state for WebAuthn registration and discoverable login.
+	-- Rows expire in 5 minutes; no background sweeper is required because we
+	-- check expires_at on read and delete on use.
+	CREATE TABLE IF NOT EXISTS signer_webauthn_sessions (
+		id         TEXT PRIMARY KEY,
+		user_id    TEXT,                        -- NULL for discoverable login sessions
+		data       BYTEA NOT NULL,              -- gob-encoded webauthn.SessionData
+		expires_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_webauthn_sessions_user    ON signer_webauthn_sessions(user_id);
+	CREATE INDEX IF NOT EXISTS idx_signer_webauthn_sessions_expires ON signer_webauthn_sessions(expires_at);
 	`
 
 	_, err := ps.db.Exec(schema)
@@ -2436,4 +2467,136 @@ func intArrayToInt64(arr []int) pq.Int64Array {
 		result[i] = int64(v)
 	}
 	return result
+}
+
+// ---- Passkey / WebAuthn Postgres implementations ----
+
+func (ps *PostgresStorage) CreatePasskeyCredential(ctx context.Context, cred *PasskeyCredential) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO signer_passkey_credentials
+			(id, user_id, credential_id, public_key, aaguid, sign_count, transport, name, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		cred.ID, cred.UserID, cred.CredentialID, cred.PublicKey,
+		cred.AAGUID, int64(cred.SignCount), pq.Array(cred.Transport),
+		cred.Name, cred.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("create passkey credential: %w", err)
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) GetPasskeyCredentialByCredentialID(ctx context.Context, credentialID []byte) (*PasskeyCredential, error) {
+	cred := &PasskeyCredential{}
+	var lastUsed sql.NullTime
+	var transport pq.StringArray
+
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, user_id, credential_id, public_key, aaguid, sign_count, transport, name, created_at, last_used_at
+		FROM signer_passkey_credentials
+		WHERE credential_id = $1`, credentialID).
+		Scan(&cred.ID, &cred.UserID, &cred.CredentialID, &cred.PublicKey,
+			&cred.AAGUID, &cred.SignCount, &transport, &cred.Name,
+			&cred.CreatedAt, &lastUsed)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("get passkey credential: %w", err)
+	}
+	cred.Transport = []string(transport)
+	if lastUsed.Valid {
+		cred.LastUsedAt = &lastUsed.Time
+	}
+	return cred, nil
+}
+
+func (ps *PostgresStorage) ListPasskeyCredentials(ctx context.Context, userID string) ([]*PasskeyCredential, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT id, user_id, credential_id, public_key, aaguid, sign_count, transport, name, created_at, last_used_at
+		FROM signer_passkey_credentials
+		WHERE user_id = $1
+		ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list passkey credentials: %w", err)
+	}
+	defer rows.Close()
+
+	var creds []*PasskeyCredential
+	for rows.Next() {
+		c := &PasskeyCredential{}
+		var lastUsed sql.NullTime
+		var transport pq.StringArray
+		if err := rows.Scan(&c.ID, &c.UserID, &c.CredentialID, &c.PublicKey,
+			&c.AAGUID, &c.SignCount, &transport, &c.Name,
+			&c.CreatedAt, &lastUsed); err != nil {
+			return nil, fmt.Errorf("scan passkey credential: %w", err)
+		}
+		c.Transport = []string(transport)
+		if lastUsed.Valid {
+			c.LastUsedAt = &lastUsed.Time
+		}
+		creds = append(creds, c)
+	}
+	return creds, rows.Err()
+}
+
+func (ps *PostgresStorage) UpdatePasskeyCredentialUsage(ctx context.Context, credentialID []byte, signCount uint32) error {
+	_, err := ps.db.ExecContext(ctx, `
+		UPDATE signer_passkey_credentials
+		SET sign_count = $1, last_used_at = NOW()
+		WHERE credential_id = $2`,
+		int64(signCount), credentialID)
+	if err != nil {
+		return fmt.Errorf("update passkey usage: %w", err)
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) DeletePasskeyCredential(ctx context.Context, id string) error {
+	_, err := ps.db.ExecContext(ctx,
+		`DELETE FROM signer_passkey_credentials WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete passkey credential: %w", err)
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) CreateWebAuthnSession(ctx context.Context, session *WebAuthnSession) error {
+	userID := sql.NullString{String: session.UserID, Valid: session.UserID != ""}
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO signer_webauthn_sessions (id, user_id, data, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5)`,
+		session.ID, userID, session.Data, session.ExpiresAt, session.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("create webauthn session: %w", err)
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) GetWebAuthnSession(ctx context.Context, id string) (*WebAuthnSession, error) {
+	s := &WebAuthnSession{}
+	var userID sql.NullString
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT id, user_id, data, expires_at, created_at
+		FROM signer_webauthn_sessions WHERE id = $1`, id).
+		Scan(&s.ID, &userID, &s.Data, &s.ExpiresAt, &s.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrSessionNotFound
+		}
+		return nil, fmt.Errorf("get webauthn session: %w", err)
+	}
+	if userID.Valid {
+		s.UserID = userID.String
+	}
+	return s, nil
+}
+
+func (ps *PostgresStorage) DeleteWebAuthnSession(ctx context.Context, id string) error {
+	_, err := ps.db.ExecContext(ctx,
+		`DELETE FROM signer_webauthn_sessions WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete webauthn session: %w", err)
+	}
+	return nil
 }
