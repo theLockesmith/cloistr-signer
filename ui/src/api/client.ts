@@ -25,6 +25,9 @@ import type {
   FrostUserDkgFinalizeResponse,
   FrostUserDkgRecoveryResponse,
   PasskeyRegistrationFinishRequest,
+  LightningLinkChallengeResponse,
+  LightningLinkStatusResponse,
+  LightningKey,
 } from '../types/api';
 
 const API_BASE = '/api/v1';
@@ -394,6 +397,28 @@ class ApiClient {
     return this.fetch(`/admin/users/${id}/admin`, {
       method: 'PUT',
       body: JSON.stringify({ is_admin: isAdmin }),
+    });
+  }
+
+  // Lightning wallet linking endpoints.
+
+  async lightningLinkChallenge(): Promise<LightningLinkChallengeResponse> {
+    return this.fetch('/users/lightning/link/challenge', { method: 'POST' });
+  }
+
+  async lightningStatus(sessionId: string): Promise<LightningLinkStatusResponse> {
+    return this.fetch(
+      `/users/lightning/status?session_id=${encodeURIComponent(sessionId)}`,
+    );
+  }
+
+  async lightningListKeys(): Promise<LightningKey[]> {
+    return this.fetch('/users/lightning/keys');
+  }
+
+  async lightningDeleteKey(id: string): Promise<void> {
+    return this.fetch(`/users/lightning/keys/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
     });
   }
 }

@@ -211,3 +211,26 @@ export interface ApiError {
   code?: string;
   details?: Record<string, unknown>;
 }
+
+// Lightning wallet linking wire types
+
+/** POST /api/v1/users/lightning/link/challenge response */
+export interface LightningLinkChallengeResponse {
+  lnurl: string;
+  k1: string;
+  session_id: string;
+}
+
+/** GET /api/v1/users/lightning/status?session_id= response */
+export type LightningLinkStatusResponse =
+  | { success: false; status: 'pending' }
+  | { success: true; username: string }
+  | { success: false; status: 'expired' };
+
+/** One entry from GET /api/v1/users/lightning/keys */
+export interface LightningKey {
+  id: string;
+  name?: string;
+  created_at: string;
+  last_used_at?: string;
+}

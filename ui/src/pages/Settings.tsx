@@ -1,8 +1,8 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { useSignerAuth } from '../hooks/useSignerAuth';
 import apiClient from '../api/client';
-import type { PasskeyRegistrationFinishRequest } from '../types/api';
+import type { PasskeyRegistrationFinishRequest, LightningKey } from '../types/api';
 
 export function SettingsPage() {
   const { user, logout } = useSignerAuth();
@@ -46,6 +46,9 @@ export function SettingsPage() {
 
         {/* Passkeys */}
         <PasskeysCard />
+
+        {/* Lightning wallet */}
+        <LightningCard />
 
         {/* Danger Zone */}
         <div className="card" style={{ borderColor: 'var(--signer-danger)' }}>
@@ -311,6 +314,319 @@ function PasskeysCard() {
           Add a passkey
         </button>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// LightningCard
+// ---------------------------------------------------------------------------
+
+/** How long (ms) between status polls while a LNURL-auth QR is displayed. */
+const LIGHTNING_POLL_INTERVAL_MS = 2000;
+
+function LightningCard() {
+  // Linked keys list
+  const [keys, setKeys] = useState<LightningKey[]>([]);
+  const [loadError, setLoadError] = useState('');
+  const [loadingKeys, setLoadingKeys] = useState(true);
+
+  // Link-flow state
+  type LinkPhase = 'idle' | 'pending' | 'linked' | 'error';
+  const [phase, setPhase] = useState<LinkPhase>('idle');
+  const [lnurl, setLnurl] = useState('');
+  const [linkError, setLinkError] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  // Deleting
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState('');
+
+  // QR canvas ref
+
+  // Poll interval ref — cleared on unmount / success / error
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // -------------------------------------------------------------------------
+  // Load linked keys on mount
+  // -------------------------------------------------------------------------
+  const loadKeys = useCallback(async () => {
+    setLoadError('');
+    setLoadingKeys(true);
+    try {
+      const list = await apiClient.lightningListKeys();
+      setKeys(list);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Failed to load Lightning keys');
+    } finally {
+      setLoadingKeys(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadKeys();
+  }, [loadKeys]);
+
+
+  // -------------------------------------------------------------------------
+  // Cleanup poll on unmount
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    return () => {
+      if (pollRef.current !== null) {
+        clearInterval(pollRef.current);
+      }
+    };
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Start a link-challenge flow
+  // -------------------------------------------------------------------------
+  const startLink = useCallback(async () => {
+    setLinkError('');
+    setPhase('pending');
+    setCopied(false);
+
+    try {
+      const challenge = await apiClient.lightningLinkChallenge();
+      setLnurl(challenge.lnurl);
+
+      // Begin polling
+      pollRef.current = setInterval(async () => {
+        try {
+          const result = await apiClient.lightningStatus(challenge.session_id);
+          if (result.success) {
+            clearInterval(pollRef.current!);
+            pollRef.current = null;
+            setPhase('linked');
+            setLnurl('');
+            // Refresh the key list to show the newly linked wallet
+            loadKeys();
+          } else if (result.status === 'expired') {
+            clearInterval(pollRef.current!);
+            pollRef.current = null;
+            setPhase('error');
+            setLinkError('QR code expired. Please try again.');
+            setLnurl('');
+          }
+          // status === 'pending': keep polling
+        } catch {
+          clearInterval(pollRef.current!);
+          pollRef.current = null;
+          setPhase('error');
+          setLinkError('Lost connection while waiting for wallet confirmation.');
+          setLnurl('');
+        }
+      }, LIGHTNING_POLL_INTERVAL_MS);
+    } catch (err) {
+      setPhase('error');
+      setLinkError(err instanceof Error ? err.message : 'Failed to start wallet link');
+    }
+  }, [loadKeys]);
+
+  const cancelLink = useCallback(() => {
+    if (pollRef.current !== null) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    setPhase('idle');
+    setLnurl('');
+    setLinkError('');
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Unlink a key
+  // -------------------------------------------------------------------------
+  const unlinkKey = useCallback(async (id: string) => {
+    setDeleteError('');
+    setDeletingId(id);
+    try {
+      await apiClient.lightningDeleteKey(id);
+      setKeys((prev) => prev.filter((k) => k.id !== id));
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Failed to unlink wallet');
+    } finally {
+      setDeletingId(null);
+    }
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Copy LNURL to clipboard
+  // -------------------------------------------------------------------------
+  const copyLnurl = useCallback(() => {
+    if (!lnurl) return;
+    navigator.clipboard.writeText(lnurl).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, [lnurl]);
+
+  // -------------------------------------------------------------------------
+  // Render
+  // -------------------------------------------------------------------------
+  return (
+    <div className="card">
+      <h2 className="card-title" style={{ marginBottom: '16px' }}>Lightning Wallet</h2>
+      <p style={{ color: 'var(--signer-text-muted)', marginBottom: '16px' }}>
+        Link a Lightning wallet via LNURL-auth to enable Bitcoin payments across
+        Cloistr apps. Scan the QR code with any compatible wallet.
+      </p>
+
+      {/* Success banner after linking */}
+      {phase === 'linked' && (
+        <div
+          style={{
+            padding: '12px',
+            background: 'rgba(63, 185, 80, 0.1)',
+            borderRadius: '6px',
+            marginBottom: '16px',
+            color: 'var(--signer-success)',
+          }}
+        >
+          Lightning wallet linked successfully!
+        </div>
+      )}
+
+      {/* Link-flow error */}
+      {phase === 'error' && linkError && (
+        <div className="auth-error" style={{ marginBottom: '16px' }}>
+          {linkError}
+        </div>
+      )}
+
+      {/* Unlink error */}
+      {deleteError && (
+        <div className="auth-error" style={{ marginBottom: '16px' }}>
+          {deleteError}
+        </div>
+      )}
+
+      {/* Existing linked keys */}
+      {loadError ? (
+        <div className="auth-error" style={{ marginBottom: '16px' }}>{loadError}</div>
+      ) : loadingKeys ? (
+        <p style={{ color: 'var(--signer-text-muted)', marginBottom: '16px' }}>
+          Loading linked wallets…
+        </p>
+      ) : keys.length > 0 ? (
+        <div style={{ marginBottom: '16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {keys.map((k) => (
+            <div
+              key={k.id}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '10px 12px',
+                background: 'var(--signer-bg)',
+                border: '1px solid var(--signer-border)',
+                borderRadius: '6px',
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 500 }}>
+                  {k.name ?? 'Lightning wallet'}
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--signer-text-muted)', marginTop: '2px' }}>
+                  Linked {new Date(k.created_at).toLocaleDateString()}
+                  {k.last_used_at && (
+                    <> · Last used {new Date(k.last_used_at).toLocaleDateString()}</>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-danger btn-sm"
+                disabled={deletingId === k.id}
+                onClick={() => unlinkKey(k.id)}
+              >
+                {deletingId === k.id ? 'Unlinking…' : 'Unlink'}
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {/* QR / pending flow */}
+      {phase === 'pending' && lnurl ? (
+        <div style={{ marginTop: '8px' }}>
+          <p style={{ color: 'var(--signer-text-muted)', marginBottom: '12px', fontSize: '13px' }}>
+            Open the link below in your Lightning wallet, or copy the LNURL code
+            and paste it into your wallet. This request expires after a few minutes.
+          </p>
+
+          {/* LNURL code (selectable / paste into wallet) */}
+          <div style={{ marginBottom: '12px' }}>
+            <code
+              style={{
+                display: 'block',
+                wordBreak: 'break-all',
+                fontSize: '12px',
+                padding: '8px',
+                background: 'var(--signer-bg-muted, rgba(0,0,0,0.2))',
+                borderRadius: '6px',
+              }}
+            >
+              {lnurl}
+            </code>
+          </div>
+
+          {/* Deep link */}
+          <div style={{ marginBottom: '12px' }}>
+            <a
+              href={`lightning:${lnurl}`}
+              style={{ fontSize: '13px', wordBreak: 'break-all' }}
+            >
+              Open in wallet app
+            </a>
+          </div>
+
+          {/* Copy button */}
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={copyLnurl}
+            >
+              {copied ? 'Copied!' : 'Copy LNURL'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={cancelLink}
+            >
+              Cancel
+            </button>
+          </div>
+
+          <p style={{ color: 'var(--signer-text-muted)', fontSize: '12px', marginTop: '12px' }}>
+            Waiting for wallet confirmation…
+          </p>
+        </div>
+      ) : (
+        /* Show "Link a Lightning wallet" button when not in pending/linked flow */
+        phase !== 'linked' && (
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={startLink}
+          >
+            Link a Lightning wallet
+          </button>
+        )
+      )}
+
+      {/* After success, offer to link another */}
+      {phase === 'linked' && (
+        <button
+          type="button"
+          className="btn btn-secondary"
+          style={{ marginTop: '8px' }}
+          onClick={() => { setPhase('idle'); }}
+        >
+          Link another wallet
+        </button>
+      )}
     </div>
   );
 }
