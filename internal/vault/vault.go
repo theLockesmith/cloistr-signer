@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -24,10 +25,11 @@ type Client struct {
 
 // Config holds Vault configuration
 type Config struct {
-	Address    string // Vault address (e.g., http://vault:8200)
-	Token      string // Vault token for authentication
-	MountPath  string // KV secrets engine mount path (default: secret)
-	SkipVerify bool   // Skip TLS certificate verification
+	Address    string        // Vault address (e.g., http://vault:8200)
+	Token      string        // Vault token for authentication
+	MountPath  string        // KV secrets engine mount path (default: secret)
+	SkipVerify bool          // Skip TLS certificate verification
+	Timeout    time.Duration // Per-request timeout; default 5s. Fail fast so a Vault outage can't hang login/register into a browser NetworkError.
 }
 
 // NewClient creates a new Vault client
@@ -41,16 +43,28 @@ func NewClient(cfg *Config) (*Client, error) {
 		mountPath = "secret"
 	}
 
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
+	// Fail fast: a Vault outage must NOT hang login/register (each does 1-2 Vault
+	// calls; a 30s timeout × multiple calls stacked into >50s hangs → browser
+	// NetworkError). Bound connect, TLS handshake, AND total request time so an
+	// unreachable-but-healthy Vault surfaces as a prompt error, not a hang.
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
 	}
 
+	transport := &http.Transport{
+		DialContext:         (&net.Dialer{Timeout: timeout}).DialContext,
+		TLSHandshakeTimeout: timeout,
+	}
 	if cfg.SkipVerify {
-		httpClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true, //nolint:gosec // User explicitly requested TLS skip verify
-			},
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // User explicitly requested TLS skip verify
 		}
+	}
+
+	httpClient := &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
 	}
 
 	return &Client{
