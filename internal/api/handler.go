@@ -3095,15 +3095,40 @@ func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Reque
 			ClientPubkey: clientPubkey,
 		})
 
-	default:
-		// No prior consent and caller has not confirmed: ask the client to
+	case key.RequireApproval:
+		// Opt-IN friction (unified-auth-design §9): this key is configured to
+		// require explicit approval for new app connections. Ask the client to
 		// show a consent prompt, then re-POST with consent=true.
-		slog.Info("nostrconnect consent required",
+		slog.Info("nostrconnect consent required (key requires approval)",
 			"app", appName, "client", clientPubkey[:16]+"...", "user", claims.UserID)
 		h.jsonResponse(w, http.StatusOK, NostrConnectSessionResponse{
 			ConsentRequired: true,
 			AppID:           clientPubkey,
 			AppName:         appName,
+		})
+
+	default:
+		// Opt-OUT default (unified-auth-design §9): a valid signer session is
+		// the first-party gate, so auto-approve first-time connects silently
+		// (zero friction for normies) and record consent so the app is listed
+		// and revocable in Connected Apps. Users who want friction set
+		// RequireApproval on their key (handled by the case above).
+		if err := h.storage.RecordAppConsent(r.Context(), claims.UserID, clientPubkey, appName); err != nil {
+			slog.Warn("failed to record app consent", "error", err)
+			// Non-fatal: approve anyway so the user is not blocked.
+		}
+		if err := h.approveNostrConnect(r.Context(), key, clientPubkey, relay, secret, appName, appURL, appImage); err != nil {
+			h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+			return
+		}
+		slog.Info("nostrconnect auto-approved (opt-out default)",
+			"app", appName, "client", clientPubkey[:16]+"...", "key", req.KeyID)
+		h.jsonResponse(w, http.StatusOK, NostrConnectSessionResponse{
+			Success:      true,
+			AppName:      appName,
+			AppURL:       appURL,
+			AppImage:     appImage,
+			ClientPubkey: clientPubkey,
 		})
 	}
 }

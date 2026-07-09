@@ -94,11 +94,18 @@ func TestHandleNostrConnectSession_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-// TestHandleNostrConnectSession_ConsentRequired verifies that a first-time
-// connection without consent=true returns consent_required instead of approving.
+// TestHandleNostrConnectSession_ConsentRequired verifies that when the key is
+// configured with RequireApproval (opt-IN friction, unified-auth-design §9), a
+// first-time connection without consent=true returns consent_required instead
+// of auto-approving.
 func TestHandleNostrConnectSession_ConsentRequired(t *testing.T) {
 	h, store := testHandler(t)
-	seedUserAndKey(t, store)
+	key := seedUserAndKey(t, store)
+	// Opt into friction: this key requires explicit approval for new apps.
+	key.RequireApproval = true
+	if err := store.UpdateKey(context.Background(), key); err != nil {
+		t.Fatalf("UpdateKey: %v", err)
+	}
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"uri":    validNostrConnectURI(testClientPubkey, "wss://relay.cloistr.xyz", "TestApp"),
@@ -120,7 +127,7 @@ func TestHandleNostrConnectSession_ConsentRequired(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	if !resp.ConsentRequired {
-		t.Error("consent_required = false, want true on first-time without consent flag")
+		t.Error("consent_required = false, want true on a RequireApproval key without consent flag")
 	}
 	if resp.Success {
 		t.Error("success = true, should not be approved without consent")
@@ -133,6 +140,48 @@ func TestHandleNostrConnectSession_ConsentRequired(t *testing.T) {
 	hasConsent, _ := store.HasAppConsent(context.Background(), testUserIDSess, testClientPubkey)
 	if hasConsent {
 		t.Error("consent was stored without explicit consent=true")
+	}
+}
+
+// TestHandleNostrConnectSession_OptOutAutoApprove verifies the opt-OUT default
+// (unified-auth-design §9): with a normal key (RequireApproval=false), a
+// first-time connection with no consent flag auto-approves silently — recording
+// consent (so it's revocable in Connected Apps) and setting the permission.
+func TestHandleNostrConnectSession_OptOutAutoApprove(t *testing.T) {
+	h, store := testHandler(t)
+	key := seedUserAndKey(t, store) // RequireApproval defaults to false
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"uri":    validNostrConnectURI(testClientPubkey, "wss://relay.cloistr.xyz", "TestApp"),
+		"key_id": "key-sso-001",
+		// consent omitted / false — the opt-out default should still approve
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/nostrconnect/session", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+makeSessionToken(t, h, testUserIDSess))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.handleNostrConnectSession(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200\nbody: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp NostrConnectSessionResponse
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if !resp.Success {
+		t.Error("success = false, want true on opt-out auto-approve")
+	}
+	if resp.ConsentRequired {
+		t.Error("consent_required = true, want false on opt-out default")
+	}
+
+	// Consent recorded (so the app is listed + revocable) and permission set.
+	hasConsent, _ := store.HasAppConsent(context.Background(), testUserIDSess, testClientPubkey)
+	if !hasConsent {
+		t.Error("consent not recorded on opt-out auto-approve")
+	}
+	if perm, err := store.GetPermission(context.Background(), key.Pubkey, testClientPubkey); err != nil || perm == nil {
+		t.Errorf("permission not set on opt-out auto-approve (err=%v)", err)
 	}
 }
 
