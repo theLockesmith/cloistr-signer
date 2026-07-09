@@ -66,6 +66,25 @@ func (c *Client) getPublicURL(internalURL string) string {
 	return internalURL
 }
 
+// internalURLFor maps a public relay URL back to the internal URL the signer
+// holds a persistent connection to (the reverse of publicURLMappings). Clients
+// advertise the public relay (e.g. wss://relay.cloistr.xyz) in nostrconnect
+// URIs, but the signer should publish over its existing internal connection
+// (e.g. ws://cloistr-relay.svc): it's already connected, avoids a fresh
+// Tor-routed dial to the external hostname, and the relay's cross-pod pubsub
+// delivers the event to the external subscriber regardless of pod/path.
+// Returns the input unchanged when it isn't a known public URL.
+func (c *Client) internalURLFor(url string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for internal, public := range c.publicURLMappings {
+		if public == url {
+			return internal
+		}
+	}
+	return url
+}
+
 // Connect establishes connections to all configured relays
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
@@ -342,6 +361,14 @@ func parsePowRequirement(errStr string) int {
 
 // PublishToRelay publishes an event to a specific relay, connecting if necessary
 func (c *Client) PublishToRelay(ctx context.Context, relayURL string, event *nostr.Event) error {
+	// A nostrconnect URI advertises the PUBLIC relay URL, but the signer holds a
+	// persistent connection to the INTERNAL URL. Resolve to that so we publish
+	// over the live internal connection instead of making a fresh (Tor-routed,
+	// slow/failing) dial to the external hostname — the relay's cross-pod pubsub
+	// still fans the event out to the external subscriber. Without this, the
+	// NIP-46 connect response was never delivered and clients hit a 120s timeout.
+	relayURL = c.internalURLFor(relayURL)
+
 	c.mu.RLock()
 	relay, exists := c.relays[relayURL]
 	c.mu.RUnlock()

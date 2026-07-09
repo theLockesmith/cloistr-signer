@@ -287,3 +287,32 @@ func TestClient_Fields(t *testing.T) {
 // 1. A mock Nostr relay server
 // 2. Integration tests with a real relay
 // 3. Refactoring to accept an interface for the relay connection
+
+// TestInternalURLFor verifies the public→internal reverse mapping used by
+// PublishToRelay: clients advertise the public relay URL in nostrconnect URIs,
+// but the signer must publish over its persistent internal connection.
+func TestInternalURLFor(t *testing.T) {
+	c := NewClient([]string{"ws://cloistr-relay.cloistr.svc.cluster.local"})
+	c.SetPublicURLMappings(map[string]string{
+		"ws://cloistr-relay.cloistr.svc.cluster.local": "wss://relay.cloistr.xyz",
+	})
+
+	// Public URL (from a nostrconnect URI) resolves back to the internal URL
+	// the signer actually holds a persistent connection to.
+	if got := c.internalURLFor("wss://relay.cloistr.xyz"); got != "ws://cloistr-relay.cloistr.svc.cluster.local" {
+		t.Errorf("internalURLFor(public) = %q, want internal URL", got)
+	}
+	// Internal URL passes through unchanged.
+	if got := c.internalURLFor("ws://cloistr-relay.cloistr.svc.cluster.local"); got != "ws://cloistr-relay.cloistr.svc.cluster.local" {
+		t.Errorf("internalURLFor(internal) = %q, want unchanged", got)
+	}
+	// Unknown URL passes through unchanged.
+	if got := c.internalURLFor("wss://other.example.com"); got != "wss://other.example.com" {
+		t.Errorf("internalURLFor(unknown) = %q, want unchanged", got)
+	}
+	// No mappings configured → unchanged.
+	c2 := NewClient([]string{"wss://relay.cloistr.xyz"})
+	if got := c2.internalURLFor("wss://relay.cloistr.xyz"); got != "wss://relay.cloistr.xyz" {
+		t.Errorf("internalURLFor with no mappings = %q, want unchanged", got)
+	}
+}
