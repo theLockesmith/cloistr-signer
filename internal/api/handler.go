@@ -1537,15 +1537,38 @@ func (h *Handler) handleRequestByID(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleListRequests(w http.ResponseWriter, r *http.Request) {
 	keyPubkey := r.URL.Query().Get("key_pubkey")
-	if keyPubkey == "" {
-		h.errorResponse(w, http.StatusBadRequest, "key_pubkey query parameter required")
-		return
-	}
 
-	requests, err := h.storage.ListPendingRequests(r.Context(), keyPubkey)
-	if err != nil {
-		h.errorResponse(w, http.StatusInternalServerError, "failed to list requests")
-		return
+	var requests []*storage.PendingRequest
+	if keyPubkey != "" {
+		reqs, err := h.storage.ListPendingRequests(r.Context(), keyPubkey)
+		if err != nil {
+			h.errorResponse(w, http.StatusInternalServerError, "failed to list requests")
+			return
+		}
+		requests = reqs
+	} else {
+		// No explicit key_pubkey: scope to the authenticated user's own keys.
+		// The signer UI (Dashboard/Requests) polls /requests with no param — return
+		// pending requests across every key this session owns instead of a 400.
+		// (The explicit-key path above is unchanged; this branch is purely additive.)
+		claims, err := h.validateAuthHeader(r)
+		if err != nil {
+			h.errorResponse(w, http.StatusUnauthorized, "key_pubkey query parameter or a valid session required")
+			return
+		}
+		keys, err := h.storage.ListKeys(r.Context(), claims.UserID)
+		if err != nil {
+			h.errorResponse(w, http.StatusInternalServerError, "failed to list keys")
+			return
+		}
+		for _, key := range keys {
+			reqs, err := h.storage.ListPendingRequests(r.Context(), key.Pubkey)
+			if err != nil {
+				h.errorResponse(w, http.StatusInternalServerError, "failed to list requests")
+				return
+			}
+			requests = append(requests, reqs...)
+		}
 	}
 
 	response := make([]PendingRequestResponse, len(requests))

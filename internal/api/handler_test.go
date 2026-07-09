@@ -786,13 +786,16 @@ func TestHandleCreateToken_MissingPolicy(t *testing.T) {
 func TestHandleListRequests_MissingKeyPubkey(t *testing.T) {
 	h, _ := testHandler(t)
 
+	// With no key_pubkey the endpoint now scopes to the authenticated user's own
+	// keys (so the signer UI's bare /requests poll works instead of 400). With no
+	// session either, that's unauthorized — not a bad request.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/requests", nil)
 	rr := httptest.NewRecorder()
 
 	h.handleRequests(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Errorf("handleListRequests() status = %d, want %d", rr.Code, http.StatusBadRequest)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("handleListRequests() status = %d, want %d", rr.Code, http.StatusUnauthorized)
 	}
 }
 
