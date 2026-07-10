@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -75,6 +76,39 @@ func NewClient(cfg *Config) (*Client, error) {
 	}, nil
 }
 
+// do issues the request and retries ONCE on a timeout. A single transient Vault
+// slow moment (OpenBao hiccup) should not fail an interactive login: the fail-fast
+// per-request timeout is deliberately short (5s), so without a retry a brief blip
+// becomes a user-visible failure (observed 2026-07-09: one login hit a ~30s Vault
+// slowness and got context.DeadlineExceeded). All Vault endpoints used here
+// (transit encrypt/decrypt, kv, policy, userpass) are idempotent, so re-sending a
+// timed-out request is safe. Worst case is 2×timeout; non-timeout errors (4xx/5xx,
+// connection refused) are returned immediately without a retry.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	resp, err := c.httpClient.Do(req)
+	if err == nil || !isTimeout(err) {
+		return resp, err
+	}
+	slog.Warn("vault request timed out, retrying once", "method", req.Method, "path", req.URL.Path)
+	retry := req.Clone(req.Context())
+	if req.GetBody != nil {
+		if body, berr := req.GetBody(); berr == nil {
+			retry.Body = body
+		}
+	}
+	return c.httpClient.Do(retry)
+}
+
+// isTimeout reports whether err is a request timeout (context deadline or a
+// net.Error timeout), i.e. safe-to-retry transient slowness.
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 // StoreKey stores an encrypted key in Vault
 func (c *Client) StoreKey(ctx context.Context, keyID string, data map[string]interface{}) error {
 	start := time.Now()
@@ -101,7 +135,7 @@ func (c *Client) StoreKey(ctx context.Context, keyID string, data map[string]int
 	req.Header.Set("X-Vault-Token", c.token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("failed to store key: %w", err)
 	}
@@ -131,7 +165,7 @@ func (c *Client) GetKey(ctx context.Context, keyID string) (map[string]interface
 
 	req.Header.Set("X-Vault-Token", c.token)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get key: %w", err)
 	}
@@ -175,7 +209,7 @@ func (c *Client) DeleteKey(ctx context.Context, keyID string) error {
 
 	req.Header.Set("X-Vault-Token", c.token)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("failed to delete key: %w", err)
 	}
@@ -205,7 +239,7 @@ func (c *Client) ListKeys(ctx context.Context) ([]string, error) {
 
 	req.Header.Set("X-Vault-Token", c.token)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list keys: %w", err)
 	}
@@ -240,7 +274,7 @@ func (c *Client) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("vault not reachable: %w", err)
 	}
@@ -286,7 +320,7 @@ func (c *Client) TransitEncrypt(ctx context.Context, keyName, plaintext string) 
 	req.Header.Set("X-Vault-Token", c.token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to encrypt: %w", err)
 	}
@@ -336,7 +370,7 @@ func (c *Client) TransitDecrypt(ctx context.Context, keyName, ciphertext string)
 	req.Header.Set("X-Vault-Token", c.token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to decrypt: %w", err)
 	}
@@ -386,7 +420,7 @@ func (c *Client) TransitDecryptWithToken(ctx context.Context, token, keyName, ci
 	req.Header.Set("X-Vault-Token", token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to decrypt: %w", err)
 	}
@@ -436,7 +470,7 @@ func (c *Client) TransitEncryptWithToken(ctx context.Context, token, keyName, pl
 	req.Header.Set("X-Vault-Token", token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to encrypt: %w", err)
 	}
@@ -483,7 +517,7 @@ func (c *Client) TransitRotateKey(ctx context.Context, keyName string) error {
 
 	req.Header.Set("X-Vault-Token", c.token)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("failed to rotate transit key: %w", err)
 	}
@@ -536,7 +570,7 @@ func (c *Client) TransitRewrapWithToken(ctx context.Context, token, keyName, cip
 	req.Header.Set("X-Vault-Token", token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to rewrap: %w", err)
 	}
@@ -582,7 +616,7 @@ func (c *Client) CreateTransitKey(ctx context.Context, keyName string) error {
 	req.Header.Set("X-Vault-Token", c.token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("failed to create transit key: %w", err)
 	}
@@ -621,7 +655,7 @@ func (c *Client) CreateUserpassAccount(ctx context.Context, username, password s
 	req.Header.Set("X-Vault-Token", c.token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("failed to create userpass account: %w", err)
 	}
@@ -656,7 +690,7 @@ func (c *Client) UpdateUserpassPassword(ctx context.Context, username, password 
 	req.Header.Set("X-Vault-Token", c.token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("failed to update password: %w", err)
 	}
@@ -690,7 +724,7 @@ func (c *Client) AuthenticateUserpass(ctx context.Context, username, password st
 
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to authenticate: %w", err)
 	}
@@ -755,7 +789,7 @@ func (c *Client) RevokeToken(ctx context.Context, token string) error {
 	req.Header.Set("X-Vault-Token", c.token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("failed to revoke token: %w", err)
 	}
@@ -790,7 +824,7 @@ func (c *Client) CreatePolicy(ctx context.Context, name, policy string) error {
 	req.Header.Set("X-Vault-Token", c.token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("failed to create policy: %w", err)
 	}
@@ -877,7 +911,7 @@ func (c *Client) RenewSelf(ctx context.Context) (int, error) {
 	req.Header.Set("X-Vault-Token", c.token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return 0, fmt.Errorf("token renew request failed: %w", err)
 	}
