@@ -456,6 +456,18 @@ func (s *Signer) UnregisterKey(pubkey string) {
 	s.refreshSubscription()
 }
 
+// IsKeyLoaded reports whether the given signing key's private material is
+// currently in the runtime map. Vault-encrypted keys are NOT loaded at startup
+// and are wiped on pod restart, so a cookie-SSO nostrconnect (no fresh password
+// login) can hit a key that isn't loaded — callers use this to trigger an
+// on-demand load before signing.
+func (s *Signer) IsKeyLoaded(pubkey string) bool {
+	s.keysLock.RLock()
+	defer s.keysLock.RUnlock()
+	_, ok := s.keys[pubkey]
+	return ok
+}
+
 // RegisterFrostKey registers a FROST threshold signing key (runtime, not persisted).
 // Also refreshes the relay subscription to include the new key.
 func (s *Signer) RegisterFrostKey(pubkey, frostKeyID string) {

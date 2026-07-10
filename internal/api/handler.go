@@ -2444,6 +2444,45 @@ func (h *Handler) getUserVaultEncryptor(ctx context.Context, claims *auth.JWTCla
 
 // loadUserVaultKeys loads and registers a user's Vault-encrypted keys into the signer runtime.
 // This is called when a user logs in to make their keys available for NIP-46 signing.
+// ensureNostrConnectKeyLoaded loads a single Vault-encrypted signing key into
+// the signer runtime ON DEMAND when it isn't already present. This is the
+// durable fix for cookie-SSO and post-restart nostrconnect: Vault-encrypted
+// keys aren't loaded at startup and are wiped on pod restart, and the cookie
+// SSO path has no password login to trigger a load — so SendNostrConnectResponse
+// would hit "key not found" and the client would time out. Uses the
+// authenticated user's session-stored Vault token to decrypt just this key.
+// Returns true if the key is (now) loaded. No-op for already-loaded or
+// non-Vault keys.
+func (h *Handler) ensureNostrConnectKeyLoaded(ctx context.Context, sessionID, userID string, key *storage.Key) bool {
+	if h.signer.IsKeyLoaded(key.Pubkey) {
+		return true
+	}
+	if h.vaultClient == nil || !crypto.IsVaultEncrypted(key.EncryptedNsec) {
+		return h.signer.IsKeyLoaded(key.Pubkey)
+	}
+	if sessionID == "" {
+		return false
+	}
+	session, err := h.storage.GetUserSession(ctx, sessionID)
+	if err != nil || session == nil || session.VaultToken == "" {
+		slog.Warn("on-demand key load: no usable session Vault token", "user_id", userID, "error", err)
+		return false
+	}
+	vaultEncryptor := crypto.NewVaultEncryptor(h.vaultClient, userID, session.VaultToken)
+	privateKey, ok := decryptAndVerifyVaultKey(ctx, vaultEncryptor, key)
+	if !ok {
+		slog.Warn("on-demand key load: decrypt failed", "user_id", userID, "pubkey", key.Pubkey[:16]+"...")
+		return false
+	}
+	if key.IsProxy() {
+		h.signer.RegisterProxyKey(key.Pubkey, privateKey, key.BunkerURI)
+	} else {
+		h.signer.RegisterKey(key.Pubkey, privateKey)
+	}
+	slog.Info("on-demand loaded vault key for nostrconnect", "user_id", userID, "pubkey", key.Pubkey[:16]+"...")
+	return true
+}
+
 func (h *Handler) loadUserVaultKeys(ctx context.Context, userID, vaultToken string) {
 	if h.vaultClient == nil || vaultToken == "" {
 		return
@@ -2887,6 +2926,10 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Load the signing key on-demand if it isn't already in the runtime map, so
+	// SendNostrConnectResponse can sign + publish the ack (else the client times out).
+	h.ensureNostrConnectKeyLoaded(r.Context(), claims.SessionID, claims.UserID, key)
+
 	if err := h.approveNostrConnect(r.Context(), key, clientPubkey, relay, secret, appName, appURL, appImage); err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
 		return
@@ -3049,6 +3092,10 @@ func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Reque
 		h.errorResponse(w, http.StatusForbidden, "key does not belong to the authenticated user")
 		return
 	}
+
+	// Load the signing key on-demand (cookie-SSO / post-restart have no password
+	// login to have loaded it), so the approval below can actually sign+publish.
+	h.ensureNostrConnectKeyLoaded(r.Context(), claims.SessionID, claims.UserID, key)
 
 	// Check consent: does this user already trust this app?
 	hasConsent, err := h.storage.HasAppConsent(r.Context(), claims.UserID, clientPubkey)
