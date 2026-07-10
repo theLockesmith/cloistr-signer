@@ -48,14 +48,23 @@ func NewClient(cfg *Config) (*Client, error) {
 	// calls; a 30s timeout × multiple calls stacked into >50s hangs → browser
 	// NetworkError). Bound connect, TLS handshake, AND total request time so an
 	// unreachable-but-healthy Vault surfaces as a prompt error, not a hang.
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 5 * time.Second
+	// Total per-request budget must accommodate a slow-but-healthy Vault userpass
+	// auth (server-side bcrypt, ~5s). A 5s cap sat right on that latency and got
+	// tripped intermittently, and do()'s retry then DOUBLED it → 10s+ logins and
+	// gateway 502s. Give the whole request 12s. Connect + TLS handshake stay short
+	// so an UNREACHABLE Vault still fails fast (a few seconds), not a 12s hang.
+	reqTimeout := cfg.Timeout
+	if reqTimeout <= 0 {
+		reqTimeout = 12 * time.Second
+	}
+	connectTimeout := 3 * time.Second
+	if reqTimeout < connectTimeout {
+		connectTimeout = reqTimeout
 	}
 
 	transport := &http.Transport{
-		DialContext:         (&net.Dialer{Timeout: timeout}).DialContext,
-		TLSHandshakeTimeout: timeout,
+		DialContext:         (&net.Dialer{Timeout: connectTimeout}).DialContext,
+		TLSHandshakeTimeout: connectTimeout,
 	}
 	if cfg.SkipVerify {
 		transport.TLSClientConfig = &tls.Config{
@@ -64,7 +73,7 @@ func NewClient(cfg *Config) (*Client, error) {
 	}
 
 	httpClient := &http.Client{
-		Timeout:   timeout,
+		Timeout:   reqTimeout,
 		Transport: transport,
 	}
 
