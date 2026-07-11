@@ -56,6 +56,22 @@ func (a *frostEncryptorAdapter) Decrypt(ciphertext []byte) ([]byte, error) {
 	return a.enc.DecryptBytes(ciphertext)
 }
 
+// isVaultForbidden reports whether an error from the Vault client came from a
+// 403 permission-denied response. Used by the login handler to distinguish
+// "user record missing → try to provision" (retriable) from "user is
+// locked-out or ACL-denied" (not retriable — provisioning cannot fix it and
+// costs 3-5s of raft-write latency on the current cluster). Vault surfaces
+// these as errors of the form: `authentication failed (status 403): ...` or
+// `vault error (status 403): ...`, formatted by the client wrappers in
+// internal/vault/vault.go. String match is sufficient — the wrapper is the
+// only source of that text.
+func isVaultForbidden(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "status 403")
+}
+
 // NewHandler creates a new API handler
 func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage, encryptor *crypto.Encryptor, vaultClient *vault.Client) *Handler {
 	// Create FROST components if encryptor is available
@@ -2022,28 +2038,43 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	var vaultToken string
 	if h.vaultClient != nil && h.config.Vault.Enabled {
 		// The Vault userpass token is only needed for later key operations, not for
-		// the login session itself. Cap this whole step at 5s and treat any failure
-		// as non-fatal, so a slow/unreachable Vault can never block (or 502) login —
+		// the login session itself. Cap this whole step and treat any failure as
+		// non-fatal, so a slow/unreachable Vault can never block (or 502) login —
 		// the session is issued regardless and the token is re-fetched on first key op.
-		vaultCtx, vaultCancel := context.WithTimeout(r.Context(), 5*time.Second)
+		//
+		// 15s (raised from 5s 2026-07-11): userpass login on the current OpenBao
+		// cluster does 1-9s raft-consensus writes on the SUCCESS path (auth token
+		// creation), so 5s tripped intermittently and forced an unnecessary
+		// provision fallback that made things worse. 15s covers observed max.
+		vaultCtx, vaultCancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer vaultCancel()
 		// Authenticate to Vault using user's credentials (userID is the Vault username)
 		vaultAuth, err := h.vaultClient.AuthenticateUserpass(vaultCtx, user.ID, req.Password)
 		if err != nil {
-			// User may exist in signer DB but not have Vault userpass account
-			// (e.g., migrated from pre-Vault or registration failed to provision)
-			// Try to provision and retry auth
-			slog.Info("vault auth failed, attempting to provision userpass account", "user_id", user.ID, "error", err)
-			if provisionErr := h.vaultClient.ProvisionUser(vaultCtx, user.ID, user.Username, req.Password); provisionErr != nil {
-				slog.Warn("failed to provision vault user on login", "error", provisionErr, "user_id", user.ID)
+			// A 403 permission denied means Vault's user_lockout is active OR the
+			// service token can't hit this endpoint — retrying via provision won't
+			// clear either (2026-07-11 investigation: locked-user provision cascade
+			// added 3-5s of raft writes with zero recovery value). Only fall through
+			// to the missing-user heal path for other errors (e.g. 400 = user record
+			// missing or password drift, which CreateUserpassAccount can upsert).
+			if isVaultForbidden(err) {
+				slog.Info("vault auth returned 403; skipping provision fallback (locked/denied, not missing)", "user_id", user.ID)
 			} else {
-				// Retry auth after provisioning
-				vaultAuth, err = h.vaultClient.AuthenticateUserpass(vaultCtx, user.ID, req.Password)
-				if err != nil {
-					slog.Warn("vault auth still failed after provisioning", "error", err, "user_id", user.ID)
+				// User may exist in signer DB but not have Vault userpass account
+				// (e.g., migrated from pre-Vault or registration failed to provision)
+				// Try to provision and retry auth
+				slog.Info("vault auth failed, attempting to provision userpass account", "user_id", user.ID, "error", err)
+				if provisionErr := h.vaultClient.ProvisionUser(vaultCtx, user.ID, user.Username, req.Password); provisionErr != nil {
+					slog.Warn("failed to provision vault user on login", "error", provisionErr, "user_id", user.ID)
 				} else {
-					vaultToken = vaultAuth.Token
-					slog.Info("vault auth successful after provisioning", "user_id", user.ID)
+					// Retry auth after provisioning
+					vaultAuth, err = h.vaultClient.AuthenticateUserpass(vaultCtx, user.ID, req.Password)
+					if err != nil {
+						slog.Warn("vault auth still failed after provisioning", "error", err, "user_id", user.ID)
+					} else {
+						vaultToken = vaultAuth.Token
+						slog.Info("vault auth successful after provisioning", "user_id", user.ID)
+					}
 				}
 			}
 		} else {
