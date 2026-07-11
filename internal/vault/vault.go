@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptrace"
+	"os"
 	"strings"
 	"time"
 
@@ -94,7 +96,9 @@ func NewClient(cfg *Config) (*Client, error) {
 // timed-out request is safe. Worst case is 2×timeout; non-timeout errors (4xx/5xx,
 // connection refused) are returned immediately without a retry.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
+	req, timings := maybeTraceRequest(req)
 	resp, err := c.httpClient.Do(req)
+	timings.log(req, err)
 	if err == nil || !isTimeout(err) {
 		return resp, err
 	}
@@ -105,7 +109,92 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 			retry.Body = body
 		}
 	}
-	return c.httpClient.Do(retry)
+	retry, retryTimings := maybeTraceRequest(retry)
+	resp, err = c.httpClient.Do(retry)
+	retryTimings.log(retry, err)
+	return resp, err
+}
+
+// vaultHttpTrace is toggled by env VAULT_HTTPTRACE=1. When on, do() attaches an
+// httptrace.ClientTrace to every Vault request and logs per-phase durations
+// (DNS, dial, TLS handshake, wrote-request, first-response-byte). Diagnostic
+// tool for the 2026-07-10 "5s Go client timeout while wget sees 200ms" issue.
+// Off by default because it fires on every Vault call and would spam logs.
+var vaultHttpTrace = os.Getenv("VAULT_HTTPTRACE") == "1"
+
+// phaseTimings records monotonic timestamps for the httptrace phases. nil when
+// tracing is disabled — the log() method is nil-safe so hot paths pay nothing.
+type phaseTimings struct {
+	start          time.Time
+	dnsStart       time.Time
+	dnsDone        time.Time
+	connectStart   time.Time
+	connectDone    time.Time
+	tlsStart       time.Time
+	tlsDone        time.Time
+	wroteRequest   time.Time
+	firstByte      time.Time
+	connReused     bool
+	connWasIdle    bool
+	remoteAddr     string
+}
+
+// maybeTraceRequest returns the request unchanged (and a nil timings) when
+// VAULT_HTTPTRACE isn't set; otherwise it clones the request onto a context
+// carrying an httptrace.ClientTrace that fills a fresh phaseTimings.
+func maybeTraceRequest(req *http.Request) (*http.Request, *phaseTimings) {
+	if !vaultHttpTrace {
+		return req, nil
+	}
+	t := &phaseTimings{start: time.Now()}
+	trace := &httptrace.ClientTrace{
+		DNSStart:             func(httptrace.DNSStartInfo) { t.dnsStart = time.Now() },
+		DNSDone:              func(httptrace.DNSDoneInfo) { t.dnsDone = time.Now() },
+		ConnectStart:         func(string, string) { t.connectStart = time.Now() },
+		ConnectDone:          func(string, string, error) { t.connectDone = time.Now() },
+		TLSHandshakeStart:    func() { t.tlsStart = time.Now() },
+		TLSHandshakeDone:     func(tls.ConnectionState, error) { t.tlsDone = time.Now() },
+		WroteRequest:         func(httptrace.WroteRequestInfo) { t.wroteRequest = time.Now() },
+		GotFirstResponseByte: func() { t.firstByte = time.Now() },
+		GotConn: func(info httptrace.GotConnInfo) {
+			t.connReused = info.Reused
+			t.connWasIdle = info.WasIdle
+			if info.Conn != nil {
+				t.remoteAddr = info.Conn.RemoteAddr().String()
+			}
+		},
+	}
+	return req.WithContext(httptrace.WithClientTrace(req.Context(), trace)), t
+}
+
+// log emits one INFO line summarizing the per-phase durations. Any phase that
+// didn't fire (e.g. TLS on a reused conn) reports 0 so operators see which
+// phases were skipped.
+func (t *phaseTimings) log(req *http.Request, reqErr error) {
+	if t == nil {
+		return
+	}
+	dur := func(a, b time.Time) time.Duration {
+		if a.IsZero() || b.IsZero() {
+			return 0
+		}
+		return b.Sub(a)
+	}
+	total := time.Since(t.start)
+	slog.Info("vault httptrace",
+		"method", req.Method,
+		"path", req.URL.Path,
+		"remote", t.remoteAddr,
+		"conn_reused", t.connReused,
+		"conn_was_idle", t.connWasIdle,
+		"dns_ms", dur(t.dnsStart, t.dnsDone).Milliseconds(),
+		"dial_ms", dur(t.connectStart, t.connectDone).Milliseconds(),
+		"tls_ms", dur(t.tlsStart, t.tlsDone).Milliseconds(),
+		"wrote_request_at_ms", dur(t.start, t.wroteRequest).Milliseconds(),
+		"first_byte_at_ms", dur(t.start, t.firstByte).Milliseconds(),
+		"total_ms", total.Milliseconds(),
+		"err", reqErr,
+	)
 }
 
 // isTimeout reports whether err is a request timeout (context deadline or a
