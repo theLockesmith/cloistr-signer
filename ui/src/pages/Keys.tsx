@@ -12,10 +12,12 @@ import {
   type CreatedFrostKey,
 } from '../lib/frost';
 import { listShareIds, isShareStorageUnlocked } from '../lib/frostStorage';
+import { useSignerAuth } from '../hooks/useSignerAuth';
 import type { Key, CreateKeyRequest } from '../types/api';
 
 export function KeysPage() {
   const queryClient = useQueryClient();
+  const { requireFullAuth } = useSignerAuth();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [keyToDelete, setKeyToDelete] = useState<Key | null>(null);
   const [frostResult, setFrostResult] = useState<{ pubkey: string } | null>(null);
@@ -253,7 +255,11 @@ export function KeysPage() {
           onCancel={() => {
             if (!deleteMutation.isPending) setKeyToDelete(null);
           }}
-          onConfirm={() => deleteMutation.mutate(keyToDelete.id)}
+          onConfirm={async () => {
+            // Option B step-up: deleting a key is destructive, so a view-only
+            // shared session must re-auth (password/OTP/passkey) first.
+            if (await requireFullAuth()) deleteMutation.mutate(keyToDelete.id);
+          }}
           loading={deleteMutation.isPending}
           error={deleteMutation.error?.message}
         />

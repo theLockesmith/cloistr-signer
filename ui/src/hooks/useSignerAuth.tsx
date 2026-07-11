@@ -17,6 +17,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
   useMemo,
   type ReactNode,
 } from 'react';
@@ -64,6 +65,15 @@ export interface SignerAuthContextValue extends SignerAuthState {
   loginModalOpen: boolean;
   /** Hydrate auth state from an externally-obtained session (e.g. LoginModal mode=session) */
   loginWithSession: (data: { token: string; expiresAt: string; user: unknown; password: string; username: string }) => Promise<void>;
+  /**
+   * Step-up gate for sensitive/destructive actions. Resolves true immediately
+   * when already fully authenticated (local JWT + FROST unlocked). In a
+   * view-only shared-session (sessionMode), opens the login modal to re-auth
+   * (password/OTP/passkey per the login flow) and resolves true once full auth
+   * is established, or false if the user cancels. Callers must gate destructive
+   * ops: `if (!(await requireFullAuth())) return;`
+   */
+  requireFullAuth: () => Promise<boolean>;
 }
 
 // ============================================
@@ -100,6 +110,8 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
   // cookie (no local JWT + no FROST unlock). Grants VIEWING; destructive key
   // operations must step up (password/OTP) to unlock FROST — see Option B.
   const [sessionMode, setSessionMode] = useState(false);
+  // Resolver for an in-flight step-up (requireFullAuth) awaiting the login modal.
+  const stepUpResolverRef = useRef<((ok: boolean) => void) | null>(null);
 
   // Nostr auth from SharedAuthProvider
   const { authState: nostrAuth } = useNostrAuth();
@@ -204,7 +216,32 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
   const hideLoginModal = useCallback(() => {
     setLoginModalOpen(false);
     setError(null);
+    // If a step-up was awaiting this modal and it's dismissed without full
+    // auth, resolve it as cancelled.
+    if (stepUpResolverRef.current) {
+      stepUpResolverRef.current(false);
+      stepUpResolverRef.current = null;
+    }
   }, []);
+
+  // Step-up gate. Full auth = local JWT present AND not view-only sessionMode
+  // (FROST unlocked). Otherwise open the login modal and await completion.
+  const requireFullAuth = useCallback(async (): Promise<boolean> => {
+    if (token && !sessionMode) return true;
+    setLoginModalOpen(true);
+    return new Promise<boolean>((resolve) => {
+      stepUpResolverRef.current = resolve;
+    });
+  }, [token, sessionMode]);
+
+  // Resolve an in-flight step-up once full auth is established (login sets a
+  // JWT and clears sessionMode).
+  useEffect(() => {
+    if (stepUpResolverRef.current && token && !sessionMode) {
+      stepUpResolverRef.current(true);
+      stepUpResolverRef.current = null;
+    }
+  }, [token, sessionMode]);
 
   const loginWithSession = useCallback(async (data: {
     token: string;
@@ -310,10 +347,12 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     hideLoginModal,
     loginModalOpen,
     loginWithSession,
+    requireFullAuth,
   }), [
     user,
     token,
     sessionMode,
+    requireFullAuth,
     loading,
     error,
     loginWithPassword,
