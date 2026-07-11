@@ -67,6 +67,15 @@ func NewClient(cfg *Config) (*Client, error) {
 	transport := &http.Transport{
 		DialContext:         (&net.Dialer{Timeout: connectTimeout}).DialContext,
 		TLSHandshakeTimeout: connectTimeout,
+		// Force HTTP/1.1 on the Vault client. httptrace evidence 2026-07-11
+		// showed every POST /v1/auth/userpass/login/* wrote the request in
+		// ~15ms and then hung 5s to context deadline with first_byte_at_ms=0,
+		// while wget (HTTP/1.1) from the same pod hit the same endpoint in
+		// ~200ms. Go's default Transport auto-upgrades to HTTP/2 when the
+		// server offers h2 via ALPN; OpenBao's HTTP/2 handler stalls on this
+		// path. Passing an empty TLSNextProto map disables that upgrade for
+		// THIS transport only (relay/Nostr paths are unaffected).
+		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
 	if cfg.SkipVerify {
 		transport.TLSClientConfig = &tls.Config{
