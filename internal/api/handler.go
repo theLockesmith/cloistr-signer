@@ -72,6 +72,88 @@ func isVaultForbidden(err error) bool {
 	return strings.Contains(err.Error(), "status 403")
 }
 
+// getUserSessionAwaitingVaultToken fetches a session, polling briefly if its
+// VaultToken is still empty. Used by the on-demand key-load path to bridge
+// the race between async-login's response and its background Vault userpass
+// call finishing. Poll interval 200ms, max ~15s (matches the observed Vault
+// userpass upper bound). Returns as soon as VaultToken is non-empty, or when
+// the timeout is exceeded / ctx is cancelled — the caller distinguishes
+// "still empty after wait" from "session missing" via session.VaultToken.
+func (h *Handler) getUserSessionAwaitingVaultToken(ctx context.Context, sessionID string) (*storage.UserSession, error) {
+	const (
+		pollInterval = 200 * time.Millisecond
+		maxWait      = 15 * time.Second
+	)
+	deadline := time.Now().Add(maxWait)
+	for {
+		session, err := h.storage.GetUserSession(ctx, sessionID)
+		if err != nil || session == nil {
+			return session, err
+		}
+		if session.VaultToken != "" || time.Now().After(deadline) {
+			return session, nil
+		}
+		select {
+		case <-ctx.Done():
+			return session, ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// populateVaultTokenAsync runs off the login critical path. It authenticates
+// the user to Vault userpass, applies the same "provision on drift, skip on
+// 403" logic the sync path used, and writes the resulting token to the
+// existing session record. Non-fatal: any failure just leaves the session's
+// VaultToken empty and lets on-demand key-load surface the problem when the
+// user actually tries to sign.
+//
+// 30s ceiling: 15s AuthenticateUserpass + optional 15s ProvisionUser + retry.
+// Vault userpass raft-consensus writes on the current cluster peak around 9s
+// on success; the ceiling is a runaway backstop, not the expected duration.
+func (h *Handler) populateVaultTokenAsync(sessionID, userID, username, password string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var vaultToken string
+	vaultAuth, err := h.vaultClient.AuthenticateUserpass(ctx, userID, password)
+	if err != nil {
+		if isVaultForbidden(err) {
+			slog.Info("async vault auth returned 403; skipping provision fallback", "user_id", userID)
+			return
+		}
+		slog.Info("async vault auth failed, attempting to provision", "user_id", userID, "error", err)
+		if provisionErr := h.vaultClient.ProvisionUser(ctx, userID, username, password); provisionErr != nil {
+			slog.Warn("async provision vault user failed", "error", provisionErr, "user_id", userID)
+			return
+		}
+		vaultAuth, err = h.vaultClient.AuthenticateUserpass(ctx, userID, password)
+		if err != nil {
+			slog.Warn("async vault auth still failed after provisioning", "error", err, "user_id", userID)
+			return
+		}
+		slog.Info("async vault auth successful after provisioning", "user_id", userID)
+	} else {
+		slog.Debug("async vault authentication successful", "user_id", userID, "lease_duration", vaultAuth.LeaseDuration)
+	}
+	vaultToken = vaultAuth.Token
+
+	// Persist the token on the session that the login response already issued.
+	// If the session was deleted (user logged out mid-goroutine) or expired,
+	// UpdateUserSessionVaultToken returns ErrSessionNotFound — non-fatal.
+	if err := h.storage.UpdateUserSessionVaultToken(ctx, sessionID, vaultToken); err != nil {
+		slog.Warn("async vault token persist failed", "error", err, "session_id", sessionID)
+		return
+	}
+
+	// Eager pre-load of the user's Vault-encrypted signing keys into the
+	// signer runtime. Uses context.Background() so a subsequent request
+	// context cancellation can't wipe the load partway through. Keys still
+	// lazy-load on demand if this hasn't finished before the first sign
+	// request arrives.
+	go h.loadUserVaultKeys(context.Background(), userID, vaultToken)
+}
+
 // NewHandler creates a new API handler
 func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage, encryptor *crypto.Encryptor, vaultClient *vault.Client) *Handler {
 	// Create FROST components if encryptor is available
@@ -2034,55 +2116,6 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// Reset failed login attempts
 	h.storage.ResetFailedLogins(r.Context(), user.ID)
 
-	// Authenticate to Vault to get user's token for key operations
-	var vaultToken string
-	if h.vaultClient != nil && h.config.Vault.Enabled {
-		// The Vault userpass token is only needed for later key operations, not for
-		// the login session itself. Cap this whole step and treat any failure as
-		// non-fatal, so a slow/unreachable Vault can never block (or 502) login —
-		// the session is issued regardless and the token is re-fetched on first key op.
-		//
-		// 15s (raised from 5s 2026-07-11): userpass login on the current OpenBao
-		// cluster does 1-9s raft-consensus writes on the SUCCESS path (auth token
-		// creation), so 5s tripped intermittently and forced an unnecessary
-		// provision fallback that made things worse. 15s covers observed max.
-		vaultCtx, vaultCancel := context.WithTimeout(r.Context(), 15*time.Second)
-		defer vaultCancel()
-		// Authenticate to Vault using user's credentials (userID is the Vault username)
-		vaultAuth, err := h.vaultClient.AuthenticateUserpass(vaultCtx, user.ID, req.Password)
-		if err != nil {
-			// A 403 permission denied means Vault's user_lockout is active OR the
-			// service token can't hit this endpoint — retrying via provision won't
-			// clear either (2026-07-11 investigation: locked-user provision cascade
-			// added 3-5s of raft writes with zero recovery value). Only fall through
-			// to the missing-user heal path for other errors (e.g. 400 = user record
-			// missing or password drift, which CreateUserpassAccount can upsert).
-			if isVaultForbidden(err) {
-				slog.Info("vault auth returned 403; skipping provision fallback (locked/denied, not missing)", "user_id", user.ID)
-			} else {
-				// User may exist in signer DB but not have Vault userpass account
-				// (e.g., migrated from pre-Vault or registration failed to provision)
-				// Try to provision and retry auth
-				slog.Info("vault auth failed, attempting to provision userpass account", "user_id", user.ID, "error", err)
-				if provisionErr := h.vaultClient.ProvisionUser(vaultCtx, user.ID, user.Username, req.Password); provisionErr != nil {
-					slog.Warn("failed to provision vault user on login", "error", provisionErr, "user_id", user.ID)
-				} else {
-					// Retry auth after provisioning
-					vaultAuth, err = h.vaultClient.AuthenticateUserpass(vaultCtx, user.ID, req.Password)
-					if err != nil {
-						slog.Warn("vault auth still failed after provisioning", "error", err, "user_id", user.ID)
-					} else {
-						vaultToken = vaultAuth.Token
-						slog.Info("vault auth successful after provisioning", "user_id", user.ID)
-					}
-				}
-			}
-		} else {
-			vaultToken = vaultAuth.Token
-			slog.Debug("vault authentication successful", "user_id", user.ID, "lease_duration", vaultAuth.LeaseDuration)
-		}
-	}
-
 	// Generate session ID first (needed for JWT)
 	sessionID, _ := auth.GenerateSessionID()
 
@@ -2093,7 +2126,16 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create session (with Vault token if available)
+	// Create session WITHOUT the Vault token — it will be populated by the
+	// async goroutine below. Async login (2026-07-11 unified-auth §10.4 revisit):
+	// userpass login on the OpenBao cluster takes 1-9s (raft-consensus writes
+	// on the success path), which made synchronous logins user-visibly slow
+	// and edge-gateway-borderline. The Vault token is only used for later
+	// key operations; on-demand key-load (57878d4) already handles a
+	// missing-token window on the NIP-46 sign path, and ensureNostrConnectKeyLoaded
+	// now does a bounded wait so a key request that arrives WHILE the goroutine
+	// is still running does not silently fail.
+	//
 	// Privacy-architecture §3.6: we do not retain per-session or per-login IPs.
 	// IPAddress and LastLoginIP intentionally left empty; if/when we need
 	// session-location UX, it'll be derived from short-window encrypted
@@ -2102,12 +2144,20 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		ID:         sessionID,
 		UserID:     user.ID,
 		Token:      token[:16], // Store prefix for revocation check
-		VaultToken: vaultToken, // Store Vault token for key operations
+		VaultToken: "",         // Filled by populateVaultTokenAsync
 		UserAgent:  r.UserAgent(),
 		ExpiresAt:  expiresAt,
 		CreatedAt:  time.Now(),
 	}
 	h.storage.CreateUserSession(r.Context(), session)
+
+	// Kick off Vault userpass auth in the background. Uses context.Background()
+	// (not r.Context()) because r.Context() is cancelled when the response is
+	// sent; we need the goroutine to keep running independently. Password
+	// captured in closure — same lifetime as the sync-flow local var was.
+	if h.vaultClient != nil && h.config.Vault.Enabled {
+		go h.populateVaultTokenAsync(sessionID, user.ID, user.Username, req.Password)
+	}
 
 	// Update last login. LastLoginIP intentionally not set (see above).
 	now := time.Now()
@@ -2135,12 +2185,10 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
-	// Load user's Vault-encrypted keys into signer runtime asynchronously.
-	// Uses context.Background() so the load is not canceled when the HTTP
-	// request completes. Keys lazy-load on first signing request anyway.
-	if vaultToken != "" {
-		go h.loadUserVaultKeys(context.Background(), user.ID, vaultToken)
-	}
+	// The eager Vault-key pre-load that used to live here is now the tail of
+	// populateVaultTokenAsync — it needs the async-fetched token, and running
+	// it there keeps the login response fast. Keys still lazy-load on demand
+	// via ensureNostrConnectKeyLoaded if the pre-load hasn't finished yet.
 }
 
 func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
@@ -2494,7 +2542,13 @@ func (h *Handler) ensureNostrConnectKeyLoaded(ctx context.Context, sessionID, us
 	if sessionID == "" {
 		return false
 	}
-	session, err := h.storage.GetUserSession(ctx, sessionID)
+	// Wait up to ~15s for the async login goroutine (populateVaultTokenAsync)
+	// to populate the session's VaultToken. This handles the race between the
+	// login response and a very-fast follow-up sign request. In steady state
+	// the token is already there and the loop exits on the first read;
+	// polling only matters when we caught the sub-second window between login
+	// return and Vault userpass completion.
+	session, err := h.getUserSessionAwaitingVaultToken(ctx, sessionID)
 	if err != nil || session == nil || session.VaultToken == "" {
 		slog.Warn("on-demand key load: no usable session Vault token", "user_id", userID, "error", err)
 		return false

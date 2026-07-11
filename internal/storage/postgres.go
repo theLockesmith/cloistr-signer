@@ -1572,6 +1572,22 @@ func (ps *PostgresStorage) UpdateUserSessionActivity(ctx context.Context, id str
 	return nil
 }
 
+func (ps *PostgresStorage) UpdateUserSessionVaultToken(ctx context.Context, id, vaultToken string) error {
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE signer_web_sessions SET vault_token = $1 WHERE id = $2 AND expires_at > NOW()`, vaultToken, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrSessionNotFound
+	}
+	return nil
+}
+
 func (ps *PostgresStorage) DeleteUserSession(ctx context.Context, id string) error {
 	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_web_sessions WHERE id = $1`, id)
 	return err

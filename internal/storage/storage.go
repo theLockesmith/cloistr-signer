@@ -434,6 +434,12 @@ type Storage interface {
 	GetUserSession(ctx context.Context, id string) (*UserSession, error)
 	ListUserSessions(ctx context.Context, userID string) ([]*UserSession, error)
 	UpdateUserSessionActivity(ctx context.Context, id string) error
+	// UpdateUserSessionVaultToken populates the Vault token on an existing
+	// session after an async login completes. Called from the login handler's
+	// background goroutine (unified-auth-design async login) — the login
+	// response is issued before Vault userpass finishes, so the session starts
+	// with an empty VaultToken and this method fills it in when Vault answers.
+	UpdateUserSessionVaultToken(ctx context.Context, id, vaultToken string) error
 	DeleteUserSession(ctx context.Context, id string) error
 	DeleteUserSessions(ctx context.Context, userID string) error
 	CleanExpiredUserSessions(ctx context.Context) error
@@ -1431,6 +1437,19 @@ func (m *MemoryStorage) UpdateUserSessionActivity(ctx context.Context, id string
 
 	now := time.Now()
 	session.LastActivity = &now
+	return nil
+}
+
+func (m *MemoryStorage) UpdateUserSessionVaultToken(ctx context.Context, id, vaultToken string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	session, exists := m.userSessions[id]
+	if !exists {
+		return ErrSessionNotFound
+	}
+
+	session.VaultToken = vaultToken
 	return nil
 }
 

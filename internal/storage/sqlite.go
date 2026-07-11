@@ -2304,6 +2304,12 @@ func (ss *SQLiteStorage) UpdateUserSessionActivity(ctx context.Context, id strin
 	return err
 }
 
+func (ss *SQLiteStorage) UpdateUserSessionVaultToken(ctx context.Context, id, vaultToken string) error {
+	_, err := ss.db.ExecContext(ctx, `
+		UPDATE signer_web_sessions SET vault_token = ? WHERE id = ?`, nullStr(vaultToken), id)
+	return err
+}
+
 func (ss *SQLiteStorage) CleanExpiredUserSessions(ctx context.Context) error {
 	_, err := ss.db.ExecContext(ctx, `DELETE FROM signer_web_sessions WHERE expires_at < ?`, formatTime(time.Now()))
 	return err
