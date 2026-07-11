@@ -96,6 +96,10 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [loginModalOpen, setLoginModalOpen] = useState(false);
+  // True when authenticated purely via the shared .cloistr.xyz signer session
+  // cookie (no local JWT + no FROST unlock). Grants VIEWING; destructive key
+  // operations must step up (password/OTP) to unlock FROST — see Option B.
+  const [sessionMode, setSessionMode] = useState(false);
 
   // Nostr auth from SharedAuthProvider
   const { authState: nostrAuth } = useNostrAuth();
@@ -120,6 +124,7 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     localStorage.removeItem(STORAGE_KEYS.USER);
     setToken(null);
     setUser(null);
+    setSessionMode(false);
     apiClient.setToken(null);
   }, []);
 
@@ -248,27 +253,36 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
         const storedExpiry = localStorage.getItem(STORAGE_KEYS.TOKEN_EXPIRY);
         const storedUser = localStorage.getItem(STORAGE_KEYS.USER);
 
-        if (!storedToken || !storedExpiry || !storedUser) {
-          clearAuthState();
-          return;
+        const tokenUsable =
+          storedToken && storedExpiry && storedUser && new Date() < new Date(storedExpiry);
+
+        if (tokenUsable) {
+          // Full local session (JWT + FROST unlocked earlier). Validate it.
+          apiClient.setToken(storedToken);
+          try {
+            const currentUser = await apiClient.getMe();
+            setToken(storedToken);
+            setUser(currentUser);
+            return;
+          } catch {
+            // Stored token invalid — fall through to the shared session probe.
+          }
         }
 
-        // Check if token is expired
-        const expiry = new Date(storedExpiry);
-        if (new Date() >= expiry) {
-          clearAuthState();
-          return;
-        }
-
-        // Validate token with server
-        apiClient.setToken(storedToken);
+        // No usable local JWT. Recognize the shared .cloistr.xyz signer session
+        // cookie so signer's own UI doesn't demand a fresh password when you're
+        // already signed in across the suite. getMe() rides the cookie
+        // (apiClient always sends credentials:'include'). This is VIEW-ONLY:
+        // FROST shares stay locked (no password derived), so destructive key
+        // operations must step up to re-auth (Option B) before they can run.
+        clearAuthState();
         try {
-          const currentUser = await apiClient.getMe();
-          setToken(storedToken);
-          setUser(currentUser);
+          apiClient.setToken(null);
+          const sessionUser = await apiClient.getMe();
+          setUser(sessionUser);
+          setSessionMode(true);
         } catch {
-          // Token invalid
-          clearAuthState();
+          // No shared session either — stay logged out (welcome screen).
         }
       } finally {
         setLoading(false);
@@ -290,7 +304,7 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     loginWithPassword,
     register,
     logout,
-    isAuthenticated: !!token && !!user,
+    isAuthenticated: (!!token || sessionMode) && !!user,
     clearError,
     showLoginModal,
     hideLoginModal,
@@ -299,6 +313,7 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
   }), [
     user,
     token,
+    sessionMode,
     loading,
     error,
     loginWithPassword,
