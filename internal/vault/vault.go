@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/textproto"
 	"os"
 	"strings"
 	"time"
@@ -134,18 +135,22 @@ var vaultHttpTrace = os.Getenv("VAULT_HTTPTRACE") == "1"
 // phaseTimings records monotonic timestamps for the httptrace phases. nil when
 // tracing is disabled — the log() method is nil-safe so hot paths pay nothing.
 type phaseTimings struct {
-	start          time.Time
-	dnsStart       time.Time
-	dnsDone        time.Time
-	connectStart   time.Time
-	connectDone    time.Time
-	tlsStart       time.Time
-	tlsDone        time.Time
-	wroteRequest   time.Time
-	firstByte      time.Time
-	connReused     bool
-	connWasIdle    bool
-	remoteAddr     string
+	start           time.Time
+	dnsStart        time.Time
+	dnsDone         time.Time
+	connectStart    time.Time
+	connectDone     time.Time
+	tlsStart        time.Time
+	tlsDone         time.Time
+	wroteHeaders    time.Time
+	wroteRequest    time.Time
+	got1xxResponse  time.Time
+	got1xxCode      int
+	wait100Continue time.Time
+	firstByte       time.Time
+	connReused      bool
+	connWasIdle     bool
+	remoteAddr      string
 }
 
 // maybeTraceRequest returns the request unchanged (and a nil timings) when
@@ -163,6 +168,13 @@ func maybeTraceRequest(req *http.Request) (*http.Request, *phaseTimings) {
 		ConnectDone:          func(string, string, error) { t.connectDone = time.Now() },
 		TLSHandshakeStart:    func() { t.tlsStart = time.Now() },
 		TLSHandshakeDone:     func(tls.ConnectionState, error) { t.tlsDone = time.Now() },
+		WroteHeaders:         func() { t.wroteHeaders = time.Now() },
+		Wait100Continue:      func() { t.wait100Continue = time.Now() },
+		Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
+			t.got1xxResponse = time.Now()
+			t.got1xxCode = code
+			return nil
+		},
 		WroteRequest:         func(httptrace.WroteRequestInfo) { t.wroteRequest = time.Now() },
 		GotFirstResponseByte: func() { t.firstByte = time.Now() },
 		GotConn: func(info httptrace.GotConnInfo) {
@@ -199,6 +211,10 @@ func (t *phaseTimings) log(req *http.Request, reqErr error) {
 		"dns_ms", dur(t.dnsStart, t.dnsDone).Milliseconds(),
 		"dial_ms", dur(t.connectStart, t.connectDone).Milliseconds(),
 		"tls_ms", dur(t.tlsStart, t.tlsDone).Milliseconds(),
+		"wrote_headers_at_ms", dur(t.start, t.wroteHeaders).Milliseconds(),
+		"wait_100_at_ms", dur(t.start, t.wait100Continue).Milliseconds(),
+		"got_1xx_at_ms", dur(t.start, t.got1xxResponse).Milliseconds(),
+		"got_1xx_code", t.got1xxCode,
 		"wrote_request_at_ms", dur(t.start, t.wroteRequest).Milliseconds(),
 		"first_byte_at_ms", dur(t.start, t.firstByte).Milliseconds(),
 		"total_ms", total.Milliseconds(),
