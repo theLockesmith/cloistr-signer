@@ -61,40 +61,31 @@ export function Layout() {
         }}
       />
 
+      {/* Sub-header nav strip - only show when authenticated */}
+      {isAuthenticated && (
+        <nav className="app-subheader">
+          {NAV_LINKS.map((link) => (
+            <Link
+              key={link.path}
+              to={link.path}
+              className={`app-subheader-link ${location.pathname === link.path ? 'active' : ''}`}
+            >
+              {link.label}
+            </Link>
+          ))}
+          {user?.is_admin && (
+            <Link
+              to="/users"
+              className={`app-subheader-link ${location.pathname === '/users' ? 'active' : ''}`}
+            >
+              Users
+            </Link>
+          )}
+        </nav>
+      )}
+
       {/* Main Content */}
       <div className="app-main">
-        {/* Sidebar - only show when authenticated */}
-        {isAuthenticated && (
-          <aside className="sidebar">
-            <nav className="sidebar-nav">
-              {NAV_LINKS.map((link) => (
-                <Link
-                  key={link.path}
-                  to={link.path}
-                  className={`sidebar-link ${location.pathname === link.path ? 'active' : ''}`}
-                >
-                  {link.label}
-                </Link>
-              ))}
-              {user?.is_admin && (
-                <Link
-                  to="/users"
-                  className={`sidebar-link ${location.pathname === '/users' ? 'active' : ''}`}
-                >
-                  Users
-                </Link>
-              )}
-              {/* Signer backend session (JWT) — distinct from the navbar's Nostr auth */}
-              <div className="sidebar-account">
-                <span className="sidebar-username">{user?.username}</span>
-                <button className="btn btn-secondary btn-sm" onClick={logout}>
-                  Sign Out
-                </button>
-              </div>
-            </nav>
-          </aside>
-        )}
-
         <main className="app-content">
           {isAuthenticated ? (
             <Outlet />

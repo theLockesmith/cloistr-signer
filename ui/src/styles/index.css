@@ -88,68 +88,58 @@ a:hover {
 .app-main {
   display: flex;
   flex: 1;
-  margin-top: var(--header-height);
 }
 
 .app-content {
   flex: 1;
   padding: var(--space-lg);
   overflow-y: auto;
-  margin-left: var(--sidebar-width);
 }
 
 /* ==========================================
-   Sidebar
+   Sub-header Navigation
    ========================================== */
 
-.sidebar {
-  position: fixed;
+.cloistr-header {
+  position: sticky;
+  top: 0;
+  z-index: var(--cloistr-z-app-switcher, 150);
+}
+
+.app-subheader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 0 var(--space-lg);
+  background: var(--cloistr-bg-elevated, var(--signer-bg-secondary));
+  border-bottom: 1px solid var(--cloistr-border, var(--signer-border));
+  position: sticky;
   top: var(--header-height);
-  left: 0;
-  bottom: var(--footer-height);
-  width: var(--sidebar-width);
-  background: var(--signer-bg-secondary);
-  border-right: 1px solid var(--signer-border);
-  overflow-y: auto;
   z-index: 100;
 }
 
-.sidebar-nav {
-  display: flex;
-  flex-direction: column;
-  padding: var(--space-md);
-  gap: var(--space-xs);
-}
-
-.sidebar-nav a {
-  display: flex;
+.app-subheader-link {
+  display: inline-flex;
   align-items: center;
-  gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
-  border-radius: var(--radius-md);
-  color: var(--signer-text);
+  color: var(--cloistr-text-muted, var(--signer-text-muted));
   text-decoration: none;
-  transition: background 0.15s;
+  font-size: 14px;
+  font-weight: 500;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
 }
 
-.sidebar-nav a:hover {
-  background: var(--signer-bg-tertiary);
+.app-subheader-link:hover {
+  color: var(--cloistr-text, var(--signer-text));
   text-decoration: none;
 }
 
-.sidebar-nav a.active {
-  background: var(--signer-primary);
-  color: white;
-}
-
-.sidebar-divider {
-  height: 1px;
-  background: var(--signer-border);
-  margin: var(--space-md) 0;
-}
-
-.nav-icon {
-  font-size: 16px;
+.app-subheader-link.active {
+  color: var(--cloistr-primary, var(--signer-primary));
+  border-bottom-color: var(--cloistr-primary, var(--signer-primary));
 }
 
 /* ==========================================
@@ -547,89 +537,6 @@ a:hover {
   color: var(--signer-text-muted);
 }
 
-/* ==========================================
-   Signer Header
-   ========================================== */
-
-.signer-header {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: var(--header-height);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 var(--space-lg);
-  background: var(--signer-bg-secondary);
-  border-bottom: 1px solid var(--signer-border);
-  z-index: 1000;
-}
-
-.signer-header-left {
-  display: flex;
-  align-items: center;
-  gap: var(--space-lg);
-}
-
-.signer-header-logo {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  color: var(--signer-text-heading);
-  text-decoration: none;
-}
-
-.signer-header-logo:hover {
-  text-decoration: none;
-}
-
-.signer-header-brand {
-  font-size: 18px;
-  font-weight: 600;
-}
-
-.signer-service-menu {
-  display: flex;
-  gap: var(--space-sm);
-}
-
-.signer-service-link {
-  padding: var(--space-xs) var(--space-sm);
-  border-radius: var(--radius-md);
-  color: var(--signer-text-muted);
-  text-decoration: none;
-  font-size: 14px;
-  transition: color 0.15s, background 0.15s;
-}
-
-.signer-service-link:hover {
-  color: var(--signer-text);
-  background: var(--signer-bg-tertiary);
-  text-decoration: none;
-}
-
-.signer-service-active {
-  color: var(--signer-primary);
-  font-weight: 500;
-}
-
-.signer-header-right {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-}
-
-.signer-user-menu {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-}
-
-.signer-username {
-  color: var(--signer-text);
-  font-weight: 500;
-}
 
 /* ==========================================
    Welcome Screen
@@ -794,32 +701,22 @@ small {
 }
 
 /* ==========================================
-   No Sidebar Layout
-   ========================================== */
-
-.app-main:not(:has(.sidebar)) .app-content {
-  margin-left: 0;
-}
-
-/* ==========================================
    Responsive
    ========================================== */
 
 @media (max-width: 768px) {
-  .sidebar {
-    display: none;
+  .app-subheader {
+    padding: 0 var(--space-sm);
+    gap: 0;
   }
 
-  .app-content {
-    margin-left: 0;
+  .app-subheader-link {
+    padding: var(--space-sm);
+    font-size: 13px;
   }
 
   .stats-grid {
     grid-template-columns: 1fr;
-  }
-
-  .signer-service-menu {
-    display: none;
   }
 
   .welcome-content h1 {
