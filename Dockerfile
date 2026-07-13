@@ -1,4 +1,24 @@
-# Build stage
+# UI build stage - build the React + WASM frontend
+FROM node:22-alpine AS uibuilder
+
+WORKDIR /ui
+
+# wasm-pack for the frost-wasm crate
+RUN apk add --no-cache curl
+RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+# Build arg for private @cloistr registry auth
+ARG NPM_AEGIS_TOKEN
+
+# Install dependencies from lockfile first for layer caching
+COPY ui/package.json ui/package-lock.json ui/.npmrc ./
+RUN NPM_AEGIS_TOKEN=${NPM_AEGIS_TOKEN} npm ci
+
+# Copy source and build
+COPY ui/ ./
+RUN NPM_AEGIS_TOKEN=${NPM_AEGIS_TOKEN} npm run build
+
+# Go build stage
 FROM golang:1.25-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
@@ -11,6 +31,10 @@ RUN go mod download
 
 # Copy source
 COPY . .
+
+# Copy freshly built UI dist over anything committed in the repo
+# vite.config.ts outputs to ../internal/web/dist relative to ui/ → /internal/web/dist in container
+COPY --from=uibuilder /internal/web/dist ./internal/web/dist
 
 # Build signer and migrate binaries
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /signer ./cmd/signer
