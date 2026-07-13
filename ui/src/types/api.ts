@@ -8,7 +8,20 @@ export interface User {
   username: string;
   mfa_enabled: boolean;
   is_admin?: boolean;
+  /**
+   * Option A identity model: the user's canonical Nostr identity pubkey.
+   * This is the Primary signing key's pubkey (from signer_keys), not the
+   * HKDF-derived platform pubkey. Falls back to the derived pubkey only when
+   * the user has zero signing keys.
+   */
   pubkey?: string;
+  /**
+   * The HKDF-derived platform authorization identity (stored in users.pubkey).
+   * This is an internal identifier used for cross-service authorization
+   * (EnsurePlatformUser). It is NOT the user's Nostr signing identity.
+   * Display this only for diagnostic/settings purposes, clearly labelled.
+   */
+  linked_pubkey?: string;
   created_at: string;
   last_login?: string;
 }

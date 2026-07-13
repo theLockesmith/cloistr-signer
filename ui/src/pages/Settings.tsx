@@ -28,8 +28,26 @@ export function SettingsPage() {
             </div>
             {user?.pubkey && (
               <div>
-                <label style={{ fontSize: '12px', color: 'var(--signer-text-muted)' }}>Linked Pubkey</label>
+                <label style={{ fontSize: '12px', color: 'var(--signer-text-muted)' }}>
+                  Nostr Identity (Primary Key)
+                </label>
                 <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>{user.pubkey}</div>
+              </div>
+            )}
+            {user?.linked_pubkey && user.linked_pubkey !== user.pubkey && (
+              <div>
+                <label style={{ fontSize: '12px', color: 'var(--signer-text-muted)' }}>
+                  Platform Pubkey
+                  <span
+                    title="Internal platform identifier used for cross-service authorization. This is not your Nostr signing identity."
+                    style={{ marginLeft: '4px', cursor: 'help', opacity: 0.7 }}
+                  >
+                    (?)
+                  </span>
+                </label>
+                <div style={{ fontFamily: 'monospace', fontSize: '12px', color: 'var(--signer-text-muted)' }}>
+                  {user.linked_pubkey}
+                </div>
               </div>
             )}
             <div>

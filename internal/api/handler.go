@@ -1910,13 +1910,21 @@ type LoginResponse struct {
 }
 
 type UserResponse struct {
-	ID         string     `json:"id"`
-	Username   string     `json:"username"`
-	Email      string     `json:"email,omitempty"`
-	Pubkey     string     `json:"pubkey,omitempty"` // Nostr public key (hex); populated by signer at registration
-	MFAEnabled bool       `json:"mfa_enabled"`
-	CreatedAt  time.Time  `json:"created_at"`
-	LastLogin  *time.Time `json:"last_login,omitempty"`
+	ID           string     `json:"id"`
+	Username     string     `json:"username"`
+	Email        string     `json:"email,omitempty"`
+	// Pubkey is the user's canonical Nostr identity: their Primary signing key's
+	// pubkey (Option A identity model). Falls back to the derived platform pubkey
+	// only when the user has zero signing keys.
+	Pubkey       string     `json:"pubkey,omitempty"`
+	// LinkedPubkey is the HKDF-derived platform authorization identity stored in
+	// users.pubkey. It is a secondary / internal identifier used for
+	// EnsurePlatformUser cross-service authorization; it is NOT the user's
+	// Nostr signing identity. See Option A identity model.
+	LinkedPubkey string     `json:"linked_pubkey,omitempty"`
+	MFAEnabled   bool       `json:"mfa_enabled"`
+	CreatedAt    time.Time  `json:"created_at"`
+	LastLogin    *time.Time `json:"last_login,omitempty"`
 }
 
 type MFASetupResponse struct {
@@ -2017,7 +2025,12 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Ensure platform user exists for cross-service authorization
+	// Ensure platform user exists for cross-service authorization.
+	// TODO(option-A migration): re-key platform user records from derived pubkey
+	// to Primary signing key pubkey once the SQL migration runs
+	// (ALTER TABLE platform_users / UPDATE signer_keys to correlate correctly).
+	// Until then, EnsurePlatformUser continues to use the HKDF-derived pubkey
+	// stored in user.Pubkey so cross-service authorization is unaffected.
 	if err := h.storage.EnsurePlatformUser(r.Context(), user.Pubkey); err != nil {
 		// Log but don't fail registration - platform linking is supplementary
 		slog.Warn("failed to ensure platform user", "error", err, "pubkey", user.Pubkey[:16]+"...")
@@ -2254,14 +2267,37 @@ func (h *Handler) handleUserMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Option A identity model: the canonical pubkey is the user's Primary signing
+	// key, not the HKDF-derived platform pubkey stored in users.pubkey.
+	// We look up the signing keys and prefer the one named "Primary"; if none
+	// matches by name, we fall back to the oldest key (created_at ASC, which is
+	// the last entry in the DESC-ordered list). If the user has no signing keys at
+	// all (edge case), we fall back to the derived platform pubkey so the field is
+	// never empty for existing callers.
+	signingPubkey := user.Pubkey // default: derived platform pubkey (fallback)
+	if keys, err := h.storage.ListKeys(r.Context(), user.ID); err == nil && len(keys) > 0 {
+		// ListKeys returns ORDER BY created_at DESC; iterate to find "Primary" or oldest.
+		chosen := keys[len(keys)-1] // oldest key (last in DESC list)
+		for _, k := range keys {
+			if k.Name == "Primary" {
+				chosen = k
+				break
+			}
+		}
+		if chosen.Pubkey != "" {
+			signingPubkey = chosen.Pubkey
+		}
+	}
+
 	h.jsonResponse(w, http.StatusOK, UserResponse{
-		ID:         user.ID,
-		Username:   user.Username,
-		Email:      user.Email,
-		Pubkey:     user.Pubkey,
-		MFAEnabled: user.MFAEnabled,
-		CreatedAt:  user.CreatedAt,
-		LastLogin:  user.LastLoginAt,
+		ID:           user.ID,
+		Username:     user.Username,
+		Email:        user.Email,
+		Pubkey:       signingPubkey,
+		LinkedPubkey: user.Pubkey,
+		MFAEnabled:   user.MFAEnabled,
+		CreatedAt:    user.CreatedAt,
+		LastLogin:    user.LastLoginAt,
 	})
 }
 
