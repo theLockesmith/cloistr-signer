@@ -32,7 +32,7 @@ This guide covers deployment, configuration, and operation of Cloistr Signer for
 
 ```bash
 # Clone the repository
-git clone https://git.coldforge.xyz/coldforge/cloistr-signer.git
+git clone https://git.aegis-hq.xyz/coldforge/cloistr-signer.git
 cd cloistr-signer
 
 # Build

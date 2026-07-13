@@ -2025,24 +2025,30 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Ensure platform user exists for cross-service authorization.
-	// TODO(option-A migration): re-key platform user records from derived pubkey
-	// to Primary signing key pubkey once the SQL migration runs
-	// (ALTER TABLE platform_users / UPDATE signer_keys to correlate correctly).
-	// Until then, EnsurePlatformUser continues to use the HKDF-derived pubkey
-	// stored in user.Pubkey so cross-service authorization is unaffected.
-	if err := h.storage.EnsurePlatformUser(r.Context(), user.Pubkey); err != nil {
-		// Log but don't fail registration - platform linking is supplementary
-		slog.Warn("failed to ensure platform user", "error", err, "pubkey", user.Pubkey[:16]+"...")
-	}
-
 	// Provision an initial signing key so the new account can actually sign
 	// (an account with zero signing keys is a dead end). Best-effort: on failure
 	// we log and still return success — the user can create a key later.
+	// The Primary key is the user's identity under the Option A model.
+	var primaryKey *storage.Key
 	if key, err := h.createInitialSigningKey(r.Context(), userID, "Primary", req.ImportNsec); err != nil {
 		slog.Warn("failed to create initial signing key", "error", err, "user_id", userID)
 	} else {
+		primaryKey = key
 		slog.Info("created initial signing key", "user_id", userID, "pubkey", key.Pubkey[:16]+"...")
+	}
+
+	// Ensure platform user exists for cross-service authorization.
+	// Option A: register the Primary signing key as the platform identity, not
+	// the HKDF-derived platform pubkey stored in user.Pubkey. The derived pubkey
+	// is kept on the users row as an internal back-compat identifier only.
+	// Fall back to the derived pubkey only if key creation failed above.
+	platformPubkey := user.Pubkey
+	if primaryKey != nil {
+		platformPubkey = primaryKey.Pubkey
+	}
+	if err := h.storage.EnsurePlatformUser(r.Context(), platformPubkey); err != nil {
+		// Log but don't fail registration - platform linking is supplementary
+		slog.Warn("failed to ensure platform user", "error", err, "pubkey", platformPubkey[:16]+"...")
 	}
 
 	slog.Info("user registered", "username", req.Username, "user_id", userID, "pubkey", user.Pubkey[:16]+"...")
