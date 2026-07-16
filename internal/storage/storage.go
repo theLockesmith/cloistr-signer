@@ -422,6 +422,11 @@ type Storage interface {
 
 	// Platform user management (cross-service authorization)
 	EnsurePlatformUser(ctx context.Context, pubkey string) error
+	// RemovePlatformUser de-registers a pubkey from the platform users table.
+	// Used to retire the HKDF-derived platform pubkey once a real signing key
+	// has become the user's identity (Option A). Must not remove a pubkey that
+	// still holds service access grants.
+	RemovePlatformUser(ctx context.Context, pubkey string) error
 	DeriveUserPubkey(ctx context.Context, userID string) (string, error)
 	ListPlatformUsers(ctx context.Context, limit, offset int) ([]*PlatformUser, int, error)
 	GetPlatformUserAccess(ctx context.Context, pubkey string) (*PlatformUser, error)
@@ -1331,6 +1336,13 @@ func (m *MemoryStorage) EnsurePlatformUser(ctx context.Context, pubkey string) e
 	return nil
 }
 
+// RemovePlatformUser is a no-op for in-memory storage (no platform DB)
+func (m *MemoryStorage) RemovePlatformUser(ctx context.Context, pubkey string) error {
+	// In-memory storage doesn't have platform integration
+	slog.Debug("RemovePlatformUser skipped (in-memory storage)", "pubkey", pubkey[:16]+"...")
+	return nil
+}
+
 // DeriveUserPubkey generates a deterministic pubkey for testing
 // In production (PostgresStorage), this uses HKDF with a persistent seed
 func (m *MemoryStorage) DeriveUserPubkey(ctx context.Context, userID string) (string, error) {
@@ -1407,7 +1419,12 @@ func (m *MemoryStorage) GetUserSession(ctx context.Context, id string) (*UserSes
 		return nil, ErrSessionNotFound
 	}
 
-	return session, nil
+	// Return a snapshot copy, not the shared pointer: the update methods mutate
+	// the stored struct in place under the write lock, so handing out the live
+	// pointer would let callers read a field concurrently with a write (data
+	// race). Postgres already returns a fresh struct per query — this matches it.
+	sessionCopy := *session
+	return &sessionCopy, nil
 }
 
 func (m *MemoryStorage) ListUserSessions(ctx context.Context, userID string) ([]*UserSession, error) {
@@ -1419,7 +1436,10 @@ func (m *MemoryStorage) ListUserSessions(ctx context.Context, userID string) ([]
 	if userSessions, exists := m.userSessionsByUser[userID]; exists {
 		for _, session := range userSessions {
 			if now.Before(session.ExpiresAt) {
-				sessions = append(sessions, session)
+				// Snapshot copy — see GetUserSession for why the live pointer is
+				// not returned.
+				sessionCopy := *session
+				sessions = append(sessions, &sessionCopy)
 			}
 		}
 	}

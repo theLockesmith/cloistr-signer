@@ -2322,6 +2322,11 @@ func (ss *SQLiteStorage) EnsurePlatformUser(ctx context.Context, pubkey string) 
 	return nil
 }
 
+func (ss *SQLiteStorage) RemovePlatformUser(ctx context.Context, pubkey string) error {
+	// No-op for SQLite - platform users table is not used in standalone mode
+	return nil
+}
+
 func (ss *SQLiteStorage) DeriveUserPubkey(ctx context.Context, userID string) (string, error) {
 	// For SQLite/self-hosted mode: use a fixed seed - this is deterministic
 	testSeed := "0000000000000000000000000000000000000000000000000000000000000000"

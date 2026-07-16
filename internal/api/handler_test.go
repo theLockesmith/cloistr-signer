@@ -1039,6 +1039,164 @@ func TestHandleUserMe_NoAuth(t *testing.T) {
 	}
 }
 
+// changePwUser creates a user with password "oldpassword" and returns a valid token.
+func changePwUser(t *testing.T, h *Handler, store *storage.MemoryStorage) (*storage.User, string) {
+	t.Helper()
+	ctx := context.Background()
+	hash, _ := auth.HashPassword("oldpassword", auth.DefaultBcryptCost)
+	user := &storage.User{
+		ID:           "pwuser123",
+		Username:     "pwuser",
+		PasswordHash: hash,
+		CreatedAt:    time.Now(),
+	}
+	store.CreateUser(ctx, user)
+	token, _, _ := auth.GenerateJWT(h.authConfig, user.ID, user.Username)
+	return user, token
+}
+
+func TestHandleUserChangePassword(t *testing.T) {
+	h, store := testHandler(t)
+	_, token := changePwUser(t, h, store)
+
+	body := `{"current_password":"oldpassword","new_password":"brandnewpass"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/password", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.handleUserChangePassword(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handleUserChangePassword() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+
+	// New password must now verify; old must not.
+	updated, err := store.GetUser(context.Background(), "pwuser123")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if !auth.VerifyPassword("brandnewpass", updated.PasswordHash) {
+		t.Error("new password does not verify after change")
+	}
+	if auth.VerifyPassword("oldpassword", updated.PasswordHash) {
+		t.Error("old password still verifies after change")
+	}
+}
+
+func TestHandleUserChangePassword_WrongCurrent(t *testing.T) {
+	h, store := testHandler(t)
+	_, token := changePwUser(t, h, store)
+
+	body := `{"current_password":"wrongpassword","new_password":"brandnewpass"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/password", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.handleUserChangePassword(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d; body: %s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+	// Password must be unchanged.
+	updated, _ := store.GetUser(context.Background(), "pwuser123")
+	if !auth.VerifyPassword("oldpassword", updated.PasswordHash) {
+		t.Error("password changed despite wrong current password")
+	}
+}
+
+func TestHandleUserChangePassword_ShortNew(t *testing.T) {
+	h, store := testHandler(t)
+	_, token := changePwUser(t, h, store)
+
+	body := `{"current_password":"oldpassword","new_password":"short"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/password", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.handleUserChangePassword(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandleUserChangePassword_NoAuth(t *testing.T) {
+	h, _ := testHandler(t)
+
+	body := `{"current_password":"oldpassword","new_password":"brandnewpass"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/password", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	h.handleUserChangePassword(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandleUserChangePassword_WrongMethod(t *testing.T) {
+	h, store := testHandler(t)
+	_, token := changePwUser(t, h, store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/password", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.handleUserChangePassword(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want %d", rr.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestHandleUserMe_UsesSigningKeyAndOmitsLinkedPubkey(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	user := &storage.User{
+		ID:           "idmuser123",
+		Username:     "idmuser",
+		PasswordHash: hash,
+		Pubkey:       "deadbeef00000000000000000000000000000000000000000000000000000000", // derived platform pubkey
+		CreatedAt:    time.Now(),
+	}
+	store.CreateUser(ctx, user)
+
+	// Give the user a Primary signing key distinct from the derived pubkey.
+	signingPubkey := "11111111111111111111111111111111111111111111111111111111111111ab"
+	store.CreateKey(ctx, &storage.Key{
+		ID:        signingPubkey[:16],
+		Name:      "Primary",
+		Pubkey:    signingPubkey,
+		OwnerID:   user.ID,
+		CreatedAt: time.Now(),
+	})
+
+	token, _, _ := auth.GenerateJWT(h.authConfig, user.ID, user.Username)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+
+	h.handleUserMe(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	body := rr.Body.String()
+	// pubkey must be the signing key, never the derived platform pubkey.
+	if !strings.Contains(body, signingPubkey) {
+		t.Errorf("response should expose signing pubkey %s; body: %s", signingPubkey, body)
+	}
+	// The derived platform pubkey must not be surfaced at all.
+	if strings.Contains(body, user.Pubkey) {
+		t.Errorf("response should not contain derived platform pubkey %s; body: %s", user.Pubkey, body)
+	}
+	if strings.Contains(body, "linked_pubkey") {
+		t.Errorf("response should no longer include linked_pubkey; body: %s", body)
+	}
+}
+
 func TestHandleUserLogout(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()

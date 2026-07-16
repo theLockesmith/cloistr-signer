@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,38 @@ import (
 
 // Integration tests for full user flows
 // These tests verify the complete registration → login → key operations → logout flow
+
+// keysContainID reports whether a decoded /api/v1/keys list contains a key with
+// the given id. Used by isolation checks that must assert ownership rather than
+// raw counts, since registration auto-creates a "Primary" key (Option A).
+func keysContainID(keys []map[string]interface{}, id string) bool {
+	for _, k := range keys {
+		if k["id"] == id {
+			return true
+		}
+	}
+	return false
+}
+
+// waitForSessionVaultToken blocks until one of the user's sessions has a
+// non-empty VaultToken, or fails the test after a timeout. Login populates the
+// vault token asynchronously (populateVaultTokenAsync), so tests that depend on
+// vault-backed key encryption must wait for it — mirroring the production
+// on-demand wait in getUserSessionAwaitingVaultToken.
+func waitForSessionVaultToken(t *testing.T, store *storage.MemoryStorage, userID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		sessions, _ := store.ListUserSessions(context.Background(), userID)
+		for _, s := range sessions {
+			if s.VaultToken != "" {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for async vault token on session")
+}
 
 // TestIntegration_FullFlow_NoVault tests the complete flow without Vault (local encryption)
 func TestIntegration_FullFlow_NoVault(t *testing.T) {
@@ -119,7 +152,8 @@ func TestIntegration_FullFlow_NoVault(t *testing.T) {
 		}
 	})
 
-	// Step 4: List keys - should only show our key
+	// Step 4: List keys - the auto-created "Primary" key (Option A registration)
+	// plus the one we just created.
 	t.Run("4_ListKeys", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/v1/keys", nil)
 		req.Header.Set("Authorization", "Bearer "+authToken)
@@ -132,11 +166,11 @@ func TestIntegration_FullFlow_NoVault(t *testing.T) {
 
 		var keys []map[string]interface{}
 		json.Unmarshal(w.Body.Bytes(), &keys)
-		if len(keys) != 1 {
-			t.Fatalf("Expected 1 key, got %d", len(keys))
+		if len(keys) != 2 {
+			t.Fatalf("Expected 2 keys (auto Primary + created), got %d", len(keys))
 		}
-		if keys[0]["id"] != keyID {
-			t.Fatalf("Expected key id %s, got %s", keyID, keys[0]["id"])
+		if !keysContainID(keys, keyID) {
+			t.Fatalf("created key %s not found in list", keyID)
 		}
 	})
 
@@ -194,10 +228,12 @@ func TestIntegration_FullFlow_NoVault(t *testing.T) {
 			t.Fatalf("ListKeys for user2 failed: %d - %s", w.Code, w.Body.String())
 		}
 
+		// User2 sees only their own auto-created Primary key, and must never see
+		// user1's key. Assert ownership rather than an absolute count.
 		var keys []map[string]interface{}
 		json.Unmarshal(w.Body.Bytes(), &keys)
-		if len(keys) != 0 {
-			t.Fatalf("User2 should see 0 keys, got %d", len(keys))
+		if keysContainID(keys, keyID) {
+			t.Fatalf("isolation breach: user2 can see user1's key %s", keyID)
 		}
 	})
 
@@ -430,6 +466,10 @@ func TestIntegration_FullFlow_WithVault(t *testing.T) {
 	// Step 3: Create key - should use Vault transit encryption
 	var keyID string
 	t.Run("3_CreateKey_VaultEncryption", func(t *testing.T) {
+		// The vault token lands on the session asynchronously after login; wait
+		// for it so the handler uses vault transit encryption, not local fallback.
+		waitForSessionVaultToken(t, store, userID)
+
 		body := `{"name":"vault-encrypted-key"}`
 		req := httptest.NewRequest("POST", "/api/v1/keys", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -450,7 +490,8 @@ func TestIntegration_FullFlow_WithVault(t *testing.T) {
 		t.Logf("Key encryption_method: %s", method)
 	})
 
-	// Step 4: List keys
+	// Step 4: List keys - the auto-created "Primary" key (Option A registration)
+	// plus the one we just created.
 	t.Run("4_ListKeys", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/v1/keys", nil)
 		req.Header.Set("Authorization", "Bearer "+authToken)
@@ -463,8 +504,11 @@ func TestIntegration_FullFlow_WithVault(t *testing.T) {
 
 		var keys []map[string]interface{}
 		json.Unmarshal(w.Body.Bytes(), &keys)
-		if len(keys) != 1 {
-			t.Fatalf("Expected 1 key, got %d", len(keys))
+		if len(keys) != 2 {
+			t.Fatalf("Expected 2 keys (auto Primary + created), got %d", len(keys))
+		}
+		if !keysContainID(keys, keyID) {
+			t.Fatalf("created key %s not found in list", keyID)
 		}
 	})
 
@@ -505,9 +549,11 @@ func TestIntegration_FullFlow_WithVault(t *testing.T) {
 // TestIntegration_VaultAutoProvision tests that users without Vault userpass accounts
 // get auto-provisioned on login (for users migrated from pre-Vault or failed registrations)
 func TestIntegration_VaultAutoProvision(t *testing.T) {
-	// Track if userpass was provisioned during login
-	userpassProvisioned := false
-	loginAttempts := 0
+	// Track if userpass was provisioned during login. These are written from the
+	// mock server's request goroutines (login now provisions asynchronously via
+	// populateVaultTokenAsync), so they must be race-safe atomics.
+	var userpassProvisioned atomic.Bool
+	var loginAttempts atomic.Int32
 
 	// Mock Vault server that rejects first login, accepts after provisioning
 	vaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -534,7 +580,7 @@ func TestIntegration_VaultAutoProvision(t *testing.T) {
 			}
 			// Create userpass account
 			if strings.Contains(path, "/auth/userpass/users/") && r.Method == http.MethodPost {
-				userpassProvisioned = true
+				userpassProvisioned.Store(true)
 				w.WriteHeader(http.StatusOK)
 				json.NewEncoder(w).Encode(map[string]interface{}{})
 				return
@@ -543,10 +589,15 @@ func TestIntegration_VaultAutoProvision(t *testing.T) {
 
 		// Userpass login
 		if strings.Contains(path, "/auth/userpass/login/") && r.Method == http.MethodPost {
-			loginAttempts++
-			// First attempt fails (user not provisioned), second succeeds
-			if !userpassProvisioned {
-				w.WriteHeader(http.StatusForbidden)
+			loginAttempts.Add(1)
+			// First attempt fails as a MISSING user (HTTP 400 "invalid username
+			// or password"), which is the path that triggers the provision
+			// fallback so pre-Vault-migrated users self-heal at login. A 403 is
+			// deliberately excluded from provisioning (lockout/ACL-deny — see
+			// commit e00757d) and must not be used to simulate an unprovisioned
+			// user. Second attempt (post-provision) succeeds.
+			if !userpassProvisioned.Load() {
+				w.WriteHeader(http.StatusBadRequest)
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"errors": []string{"invalid username or password"},
 				})
@@ -625,12 +676,20 @@ func TestIntegration_VaultAutoProvision(t *testing.T) {
 		t.Fatalf("Login failed: %d - %s", w.Code, w.Body.String())
 	}
 
-	if !userpassProvisioned {
+	// Auto-provisioning runs off the login critical path (populateVaultTokenAsync),
+	// so wait for the background flow to complete: attempt-1 fails → provision →
+	// attempt-2 succeeds (loginAttempts reaches 2).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && loginAttempts.Load() < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if !userpassProvisioned.Load() {
 		t.Error("Expected userpass to be auto-provisioned during login")
 	}
 
-	if loginAttempts != 2 {
-		t.Errorf("Expected 2 login attempts (fail then retry), got %d", loginAttempts)
+	if got := loginAttempts.Load(); got != 2 {
+		t.Errorf("Expected 2 login attempts (fail then retry), got %d", got)
 	}
 
 	t.Log("Auto-provisioning on login successful")
@@ -892,10 +951,12 @@ func TestIntegration_UserIsolation(t *testing.T) {
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, req)
 
+		// User2 has only their own auto-created Primary key and must never see
+		// user1's key. Assert ownership rather than an absolute count.
 		var keys []map[string]interface{}
 		json.Unmarshal(w.Body.Bytes(), &keys)
-		if len(keys) != 0 {
-			t.Fatalf("User2 should not see User1's keys, got %d keys", len(keys))
+		if keysContainID(keys, user1KeyID) {
+			t.Fatalf("isolation breach: user2 can see user1's key %s", user1KeyID)
 		}
 	})
 

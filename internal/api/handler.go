@@ -259,6 +259,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/users/login", h.handleUserLogin)
 	mux.HandleFunc("/api/v1/users/logout", h.handleUserLogout)
 	mux.HandleFunc("/api/v1/users/me", h.handleUserMe)
+	mux.HandleFunc("/api/v1/users/password", h.handleUserChangePassword)
 	mux.HandleFunc("/api/v1/users/mfa/setup", h.handleMFASetup)
 	mux.HandleFunc("/api/v1/users/mfa/verify", h.handleMFAVerify)
 	mux.HandleFunc("/api/v1/users/mfa/disable", h.handleMFADisable)
@@ -1915,13 +1916,10 @@ type UserResponse struct {
 	Email        string     `json:"email,omitempty"`
 	// Pubkey is the user's canonical Nostr identity: their Primary signing key's
 	// pubkey (Option A identity model). Falls back to the derived platform pubkey
-	// only when the user has zero signing keys.
+	// only when the user has zero signing keys. The HKDF-derived platform pubkey is
+	// no longer surfaced to clients — once a signing key exists it is the sole
+	// identity and the derived pubkey is de-registered (see reconcilePlatformIdentity).
 	Pubkey       string     `json:"pubkey,omitempty"`
-	// LinkedPubkey is the HKDF-derived platform authorization identity stored in
-	// users.pubkey. It is a secondary / internal identifier used for
-	// EnsurePlatformUser cross-service authorization; it is NOT the user's
-	// Nostr signing identity. See Option A identity model.
-	LinkedPubkey string     `json:"linked_pubkey,omitempty"`
 	MFAEnabled   bool       `json:"mfa_enabled"`
 	CreatedAt    time.Time  `json:"created_at"`
 	LastLogin    *time.Time `json:"last_login,omitempty"`
@@ -2037,18 +2035,16 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		slog.Info("created initial signing key", "user_id", userID, "pubkey", key.Pubkey[:16]+"...")
 	}
 
-	// Ensure platform user exists for cross-service authorization.
-	// Option A: register the Primary signing key as the platform identity, not
-	// the HKDF-derived platform pubkey stored in user.Pubkey. The derived pubkey
-	// is kept on the users row as an internal back-compat identifier only.
-	// Fall back to the derived pubkey only if key creation failed above.
-	platformPubkey := user.Pubkey
+	// Register the platform identity for cross-service authorization (Option A).
+	// With a signing key, reconcile makes that key the sole platform identity and
+	// de-registers the derived platform pubkey. Without one (key creation failed
+	// above), fall back to registering the derived pubkey so the account still has
+	// a usable platform identity until a key is created. Best-effort: platform
+	// linking is supplementary and never fails registration.
 	if primaryKey != nil {
-		platformPubkey = primaryKey.Pubkey
-	}
-	if err := h.storage.EnsurePlatformUser(r.Context(), platformPubkey); err != nil {
-		// Log but don't fail registration - platform linking is supplementary
-		slog.Warn("failed to ensure platform user", "error", err, "pubkey", platformPubkey[:16]+"...")
+		h.reconcilePlatformIdentity(r.Context(), user)
+	} else if err := h.storage.EnsurePlatformUser(r.Context(), user.Pubkey); err != nil {
+		slog.Warn("failed to ensure platform user", "error", err, "pubkey", user.Pubkey[:16]+"...")
 	}
 
 	slog.Info("user registered", "username", req.Username, "user_id", userID, "pubkey", user.Pubkey[:16]+"...")
@@ -2134,6 +2130,11 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Reset failed login attempts
 	h.storage.ResetFailedLogins(r.Context(), user.ID)
+
+	// Lazily migrate the platform identity to the signing key (Option A): retires
+	// the derived platform pubkey for pre-Option-A / fallback accounts on their
+	// next login. Best-effort; never blocks login.
+	h.reconcilePlatformIdentity(r.Context(), user)
 
 	// Generate session ID first (needed for JWT)
 	sessionID, _ := auth.GenerateSessionID()
@@ -2255,6 +2256,53 @@ func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "logged out successfully"})
 }
 
+// resolveSigningPubkey returns the user's canonical signing pubkey under the
+// Option A identity model: the key named "Primary", else the oldest key
+// (created_at ASC — the last entry in ListKeys' DESC ordering). The bool is
+// false when the user has no signing keys, in which case the caller should fall
+// back to the derived platform pubkey (user.Pubkey) so the identity is never
+// empty.
+func (h *Handler) resolveSigningPubkey(ctx context.Context, userID string) (string, bool) {
+	keys, err := h.storage.ListKeys(ctx, userID)
+	if err != nil || len(keys) == 0 {
+		return "", false
+	}
+	chosen := keys[len(keys)-1] // oldest key (last in DESC list)
+	for _, k := range keys {
+		if k.Name == "Primary" {
+			chosen = k
+			break
+		}
+	}
+	if chosen.Pubkey == "" {
+		return "", false
+	}
+	return chosen.Pubkey, true
+}
+
+// reconcilePlatformIdentity makes the user's signing key the sole platform
+// identity (Option A). Once a real signing key exists it is registered for
+// cross-service authorization and the HKDF-derived platform pubkey
+// (user.Pubkey) is de-registered from the platform users table. The derived
+// pubkey is retained on the signer_web_accounts row as the zero-keys bootstrap
+// fallback. Best-effort and idempotent: a no-op when the user has no signing
+// keys, and RemovePlatformUser is guarded against removing a pubkey that still
+// holds service grants.
+func (h *Handler) reconcilePlatformIdentity(ctx context.Context, user *storage.User) {
+	signingPubkey, hasKey := h.resolveSigningPubkey(ctx, user.ID)
+	if !hasKey {
+		return
+	}
+	if err := h.storage.EnsurePlatformUser(ctx, signingPubkey); err != nil {
+		slog.Warn("reconcile: failed to ensure signing platform user", "error", err, "user_id", user.ID)
+	}
+	if user.Pubkey != "" && user.Pubkey != signingPubkey {
+		if err := h.storage.RemovePlatformUser(ctx, user.Pubkey); err != nil {
+			slog.Warn("reconcile: failed to de-register derived platform pubkey", "error", err, "user_id", user.ID)
+		}
+	}
+}
+
 func (h *Handler) handleUserMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -2273,38 +2321,83 @@ func (h *Handler) handleUserMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Option A identity model: the canonical pubkey is the user's Primary signing
-	// key, not the HKDF-derived platform pubkey stored in users.pubkey.
-	// We look up the signing keys and prefer the one named "Primary"; if none
-	// matches by name, we fall back to the oldest key (created_at ASC, which is
-	// the last entry in the DESC-ordered list). If the user has no signing keys at
-	// all (edge case), we fall back to the derived platform pubkey so the field is
-	// never empty for existing callers.
-	signingPubkey := user.Pubkey // default: derived platform pubkey (fallback)
-	if keys, err := h.storage.ListKeys(r.Context(), user.ID); err == nil && len(keys) > 0 {
-		// ListKeys returns ORDER BY created_at DESC; iterate to find "Primary" or oldest.
-		chosen := keys[len(keys)-1] // oldest key (last in DESC list)
-		for _, k := range keys {
-			if k.Name == "Primary" {
-				chosen = k
-				break
-			}
-		}
-		if chosen.Pubkey != "" {
-			signingPubkey = chosen.Pubkey
-		}
+	// Option A identity model: the canonical pubkey is the user's signing key.
+	// Fall back to the derived platform pubkey only when the user has no keys.
+	signingPubkey := user.Pubkey
+	if pk, ok := h.resolveSigningPubkey(r.Context(), user.ID); ok {
+		signingPubkey = pk
 	}
 
 	h.jsonResponse(w, http.StatusOK, UserResponse{
-		ID:           user.ID,
-		Username:     user.Username,
-		Email:        user.Email,
-		Pubkey:       signingPubkey,
-		LinkedPubkey: user.Pubkey,
-		MFAEnabled:   user.MFAEnabled,
-		CreatedAt:    user.CreatedAt,
-		LastLogin:    user.LastLoginAt,
+		ID:         user.ID,
+		Username:   user.Username,
+		Email:      user.Email,
+		Pubkey:     signingPubkey,
+		MFAEnabled: user.MFAEnabled,
+		CreatedAt:  user.CreatedAt,
+		LastLogin:  user.LastLoginAt,
 	})
+}
+
+// ChangePasswordRequest is the body for PUT /api/v1/users/password.
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// handleUserChangePassword changes the authenticated user's password. It
+// verifies the current password before applying the new one, mirroring the
+// register handler's validation (new password must be >= 8 chars).
+func (h *Handler) handleUserChangePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	var req ChangePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if len(req.NewPassword) < 8 {
+		h.errorResponse(w, http.StatusBadRequest, "new password must be at least 8 characters")
+		return
+	}
+
+	user, err := h.storage.GetUser(r.Context(), claims.UserID)
+	if err != nil {
+		h.errorResponse(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	// Verify the current password before allowing a change.
+	if !auth.VerifyPassword(req.CurrentPassword, user.PasswordHash) {
+		h.errorResponse(w, http.StatusUnauthorized, "current password is incorrect")
+		return
+	}
+
+	hash, err := auth.HashPassword(req.NewPassword, h.authConfig.BcryptCost)
+	if err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to hash password")
+		return
+	}
+
+	user.PasswordHash = hash
+	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
+		h.errorResponse(w, http.StatusInternalServerError, "failed to update password")
+		return
+	}
+
+	slog.Info("password changed", "username", user.Username, "user_id", user.ID)
+
+	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "password changed successfully"})
 }
 
 func (h *Handler) handleMFASetup(w http.ResponseWriter, r *http.Request) {
