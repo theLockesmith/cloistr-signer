@@ -1672,6 +1672,21 @@ func (ps *PostgresStorage) EnsurePlatformUser(ctx context.Context, pubkey string
 	return err
 }
 
+// RemovePlatformUser de-registers a pubkey from the platform users table.
+// Guarded: it will not delete a pubkey that still holds service access grants,
+// so it can only ever remove an orphan identity (the retired HKDF-derived
+// platform pubkey), never an active cross-service user.
+func (ps *PostgresStorage) RemovePlatformUser(ctx context.Context, pubkey string) error {
+	_, err := ps.db.ExecContext(ctx, `
+		DELETE FROM users
+		WHERE pubkey = $1
+		  AND NOT EXISTS (
+		    SELECT 1 FROM user_service_access WHERE pubkey = $1
+		  )`,
+		pubkey)
+	return err
+}
+
 // GrantServiceAccess grants a user access to a service in the platform.
 // Used when a user signs up for a service.
 func (ps *PostgresStorage) GrantServiceAccess(ctx context.Context, pubkey string, serviceSlug string) error {
