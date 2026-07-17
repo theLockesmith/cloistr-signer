@@ -373,8 +373,21 @@ func (c *Client) PublishToRelay(ctx context.Context, relayURL string, event *nos
 	relay, exists := c.relays[relayURL]
 	c.mu.RUnlock()
 
-	if !exists {
-		// Try to connect to the relay temporarily
+	// Only reuse the cached persistent connection if it is still live. A relay
+	// pod restart (or any server-side close) leaves a dead *nostr.Relay in the
+	// map, and the base client has no auto-reconnect for it (only per-key
+	// KeyRelayManager connections reconnect). Reusing the dead connection makes
+	// relay.Publish return "connection closed" on every attempt, which silently
+	// broke all nostrconnect ack publishes (login) until the signer restarted.
+	// When the cached connection is dead we fall through to a fresh temporary
+	// dial — the same path an uncached relay takes.
+	if exists && !relay.IsConnected() {
+		exists = false
+	}
+
+	fresh := !exists
+	if fresh {
+		// Dial a fresh temporary connection (cached one absent or dead).
 		var err error
 		relay, err = nostr.RelayConnect(ctx, relayURL)
 		if err != nil {
@@ -384,6 +397,20 @@ func (c *Client) PublishToRelay(ctx context.Context, relayURL string, event *nos
 	}
 
 	err := relay.Publish(ctx, *event)
+
+	// Guard the race where a cached connection passed the IsConnected() check
+	// but died before/during the write: retry once on a fresh dial. Without this
+	// the ack would fail with "connection closed" and the login would time out.
+	if err != nil && !fresh && isConnectionClosed(err) {
+		slog.Info("cached relay connection closed, redialing", "url", relayURL)
+		if redial, derr := nostr.RelayConnect(ctx, relayURL); derr == nil {
+			defer redial.Close()
+			relay = redial
+			fresh = true
+			err = relay.Publish(ctx, *event)
+		}
+	}
+
 	if err != nil {
 		// Check if auth is required
 		if c.authKey != "" && isAuthRequired(err) {
@@ -403,6 +430,20 @@ func (c *Client) PublishToRelay(ctx context.Context, relayURL string, event *nos
 
 	slog.Debug("published to specific relay", "url", relayURL, "event_id", event.ID)
 	return nil
+}
+
+// isConnectionClosed reports whether an error indicates the relay websocket was
+// closed (as opposed to an application-level rejection like auth-required or
+// rate-limited). Used to trigger a reconnect-and-retry on a stale connection.
+func isConnectionClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "connection closed") ||
+		strings.Contains(errStr, "use of closed") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset")
 }
 
 // isAuthRequired checks if an error indicates authentication is required
