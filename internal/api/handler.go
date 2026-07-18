@@ -2128,8 +2128,18 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Reset failed login attempts
-	h.storage.ResetFailedLogins(r.Context(), user.ID)
+	// Reset failed login attempts. Non-critical bookkeeping against camelot, so
+	// it runs off the login critical path: a camelot write-latency spike here
+	// otherwise stalls the login response (measured up to ~11s even after
+	// sessions moved to Dragonfly). Detached context; failure is logged and
+	// self-heals on the next successful login.
+	go func(userID string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := h.storage.ResetFailedLogins(ctx, userID); err != nil {
+			slog.Warn("async reset failed-logins failed", "error", err, "user_id", userID)
+		}
+	}(user.ID)
 
 	// Lazily migrate the platform identity to the signing key (Option A): retires
 	// the derived platform pubkey for pre-Option-A / fallback accounts on their
@@ -2189,10 +2199,21 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		go h.populateVaultTokenAsync(sessionID, user.ID, user.Username, req.Password)
 	}
 
-	// Update last login. LastLoginIP intentionally not set (see above).
+	// Update last login. LastLoginIP intentionally not set (see above). Like the
+	// failed-login reset, this is non-critical bookkeeping against camelot and
+	// must not sit on the login critical path — it was the last remaining
+	// synchronous camelot write there. Snapshot user because the goroutine
+	// outlives this handler.
 	now := time.Now()
 	user.LastLoginAt = &now
-	h.storage.UpdateUser(r.Context(), user)
+	lastLoginUser := *user
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := h.storage.UpdateUser(ctx, &lastLoginUser); err != nil {
+			slog.Warn("async last-login update failed", "error", err, "user_id", lastLoginUser.ID)
+		}
+	}()
 
 	slog.Info("user logged in", "username", req.Username, "user_id", user.ID)
 
