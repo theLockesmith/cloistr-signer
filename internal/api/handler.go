@@ -12,10 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-webauthn/webauthn/protocol"
-	"github.com/go-webauthn/webauthn/webauthn"
-	"github.com/nbd-wtf/go-nostr"
-	"github.com/nbd-wtf/go-nostr/nip19"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/audit"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/bunker"
@@ -25,6 +21,10 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/signer"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/vault"
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
 )
 
 // Handler manages HTTP API endpoints
@@ -39,7 +39,7 @@ type Handler struct {
 	frostKeyGen      *frost.KeyGenerator
 	distributedDKG   *frost.DistributedDKG
 	remoteSigner     *frost.RemoteSigner
-	userDKG          *frost.UserDKG   // FROST 2-of-N user-cosigner DKG (docs/frost-2-of-n-design.md)
+	userDKG          *frost.UserDKG     // FROST 2-of-N user-cosigner DKG (docs/frost-2-of-n-design.md)
 	webauthn         *webauthn.WebAuthn // nil when WebAuthn config is incomplete (e.g. no RPID)
 }
 
@@ -170,9 +170,9 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 	var wa *webauthn.WebAuthn
 	if cfg.WebAuthn.RPID != "" && len(cfg.WebAuthn.RPOrigins) > 0 {
 		waCfg := &webauthn.Config{
-			RPID:          cfg.WebAuthn.RPID,
-			RPDisplayName: cfg.WebAuthn.RPDisplayName,
-			RPOrigins:     cfg.WebAuthn.RPOrigins,
+			RPID:                  cfg.WebAuthn.RPID,
+			RPDisplayName:         cfg.WebAuthn.RPDisplayName,
+			RPOrigins:             cfg.WebAuthn.RPOrigins,
 			AttestationPreference: protocol.PreferNoAttestation,
 			AuthenticatorSelection: protocol.AuthenticatorSelection{
 				ResidentKey:      protocol.ResidentKeyRequirementPreferred,
@@ -423,8 +423,8 @@ type KeyResponse struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
 	Pubkey          string    `json:"pubkey"`
-	KeyType         string    `json:"key_type,omitempty"`         // "local" or "proxy"
-	UpstreamPubkey  string    `json:"upstream_pubkey,omitempty"`  // For proxy keys
+	KeyType         string    `json:"key_type,omitempty"`        // "local" or "proxy"
+	UpstreamPubkey  string    `json:"upstream_pubkey,omitempty"` // For proxy keys
 	RequireApproval bool      `json:"require_approval"`
 	DisposableMode  bool      `json:"disposable_mode"`
 	CoverTraffic    bool      `json:"cover_traffic"`
@@ -527,9 +527,9 @@ func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
 			KeyType:         key.KeyType,
 			UpstreamPubkey:  key.UpstreamPubkey,
 			RequireApproval: key.RequireApproval,
-		DisposableMode:  key.DisposableMode,
-		CoverTraffic:    key.CoverTraffic,
-		TorEgress:       key.TorEgress,
+			DisposableMode:  key.DisposableMode,
+			CoverTraffic:    key.CoverTraffic,
+			TorEgress:       key.TorEgress,
 			Relays:          key.Relays,
 			CreatedAt:       key.CreatedAt,
 		}
@@ -1123,10 +1123,10 @@ func (h *Handler) handleUpdatePermissionName(w http.ResponseWriter, r *http.Requ
 // Policy management endpoints
 
 type CreatePolicyRequest struct {
-	Name        string             `json:"name"`
-	Description string             `json:"description,omitempty"`
-	Rules       []PolicyRuleInput  `json:"rules"`
-	ExpiresAt   *time.Time         `json:"expires_at,omitempty"`
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	Rules       []PolicyRuleInput `json:"rules"`
+	ExpiresAt   *time.Time        `json:"expires_at,omitempty"`
 }
 
 type PolicyRuleInput struct {
@@ -1136,12 +1136,12 @@ type PolicyRuleInput struct {
 }
 
 type PolicyResponse struct {
-	ID          string              `json:"id"`
-	Name        string              `json:"name"`
-	Description string              `json:"description,omitempty"`
+	ID          string                `json:"id"`
+	Name        string                `json:"name"`
+	Description string                `json:"description,omitempty"`
 	Rules       []*storage.PolicyRule `json:"rules"`
-	ExpiresAt   *time.Time          `json:"expires_at,omitempty"`
-	CreatedAt   time.Time           `json:"created_at"`
+	ExpiresAt   *time.Time            `json:"expires_at,omitempty"`
+	CreatedAt   time.Time             `json:"created_at"`
 }
 
 func (h *Handler) handlePolicies(w http.ResponseWriter, r *http.Request) {
@@ -1296,14 +1296,14 @@ type CreateTokenRequest struct {
 }
 
 type TokenResponse struct {
-	ID          string     `json:"id"`
-	PolicyID    string     `json:"policy_id"`
-	KeyID       string     `json:"key_id"`
-	ClientName  string     `json:"client_name,omitempty"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	RedeemedAt  *time.Time `json:"redeemed_at,omitempty"`
-	RedeemedBy  string     `json:"redeemed_by,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID         string     `json:"id"`
+	PolicyID   string     `json:"policy_id"`
+	KeyID      string     `json:"key_id"`
+	ClientName string     `json:"client_name,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	RedeemedAt *time.Time `json:"redeemed_at,omitempty"`
+	RedeemedBy string     `json:"redeemed_by,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 func (h *Handler) handleTokens(w http.ResponseWriter, r *http.Request) {
@@ -1552,10 +1552,10 @@ func (h *Handler) handleRedeemToken(w http.ResponseWriter, r *http.Request, toke
 	)
 
 	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"message":     "token redeemed successfully",
-		"key_pubkey":  key.Pubkey,
-		"methods":     methods,
-		"expires_at":  policy.ExpiresAt,
+		"message":    "token redeemed successfully",
+		"key_pubkey": key.Pubkey,
+		"methods":    methods,
+		"expires_at": policy.ExpiresAt,
 	})
 }
 
@@ -1710,10 +1710,10 @@ func (h *Handler) handleGetRequest(w http.ResponseWriter, r *http.Request, id st
 }
 
 type ApproveRequestInput struct {
-	Methods      []string `json:"methods,omitempty"`       // Methods to allow (default: requested method only)
-	AllowedKinds []int    `json:"allowed_kinds,omitempty"` // Kinds to allow for sign_event
-	Remember     bool     `json:"remember"`                // Create persistent permission
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"`  // Permission expiration (if remember=true)
+	Methods      []string   `json:"methods,omitempty"`       // Methods to allow (default: requested method only)
+	AllowedKinds []int      `json:"allowed_kinds,omitempty"` // Kinds to allow for sign_event
+	Remember     bool       `json:"remember"`                // Create persistent permission
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`    // Permission expiration (if remember=true)
 }
 
 func (h *Handler) handleApproveRequest(w http.ResponseWriter, r *http.Request, requestID string) {
@@ -1904,25 +1904,25 @@ type LoginRequest struct {
 }
 
 type LoginResponse struct {
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
-	User      UserResponse `json:"user"`
-	MFARequired bool `json:"mfa_required,omitempty"`
+	Token       string       `json:"token"`
+	ExpiresAt   time.Time    `json:"expires_at"`
+	User        UserResponse `json:"user"`
+	MFARequired bool         `json:"mfa_required,omitempty"`
 }
 
 type UserResponse struct {
-	ID           string     `json:"id"`
-	Username     string     `json:"username"`
-	Email        string     `json:"email,omitempty"`
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Email    string `json:"email,omitempty"`
 	// Pubkey is the user's canonical Nostr identity: their Primary signing key's
 	// pubkey (Option A identity model). Falls back to the derived platform pubkey
 	// only when the user has zero signing keys. The HKDF-derived platform pubkey is
 	// no longer surfaced to clients — once a signing key exists it is the sole
 	// identity and the derived pubkey is de-registered (see reconcilePlatformIdentity).
-	Pubkey       string     `json:"pubkey,omitempty"`
-	MFAEnabled   bool       `json:"mfa_enabled"`
-	CreatedAt    time.Time  `json:"created_at"`
-	LastLogin    *time.Time `json:"last_login,omitempty"`
+	Pubkey     string     `json:"pubkey,omitempty"`
+	MFAEnabled bool       `json:"mfa_enabled"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastLogin  *time.Time `json:"last_login,omitempty"`
 }
 
 type MFASetupResponse struct {
@@ -2133,8 +2133,18 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Lazily migrate the platform identity to the signing key (Option A): retires
 	// the derived platform pubkey for pre-Option-A / fallback accounts on their
-	// next login. Best-effort; never blocks login.
-	h.reconcilePlatformIdentity(r.Context(), user)
+	// next login. Runs OFF the login critical path: it does idempotent bookkeeping
+	// on the shared platform users/user_service_access tables (contended by other
+	// services), so under load its latency must not land on the login response —
+	// synchronously it turned slow shared-table writes into 10-20s logins and edge
+	// 502s. Detached context (r.Context() is canceled once we respond) and a
+	// snapshot of user (the handler mutates the original below via UpdateUser).
+	reconcileUser := *user
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		h.reconcilePlatformIdentity(ctx, &reconcileUser)
+	}()
 
 	// Generate session ID first (needed for JWT)
 	sessionID, _ := auth.GenerateSessionID()
@@ -3202,7 +3212,7 @@ type NostrConnectSessionRequest struct {
 type NostrConnectSessionResponse struct {
 	Success         bool   `json:"success,omitempty"`
 	ConsentRequired bool   `json:"consent_required,omitempty"`
-	AppID           string `json:"app_id,omitempty"`   // client pubkey; present when consent_required
+	AppID           string `json:"app_id,omitempty"` // client pubkey; present when consent_required
 	AppName         string `json:"app_name,omitempty"`
 	AppURL          string `json:"app_url,omitempty"`
 	AppImage        string `json:"app_image,omitempty"`
@@ -3218,7 +3228,7 @@ type NostrConnectSessionResponse struct {
 //     - Yes → approve immediately (silent re-auth).
 //     - No + consent==true → record consent, then approve.
 //     - No + consent==false → return 200 {consent_required:true, app_id, app_name}
-//       so the client can display a consent prompt and re-POST with consent=true.
+//     so the client can display a consent prompt and re-POST with consent=true.
 func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -3669,7 +3679,7 @@ func (h *Handler) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 
 type CreateFrostKeyRequest struct {
 	Name        string `json:"name"`
-	Threshold   int    `json:"threshold"`   // t in t-of-n
+	Threshold   int    `json:"threshold"`    // t in t-of-n
 	TotalShares int    `json:"total_shares"` // n in t-of-n
 }
 
@@ -3695,9 +3705,9 @@ type FrostShareResponse struct {
 
 type FrostKeyDetailResponse struct {
 	FrostKeyResponse
-	Shares   []FrostShareResponse `json:"shares"`
-	CanSign  bool                 `json:"can_sign"`
-	LocalShares int              `json:"local_shares"`
+	Shares      []FrostShareResponse `json:"shares"`
+	CanSign     bool                 `json:"can_sign"`
+	LocalShares int                  `json:"local_shares"`
 }
 
 func (h *Handler) handleFrostKeys(w http.ResponseWriter, r *http.Request) {
@@ -4462,8 +4472,8 @@ type DKGSessionResponse struct {
 
 // InitDKGRequest is the request body for initiating a DKG session
 type InitDKGRequest struct {
-	Participants []string `json:"participants"` // Nostr pubkeys of participants (including self)
-	Threshold    int      `json:"threshold"`    // Minimum shares required to sign
+	Participants []string `json:"participants"`       // Nostr pubkeys of participants (including self)
+	Threshold    int      `json:"threshold"`          // Minimum shares required to sign
 	KeyName      string   `json:"key_name,omitempty"` // Optional name for the resulting key
 }
 
