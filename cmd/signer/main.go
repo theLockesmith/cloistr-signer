@@ -20,6 +20,7 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/frost"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/metrics"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/nostr"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/sessionstore"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/signer"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/vault"
@@ -48,6 +49,21 @@ func main() {
 	if err != nil {
 		slog.Error("failed to initialize storage", "error", err)
 		os.Exit(1)
+	}
+
+	// Back user sessions with Dragonfly (CACHE_URL) instead of the shared camelot
+	// Postgres. Session create/read sits on the login and every-authenticated-
+	// request hot path; camelot's inherent write latency there stalls logins for
+	// seconds (edge 502). Dragonfly is in-cluster, HA, sub-ms. Graceful fallback:
+	// if CACHE_URL is unset or Dragonfly is unreachable at startup, sessions stay
+	// in Postgres (functional, just slow). Wrapped before defer so Close covers it.
+	if cfg.CacheURL != "" {
+		if wrapped, werr := sessionstore.New(store, cfg.CacheURL); werr != nil {
+			slog.Warn("Dragonfly session store unavailable; using Postgres-backed sessions", "error", werr)
+		} else {
+			store = wrapped
+			slog.Info("user sessions backed by Dragonfly", "url_present", true)
+		}
 	}
 	defer store.Close()
 
