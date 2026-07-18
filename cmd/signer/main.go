@@ -9,11 +9,11 @@ import (
 	"syscall"
 	"time"
 
-	gonostr "github.com/nbd-wtf/go-nostr"
 	"git.aegis-hq.xyz/coldforge/cloistr-common/relayprefs"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/admin"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/api"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/audit"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/claim"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/discovery"
@@ -24,6 +24,7 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/vault"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/web"
+	gonostr "github.com/nbd-wtf/go-nostr"
 )
 
 func main() {
@@ -158,6 +159,20 @@ func main() {
 
 	// Initialize NIP-46 signer
 	nip46Signer := signer.New(cfg, store, relayClient, encryptor, relaySelector, relayPrefsClient, auditLogger)
+
+	// Cross-replica request-claim coordination via Dragonfly (CACHE_URL). With
+	// >1 replica this ensures exactly one replica answers each NIP-46 request;
+	// without CACHE_URL it is disabled (correct for a single replica). Connection
+	// failure is non-fatal — the signer degrades to per-replica processing.
+	requestClaimer, err := claim.New(cfg.CacheURL, time.Duration(cfg.RequestClaimTTLSeconds)*time.Second)
+	if err != nil {
+		slog.Warn("request-claim coordination unavailable; running without it", "error", err)
+	} else if requestClaimer != nil {
+		nip46Signer.SetClaimer(requestClaimer)
+		defer requestClaimer.Close()
+	} else {
+		slog.Info("request-claim coordination disabled (no CACHE_URL)")
+	}
 
 	// Initialize HTTP API
 	apiHandler := api.NewHandler(cfg, nip46Signer, store, encryptor, vaultClient)

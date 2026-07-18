@@ -11,21 +11,23 @@ import (
 
 // Config holds all configuration for the signer service
 type Config struct {
-	Server             ServerConfig      `yaml:"server"`
-	Relays             []string          `yaml:"relays"`
-	RelayPublicMappings map[string]string `yaml:"relay_public_mappings"` // Internal URL -> Public URL for bunker URIs
-	RelayAuthKey       string            `yaml:"relay_auth_key"`         // Private key for NIP-42 relay auth (hex)
-	MinPowDifficulty   int               `yaml:"min_pow_difficulty"`     // Minimum POW difficulty for publishing (0 = disabled)
-	Storage            StorageConfig     `yaml:"storage"`
-	Auth               AuthConfig        `yaml:"auth"`
-	WebAuthn           WebAuthnConfig    `yaml:"webauthn"`
-	Vault              VaultConfig       `yaml:"vault"`
-	Audit              AuditConfig       `yaml:"audit"`
-	Service            ServiceConfig     `yaml:"service"`
-	Proxy              ProxyConfig       `yaml:"proxy"`
-	Discovery          DiscoveryConfig   `yaml:"discovery"`
-	Tor                TorConfig         `yaml:"tor"`       // Optional SOCKS5 egress for per-key Tor routing (privacy §3.5)
-	Lightning          LightningConfig   `yaml:"lightning"` // LNURL-auth (LUD-04)
+	Server                 ServerConfig      `yaml:"server"`
+	Relays                 []string          `yaml:"relays"`
+	RelayPublicMappings    map[string]string `yaml:"relay_public_mappings"` // Internal URL -> Public URL for bunker URIs
+	RelayAuthKey           string            `yaml:"relay_auth_key"`        // Private key for NIP-42 relay auth (hex)
+	MinPowDifficulty       int               `yaml:"min_pow_difficulty"`    // Minimum POW difficulty for publishing (0 = disabled)
+	Storage                StorageConfig     `yaml:"storage"`
+	Auth                   AuthConfig        `yaml:"auth"`
+	WebAuthn               WebAuthnConfig    `yaml:"webauthn"`
+	Vault                  VaultConfig       `yaml:"vault"`
+	Audit                  AuditConfig       `yaml:"audit"`
+	Service                ServiceConfig     `yaml:"service"`
+	Proxy                  ProxyConfig       `yaml:"proxy"`
+	Discovery              DiscoveryConfig   `yaml:"discovery"`
+	Tor                    TorConfig         `yaml:"tor"`                       // Optional SOCKS5 egress for per-key Tor routing (privacy §3.5)
+	Lightning              LightningConfig   `yaml:"lightning"`                 // LNURL-auth (LUD-04)
+	CacheURL               string            `yaml:"cache_url"`                 // Dragonfly/Redis URL for cross-replica request-claim coordination (empty = disabled)
+	RequestClaimTTLSeconds int               `yaml:"request_claim_ttl_seconds"` // TTL for a request claim (default 60)
 }
 
 // LightningConfig holds LNURL-auth configuration.
@@ -47,11 +49,12 @@ type LightningConfig struct {
 // go-nostr connection layer (nbd-wtf/go-nostr@v0.52.3/connection.go)
 // does not currently expose a custom-dialer hook, so per-key SOCKS5
 // routing requires either:
-//   (a) HTTPS_PROXY/HTTP_PROXY/ALL_PROXY env vars on the signer process
-//       (routes ALL traffic through Tor, not per-key selectable)
-//   (b) An upstream go-nostr patch to inject a custom http.Client into
-//       getConnectionOptions
-//   (c) A local SOCKS5-terminating WebSocket proxy sidecar
+//
+//	(a) HTTPS_PROXY/HTTP_PROXY/ALL_PROXY env vars on the signer process
+//	    (routes ALL traffic through Tor, not per-key selectable)
+//	(b) An upstream go-nostr patch to inject a custom http.Client into
+//	    getConnectionOptions
+//	(c) A local SOCKS5-terminating WebSocket proxy sidecar
 //
 // Follow-up commit will pick one - option (b) upstream patch is the
 // preferred long-term path since per-key gating is the whole point of
@@ -132,19 +135,19 @@ type VaultConfig struct {
 
 // AuditConfig holds audit logging configuration
 type AuditConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Backend  string `yaml:"backend"`   // "memory", "file", "json"
-	FilePath string `yaml:"file_path"` // Path for file/json backend
-	MaxEvents int   `yaml:"max_events"` // Max events to retain (memory backend)
+	Enabled   bool   `yaml:"enabled"`
+	Backend   string `yaml:"backend"`    // "memory", "file", "json"
+	FilePath  string `yaml:"file_path"`  // Path for file/json backend
+	MaxEvents int    `yaml:"max_events"` // Max events to retain (memory backend)
 }
 
 // ServiceConfig holds service metadata for NIP-89 and NIP-05
 type ServiceConfig struct {
-	Name        string `yaml:"name"`         // Service name
-	Description string `yaml:"description"`  // Service description
-	Website     string `yaml:"website"`      // Public URL
-	NIP05Domain string `yaml:"nip05_domain"` // Domain for NIP-05 (e.g., coldforge.xyz)
-	PublishNIP89 bool  `yaml:"publish_nip89"` // Publish NIP-89 announcements
+	Name         string `yaml:"name"`          // Service name
+	Description  string `yaml:"description"`   // Service description
+	Website      string `yaml:"website"`       // Public URL
+	NIP05Domain  string `yaml:"nip05_domain"`  // Domain for NIP-05 (e.g., coldforge.xyz)
+	PublishNIP89 bool   `yaml:"publish_nip89"` // Publish NIP-89 announcements
 }
 
 // Load loads configuration from environment variables and optional YAML file
@@ -211,10 +214,10 @@ func Load() (*Config, error) {
 			Timeout: 30,
 		},
 		Discovery: DiscoveryConfig{
-			URL:             "",    // Disabled by default
-			Timeout:         5,     // 5 seconds
-			MaxRelays:       3,     // Max 3 relays from discovery
-			IncludeInBunker: true,  // Include in bunker URI by default
+			URL:             "",   // Disabled by default
+			Timeout:         5,    // 5 seconds
+			MaxRelays:       3,    // Max 3 relays from discovery
+			IncludeInBunker: true, // Include in bunker URI by default
 		},
 		Lightning: LightningConfig{
 			Domain: "signer.cloistr.xyz",
@@ -265,6 +268,20 @@ func Load() (*Config, error) {
 
 	if torURL := os.Getenv("TOR_SOCKS5_URL"); torURL != "" {
 		cfg.Tor.SOCKS5URL = torURL
+	}
+
+	// Dragonfly/Redis for cross-replica request-claim coordination. Same
+	// CACHE_URL convention as cloistr-relay/discovery/blossom. Empty = disabled
+	// (each replica processes independently — safe with a single replica).
+	if cacheURL := os.Getenv("CACHE_URL"); cacheURL != "" {
+		cfg.CacheURL = cacheURL
+	}
+	if ttlStr := os.Getenv("REQUEST_CLAIM_TTL_SECONDS"); ttlStr != "" {
+		ttl, err := strconv.Atoi(ttlStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid REQUEST_CLAIM_TTL_SECONDS: %w", err)
+		}
+		cfg.RequestClaimTTLSeconds = ttl
 	}
 
 	if storageType := os.Getenv("STORAGE_TYPE"); storageType != "" {

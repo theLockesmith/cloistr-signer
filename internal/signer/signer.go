@@ -11,12 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nbd-wtf/go-nostr"
-	"github.com/nbd-wtf/go-nostr/nip04"
-	"github.com/nbd-wtf/go-nostr/nip44"
 	"git.aegis-hq.xyz/coldforge/cloistr-common/relayprefs"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/audit"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/bunker"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/claim"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/discovery"
@@ -25,6 +23,9 @@ import (
 	relay "git.aegis-hq.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/proxy"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
+	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip04"
+	"github.com/nbd-wtf/go-nostr/nip44"
 )
 
 const (
@@ -75,31 +76,32 @@ type authResult struct {
 
 // Signer handles NIP-46 remote signing requests
 type Signer struct {
-	config          *config.Config
-	storage         storage.Storage
-	relayClient     *relay.Client
-	keyRelayManager *relay.KeyRelayManager              // Per-key relay connections for scalability
-	encryptor       *crypto.Encryptor
-	auditLogger     audit.Logger                        // Audit logging for compliance and security
-	proxyClient     *proxy.Client                       // Client for upstream signer connections
-	relaySelector   *discovery.Selector                 // Relay selection with optional discovery
-	relayPrefs      *relayprefs.Client                  // Relay preferences for user data delivery
-	frostCoordinator *frost.Coordinator                 // FROST threshold signing coordinator (Phase 13)
-	frostUserSigner  *frost.UserSignerCoordinator       // FROST 2-of-N user-cosigner coordinator (P4)
-	cosignListenerRegistry sync.Map                     // user_id (string) → cosign listener ephemeral pubkey (string), P4e
-	keys            map[string]string                   // pubkey -> private key (hex)
-	keysLock        sync.RWMutex                        // Protects keys map for concurrent access
-	keyRelays       map[string][]string                 // pubkey -> configured relays (from storage)
-	proxyKeys       map[string]string                   // pubkey -> bunker URI (for proxy keys)
-	frostKeys       map[string]string                   // pubkey -> frost key ID (for FROST keys)
-	pendingCtx      map[string]*pendingRequestContext   // requestID -> context
-	pendingCtxLock  sync.RWMutex
-	seenEvents      map[string]time.Time                // event ID -> first seen time (deduplication)
-	seenEventsLock  sync.RWMutex
-	ctx             context.Context                     // Main context for subscription management
-	cancel          context.CancelFunc
-	subCancels      map[string]context.CancelFunc       // Per-key subscription cancel functions (pubkey -> cancel)
-	subLock         sync.Mutex                          // Protects subscription refresh
+	config                 *config.Config
+	storage                storage.Storage
+	relayClient            *relay.Client
+	keyRelayManager        *relay.KeyRelayManager // Per-key relay connections for scalability
+	encryptor              *crypto.Encryptor
+	auditLogger            audit.Logger                      // Audit logging for compliance and security
+	proxyClient            *proxy.Client                     // Client for upstream signer connections
+	relaySelector          *discovery.Selector               // Relay selection with optional discovery
+	relayPrefs             *relayprefs.Client                // Relay preferences for user data delivery
+	frostCoordinator       *frost.Coordinator                // FROST threshold signing coordinator (Phase 13)
+	frostUserSigner        *frost.UserSignerCoordinator      // FROST 2-of-N user-cosigner coordinator (P4)
+	cosignListenerRegistry sync.Map                          // user_id (string) → cosign listener ephemeral pubkey (string), P4e
+	keys                   map[string]string                 // pubkey -> private key (hex)
+	keysLock               sync.RWMutex                      // Protects keys map for concurrent access
+	keyRelays              map[string][]string               // pubkey -> configured relays (from storage)
+	proxyKeys              map[string]string                 // pubkey -> bunker URI (for proxy keys)
+	frostKeys              map[string]string                 // pubkey -> frost key ID (for FROST keys)
+	pendingCtx             map[string]*pendingRequestContext // requestID -> context
+	pendingCtxLock         sync.RWMutex
+	seenEvents             map[string]time.Time // event ID -> first seen time (per-replica dedup across relays)
+	seenEventsLock         sync.RWMutex
+	claimer                *claim.Claimer  // cross-replica request-claim coordination (nil = disabled/single-replica)
+	ctx                    context.Context // Main context for subscription management
+	cancel                 context.CancelFunc
+	subCancels             map[string]context.CancelFunc // Per-key subscription cancel functions (pubkey -> cancel)
+	subLock                sync.Mutex                    // Protects subscription refresh
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -144,6 +146,13 @@ func New(cfg *config.Config, store storage.Storage, relayClient *relay.Client, e
 		seenEvents:       make(map[string]time.Time),
 		subCancels:       make(map[string]context.CancelFunc),
 	}
+}
+
+// SetClaimer installs the cross-replica request-claim coordinator. A nil claimer
+// (no CACHE_URL configured) disables coordination: every replica processes each
+// request, which is correct for a single replica.
+func (s *Signer) SetClaimer(c *claim.Claimer) {
+	s.claimer = c
 }
 
 // Start begins listening for NIP-46 requests
@@ -540,6 +549,17 @@ func (s *Signer) handleEventWithRelay(event *nostr.Event, sourceRelay string) {
 
 	privateKey := s.keys[targetPubkey]
 	s.keysLock.RUnlock()
+
+	// Cross-replica claim: every signer replica's per-key subscription receives
+	// this request, so without coordination each replica would sign and publish
+	// its own response and the client would see duplicate responses ("no matching
+	// pending request id"). Claim the event in Dragonfly so exactly one replica
+	// answers. Fail-open (nil claimer or Redis error grants the claim): a
+	// duplicate response is benign; a dropped response makes the client time out.
+	if !s.claimer.Claim(context.Background(), event.ID) {
+		slog.Debug("request claimed by another replica, skipping", "event_id", event.ID, "to", targetPubkey[:16]+"...")
+		return
+	}
 
 	clientPubkey := event.PubKey
 	requestStart := time.Now()
@@ -1439,11 +1459,11 @@ type CosignCommitment struct {
 // CosignResponsePayload is the plaintext-before-NIP-44 form of the
 // browser → signer cosign response.
 type CosignResponsePayload struct {
-	V                 int              `json:"v"`
-	Approved          bool             `json:"approved"`
-	Reason            string           `json:"reason,omitempty"`
-	UserCommitment    CosignCommitment `json:"user_commitment,omitempty"`
-	PartialSignature  string           `json:"partial_signature_hex,omitempty"`
+	V                int              `json:"v"`
+	Approved         bool             `json:"approved"`
+	Reason           string           `json:"reason,omitempty"`
+	UserCommitment   CosignCommitment `json:"user_commitment,omitempty"`
+	PartialSignature string           `json:"partial_signature_hex,omitempty"`
 }
 
 // publishCosignRequest sends a kind:24135 cosign request to the user's
@@ -1571,16 +1591,16 @@ func (s *Signer) waitForCosignResponse(ctx context.Context, signerEphemeralSK, s
 // key through the browser cosigning ceremony (docs/frost-cosigning-design.md).
 //
 // Current state (P4d):
-//   1. Assembles UserCosignSetup from storage — this WOULD decrypt the
-//      signer's share via the user's vault_token stashed on the NIP-46
-//      session at handleConnect time.
-//   2. Calls UserSignerCoordinator.BeginCosign to generate the signer's
-//      commitment.
-//   3. WOULD publish kind:24135 to the user's relays and wait for the
-//      kind:24136 response (P4c wire, next commit).
-//   4. Once the browser responds, WOULD call CompleteCosign to combine
-//      partials into a canonical 64-byte BIP-340 signature.
-//   5. Attaches the signature to the event and returns.
+//  1. Assembles UserCosignSetup from storage — this WOULD decrypt the
+//     signer's share via the user's vault_token stashed on the NIP-46
+//     session at handleConnect time.
+//  2. Calls UserSignerCoordinator.BeginCosign to generate the signer's
+//     commitment.
+//  3. WOULD publish kind:24135 to the user's relays and wait for the
+//     kind:24136 response (P4c wire, next commit).
+//  4. Once the browser responds, WOULD call CompleteCosign to combine
+//     partials into a canonical 64-byte BIP-340 signature.
+//  5. Attaches the signature to the event and returns.
 //
 // Steps 3+4 are the P4c/P4e piece. Until then we return a clear error
 // AFTER doing the setup work so that any errors in the setup path
