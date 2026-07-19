@@ -550,17 +550,27 @@ func (s *Signer) handleEventWithRelay(event *nostr.Event, sourceRelay string) {
 	privateKey := s.keys[targetPubkey]
 	s.keysLock.RUnlock()
 
-	// Cross-replica claim: every signer replica's per-key subscription receives
-	// this request, so without coordination each replica would sign and publish
-	// its own response and the client would see duplicate responses ("no matching
-	// pending request id"). Claim the event in Dragonfly so exactly one replica
-	// answers. Fail-open (nil claimer or Redis error grants the claim): a
-	// duplicate response is benign; a dropped response makes the client time out.
-	if !s.claimer.Claim(context.Background(), event.ID) {
-		slog.Debug("request claimed by another replica, skipping", "event_id", event.ID, "to", targetPubkey[:16]+"...")
-		return
-	}
+	// Cross-replica coordination: every replica's per-key subscription receives
+	// this request, so without it each would sign and publish its own response
+	// and the client would log duplicate "no matching pending request id".
+	// Coordinate runs the work on exactly one replica, and — if that replica dies
+	// mid-request — a watching replica takes over so the request still gets
+	// answered instead of the client timing out. Fail-open (nil claimer or Redis
+	// error runs it here): a duplicate response is benign, a dropped one is not.
+	//
+	// Coordinate never blocks when we lose: relay events are dispatched
+	// synchronously on the subscription read loop, so blocking here would stall
+	// every subsequent event on this relay.
+	s.claimer.Coordinate(context.Background(), event.ID, func() {
+		s.decryptAndDispatch(event, targetPubkey, privateKey, sourceRelay)
+	})
+}
 
+// decryptAndDispatch decrypts a claimed NIP-46 request and handles it. It is
+// invoked by the claim coordinator either inline on the owning replica or, on
+// takeover, from that replica's watcher goroutine — so it must not depend on
+// the caller's goroutine or on request-scoped state.
+func (s *Signer) decryptAndDispatch(event *nostr.Event, targetPubkey, privateKey, sourceRelay string) {
 	clientPubkey := event.PubKey
 	requestStart := time.Now()
 

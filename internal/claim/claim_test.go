@@ -117,3 +117,143 @@ func TestNew_EmptyURLReturnsNil(t *testing.T) {
 		t.Error("empty URL should return a nil Claimer")
 	}
 }
+
+// --- Coordinate: watch-and-take-over ---
+
+// fastClaimer shrinks the lease/watch timings so tests need not sleep for real.
+func fastClaimer(t *testing.T, addr string) *Claimer {
+	t.Helper()
+	c, err := New("redis://"+addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	c.leaseTTL = 300 * time.Millisecond
+	c.heartbeatIvl = 80 * time.Millisecond
+	c.watchPoll = 40 * time.Millisecond
+	c.watchBudget = 4 * time.Second
+	return c
+}
+
+// The uncontended owner runs process inline and marks the request done.
+func TestCoordinate_OwnerRunsInlineAndMarksDone(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	c := fastClaimer(t, mr.Addr())
+
+	ran := false
+	c.Coordinate(context.Background(), "evt-1", func() { ran = true })
+	if !ran {
+		t.Fatal("owner must run process inline (synchronously) before Coordinate returns")
+	}
+	if got, _ := mr.Get(keyPrefix + "evt-1"); got != doneValue {
+		t.Errorf("expected done marker after completion, got %q", got)
+	}
+}
+
+// A replica that loses to an owner which then COMPLETES must not run process.
+func TestCoordinate_LoserSkipsWhenOwnerCompletes(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	a := fastClaimer(t, mr.Addr())
+	b := fastClaimer(t, mr.Addr())
+	b.podID = "pod-b"
+
+	a.Coordinate(context.Background(), "evt-2", func() {}) // owner completes -> done marker
+	loserRan := make(chan struct{}, 1)
+	b.Coordinate(context.Background(), "evt-2", func() { loserRan <- struct{}{} })
+
+	select {
+	case <-loserRan:
+		t.Fatal("loser must not process a request the owner already completed")
+	case <-time.After(600 * time.Millisecond):
+	}
+}
+
+// The core failover: owner claims then dies (no heartbeat, no done marker); the
+// watching replica must take over and run process.
+func TestCoordinate_TakesOverWhenOwnerDies(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	dead := fastClaimer(t, mr.Addr())
+	live := fastClaimer(t, mr.Addr())
+	live.podID = "pod-live"
+
+	// Simulate a crash: take the lease, never heartbeat, never mark done.
+	if won, err := dead.tryClaim(context.Background(), "evt-3"); err != nil || !won {
+		t.Fatalf("setup claim failed won=%v err=%v", won, err)
+	}
+
+	tookOver := make(chan struct{}, 1)
+	live.Coordinate(context.Background(), "evt-3", func() { tookOver <- struct{}{} })
+
+	mr.FastForward(400 * time.Millisecond) // lease expires with no done marker
+
+	select {
+	case <-tookOver:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher failed to take over an abandoned request")
+	}
+}
+
+// Losing must not block the caller: the signer dispatches relay events
+// synchronously, so a blocking watch would stall the subscription.
+func TestCoordinate_LoserReturnsImmediately(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	owner := fastClaimer(t, mr.Addr())
+	loser := fastClaimer(t, mr.Addr())
+	loser.podID = "pod-loser"
+
+	if won, _ := owner.tryClaim(context.Background(), "evt-4"); !won {
+		t.Fatal("setup claim failed")
+	}
+	start := time.Now()
+	loser.Coordinate(context.Background(), "evt-4", func() {})
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Errorf("Coordinate blocked the caller for %v; must return immediately when losing", elapsed)
+	}
+}
+
+// Only the current owner may mark done — a replica that lost its lease to a
+// takeover must not clobber the new owner's state.
+func TestMarkDone_OnlyByCurrentOwner(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+	a := fastClaimer(t, mr.Addr())
+	b := fastClaimer(t, mr.Addr())
+	b.podID = "pod-b"
+
+	if won, _ := b.tryClaim(context.Background(), "evt-5"); !won {
+		t.Fatal("setup claim failed")
+	}
+	a.markDone("evt-5") // a never owned it
+	if got, _ := mr.Get(keyPrefix + "evt-5"); got != "pod-b" {
+		t.Errorf("non-owner must not overwrite the lease; got %q", got)
+	}
+}
+
+// Fail-open: a nil Claimer still runs the work.
+func TestCoordinate_NilClaimerRunsProcess(t *testing.T) {
+	var c *Claimer
+	ran := false
+	c.Coordinate(context.Background(), "evt-6", func() { ran = true })
+	if !ran {
+		t.Error("nil claimer must run process (fail-open)")
+	}
+}
