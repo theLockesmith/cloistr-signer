@@ -2420,15 +2420,107 @@ func (h *Handler) handleUserChangePassword(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Re-wrap any passphrase-encrypted key material BEFORE committing the new password.
+	// The KEK for those keys is derived from the passphrase, so changing the password
+	// without re-wrapping would render the user's own keys permanently unreadable.
+	// Ordering matters: on failure here the password is left unchanged, so the account
+	// and its keys stay consistent under the old passphrase.
+	rollbackKeys, rewrapped, err := h.rewrapPassphraseKeys(r.Context(), user.ID, req.CurrentPassword, req.NewPassword)
+	if err != nil {
+		slog.Error("password change aborted: key re-wrap failed",
+			"user_id", user.ID, "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to re-encrypt key material; password unchanged")
+		return
+	}
+
 	user.PasswordHash = hash
 	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
+		// Keys are already re-wrapped under the NEW passphrase but the account still
+		// has the OLD one. Roll the keys back or the user loses access to them.
+		if rollbackKeys != nil {
+			if rbErr := rollbackKeys(); rbErr != nil {
+				slog.Error("CRITICAL: password update failed AND key rollback failed; "+
+					"keys are wrapped under a passphrase the account does not have",
+					"user_id", user.ID, "rollback_error", rbErr)
+			}
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to update password")
 		return
 	}
 
-	slog.Info("password changed", "username", user.Username, "user_id", user.ID)
+	slog.Info("password changed", "username", user.Username, "user_id", user.ID, "keys_rewrapped", rewrapped)
 
 	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "password changed successfully"})
+}
+
+// rewrapPassphraseKeys re-encrypts every passphrase-wrapped key this user owns from the
+// old passphrase to the new one, and returns a rollback func restoring the previous
+// ciphertext.
+//
+// Keys encrypted with a passphrase-derived KEK (crypto.PassphraseEncryptor, "pbk:") are
+// readable only via the user's passphrase -- by design, the server cannot decrypt them
+// alone. That means a password change MUST re-wrap them or the material is lost for
+// good, with no operator recovery path.
+//
+// Vault- and local-encrypted keys are untouched: Vault holds its own wrapping key, and
+// the local encryptor uses a server-held key. Neither is tied to the passphrase.
+//
+// Semantics are all-or-nothing. Every re-encryption is computed in memory first, so a
+// bad passphrase or corrupt ciphertext aborts before anything is persisted. If a write
+// fails partway, already-written keys are restored before returning.
+func (h *Handler) rewrapPassphraseKeys(ctx context.Context, userID, oldPassphrase, newPassphrase string) (rollback func() error, count int, err error) {
+	keys, err := h.storage.ListKeys(ctx, userID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list keys: %w", err)
+	}
+
+	// Compute every re-wrap before persisting any of it.
+	type pending struct {
+		key    *storage.Key
+		oldCT  string
+		newCT  string
+	}
+	var todo []pending
+	for _, k := range keys {
+		if k == nil || !crypto.IsPassphraseEncrypted(k.EncryptedNsec) {
+			continue
+		}
+		newCT, err := crypto.ReWrap(oldPassphrase, newPassphrase, k.EncryptedNsec)
+		if err != nil {
+			return nil, 0, fmt.Errorf("re-wrap key %s: %w", k.ID, err)
+		}
+		todo = append(todo, pending{key: k, oldCT: k.EncryptedNsec, newCT: newCT})
+	}
+	if len(todo) == 0 {
+		return nil, 0, nil
+	}
+
+	// Persist, tracking what has been written so it can be undone.
+	var written []pending
+	restore := func() error {
+		var firstErr error
+		for _, p := range written {
+			p.key.EncryptedNsec = p.oldCT
+			if err := h.storage.UpdateKey(ctx, p.key); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+
+	for _, p := range todo {
+		p.key.EncryptedNsec = p.newCT
+		if err := h.storage.UpdateKey(ctx, p.key); err != nil {
+			if rbErr := restore(); rbErr != nil {
+				slog.Error("key re-wrap rollback failed; some keys may be wrapped under the new passphrase",
+					"user_id", userID, "rollback_error", rbErr)
+			}
+			return nil, 0, fmt.Errorf("persist re-wrapped key %s: %w", p.key.ID, err)
+		}
+		written = append(written, p)
+	}
+
+	return restore, len(written), nil
 }
 
 func (h *Handler) handleMFASetup(w http.ResponseWriter, r *http.Request) {
