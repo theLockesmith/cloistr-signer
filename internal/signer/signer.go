@@ -176,6 +176,18 @@ func (s *Signer) Start(ctx context.Context) error {
 	s.keysLock.Lock()
 	vaultKeyCount := 0
 	for _, key := range keys {
+		// Store per-key relay configuration and proxy metadata FIRST. This must happen
+		// even for Vault-encrypted keys, whose private material is not available until
+		// the user logs in: previously the vault `continue` below skipped these
+		// assignments, so a vault key registered at login had no relay config and
+		// silently fell back to the default relay set.
+		if len(key.Relays) > 0 {
+			s.keyRelays[key.Pubkey] = key.Relays
+		}
+		if key.IsProxy() {
+			s.proxyKeys[key.Pubkey] = key.BunkerURI
+		}
+
 		// Decrypt the local private key if needed (both local and proxy keys have this)
 		privateKey := key.EncryptedNsec
 		if privateKey != "" {
@@ -196,14 +208,10 @@ func (s *Signer) Start(ctx context.Context) error {
 			s.keys[key.Pubkey] = privateKey
 		}
 
-		// Store per-key relay configuration
-		if len(key.Relays) > 0 {
-			s.keyRelays[key.Pubkey] = key.Relays
-		}
-
-		// Track proxy keys separately for forwarding
+		// Relay config + proxy registration already handled above (hoisted so Vault
+		// keys are not skipped). Only the load-confirmation log belongs here, since it
+		// applies to keys whose private material actually made it into the runtime map.
 		if key.IsProxy() {
-			s.proxyKeys[key.Pubkey] = key.BunkerURI
 			upstreamShort := "unknown"
 			if key.UpstreamPubkey != "" && len(key.UpstreamPubkey) >= 16 {
 				upstreamShort = key.UpstreamPubkey[:16] + "..."
@@ -440,6 +448,39 @@ func (s *Signer) RegisterKey(pubkey, privateKeyHex string) {
 	s.keys[pubkey] = privateKeyHex
 	s.keysLock.Unlock()
 	s.refreshSubscription()
+	s.warmKeyRelayClient(pubkey, privateKeyHex)
+}
+
+// warmKeyRelayClient establishes this key's authenticated relay connection ahead of
+// its first use, so the connect + NIP-42 AUTH round-trip is not paid inline on the
+// user's first signing request.
+//
+// This is the login-time counterpart to UnregisterKey's RemoveClient: setup and
+// teardown are now symmetric. It matters most for Vault-encrypted keys, which cannot
+// be warmed at boot at all — their private material only exists after the user
+// authenticates, so login is the only point at which warming is possible.
+//
+// Warming a connection does NOT extend private-key residency: the key is already in
+// the runtime map for the session either way, and is evicted by UnregisterKey on
+// logout. Runs in the background so login is never blocked on a relay handshake.
+func (s *Signer) warmKeyRelayClient(pubkey, privateKeyHex string) {
+	if s.ctx == nil || s.keyRelayManager == nil || privateKeyHex == "" {
+		return
+	}
+
+	s.keysLock.RLock()
+	relays := s.keyRelays[pubkey]
+	s.keysLock.RUnlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic while warming relay client", "pubkey", pubkey[:16]+"...", "panic", r)
+			}
+		}()
+		slog.Debug("warming relay client on key registration", "pubkey", pubkey[:16]+"...")
+		s.keyRelayManager.GetClient(s.ctx, pubkey, privateKeyHex, relays)
+	}()
 }
 
 // RegisterProxyKey registers a proxy key that forwards to an upstream signer (runtime, not persisted)
@@ -450,6 +491,7 @@ func (s *Signer) RegisterProxyKey(pubkey, privateKeyHex, bunkerURI string) {
 	s.proxyKeys[pubkey] = bunkerURI
 	s.keysLock.Unlock()
 	s.refreshSubscription()
+	s.warmKeyRelayClient(pubkey, privateKeyHex)
 }
 
 // UnregisterKey removes a key from the signer (runtime only).

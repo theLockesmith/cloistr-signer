@@ -2,9 +2,13 @@ bin/
 *.exe
 .env
 config.yaml
-cloistr-signer
+/cloistr-signer
 
-signer
+# Compiled binary at the repo root. MUST stay anchored with a leading slash: an
+# unanchored "signer" pattern matches any path component of that name, which
+# silently ignored every new file under internal/signer/ (existing files only
+# survived because they were tracked before the rule was added).
+/signer
 
 # Node
 node_modules/
