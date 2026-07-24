@@ -191,10 +191,16 @@ func (s *Signer) Start(ctx context.Context) error {
 		// Decrypt the local private key if needed (both local and proxy keys have this)
 		privateKey := key.EncryptedNsec
 		if privateKey != "" {
-			// Skip Vault-encrypted keys at startup - they're loaded when user logs in
-			if crypto.IsVaultEncrypted(privateKey) {
+			// Skip user-held keys at startup (Vault transit, or a passphrase-derived
+			// KEK). The server cannot decrypt these on its own by design; they are
+			// loaded when the user logs in, and warmed there (see warmKeyRelayClient).
+			// This MUST cover every user-held method: an unskipped ciphertext would
+			// fall through the "enc:" check below and be stored verbatim as if it were
+			// the private key.
+			if method := crypto.DetectEncryptionMethod(privateKey); method.UserHeld() {
 				vaultKeyCount++
-				slog.Debug("skipping vault-encrypted key at startup", "pubkey", key.Pubkey[:16]+"...")
+				slog.Debug("skipping user-held key at startup",
+					"pubkey", key.Pubkey[:16]+"...", "method", string(method))
 				continue
 			}
 			if crypto.IsEncrypted(privateKey) && s.encryptor != nil {
