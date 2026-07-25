@@ -112,14 +112,31 @@ func (h *Handler) getUserSessionAwaitingVaultToken(ctx context.Context, sessionI
 // Vault userpass raft-consensus writes on the current cluster peak around 9s
 // on success; the ceiling is a runaway backstop, not the expected duration.
 func (h *Handler) populateVaultTokenAsync(sessionID, userID, username, password string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Fully off the login critical path (login already responded), so we can
+	// afford to be patient: userpass login mints a token, which is a Vault
+	// raft-consensus write, and under write contention a single attempt can
+	// exceed the per-request timeout. A one-shot attempt that times out would
+	// poison this session's VaultToken for its entire lifetime — the password
+	// isn't retained, so nothing can re-mint the token until the next login,
+	// and every sign attempt on this session then fails (nostrconnect 30s
+	// timeout). The generous ceiling bounds the retry loop below.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	var vaultToken string
-	vaultAuth, err := h.vaultClient.AuthenticateUserpass(ctx, userID, password)
+	vaultAuth, err := h.authenticateUserpassWithRetry(ctx, userID, password)
 	if err != nil {
 		if isVaultForbidden(err) {
 			slog.Info("async vault auth returned 403; skipping provision fallback", "user_id", userID)
+			return
+		}
+		// A timeout is transient Vault slowness, NOT a missing user. Do not
+		// provision on timeout: ProvisionUser issues several more raft writes
+		// (transit key + policy + userpass account) and re-auths, piling load
+		// onto an already-slow Vault and making the contention worse. Leave the
+		// token empty; the next login retries cleanly.
+		if vault.IsTimeout(err) {
+			slog.Warn("async vault auth kept timing out after retries; leaving session token empty", "user_id", userID)
 			return
 		}
 		slog.Info("async vault auth failed, attempting to provision", "user_id", userID, "error", err)
@@ -152,6 +169,42 @@ func (h *Handler) populateVaultTokenAsync(sessionID, userID, username, password 
 	// lazy-load on demand if this hasn't finished before the first sign
 	// request arrives.
 	go h.loadUserVaultKeys(context.Background(), userID, vaultToken)
+}
+
+// authenticateUserpassWithRetry authenticates to Vault userpass, retrying with
+// exponential backoff on transient timeouts. Userpass login is a raft-consensus
+// write; a single attempt can exceed the per-request timeout under write
+// contention, which is the observed cause of account-specific intermittent
+// login failures. Because the only caller runs off the login critical path,
+// retrying costs the user nothing and turns a poisoned session (no Vault token
+// for its whole life) into an eventual success.
+//
+// Only timeouts are retried. A 403 or any other non-timeout error is returned
+// immediately so the caller's skip/provision logic runs without extra delay.
+func (h *Handler) authenticateUserpassWithRetry(ctx context.Context, userID, password string) (*vault.AuthResponse, error) {
+	const maxAttempts = 4
+	backoff := 500 * time.Millisecond
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		auth, err := h.vaultClient.AuthenticateUserpass(ctx, userID, password)
+		if err == nil {
+			if attempt > 1 {
+				slog.Info("async vault auth succeeded on retry", "user_id", userID, "attempt", attempt)
+			}
+			return auth, nil
+		}
+		lastErr = err
+		if !vault.IsTimeout(err) {
+			return nil, err // 403 / bad-creds / missing-user: don't spin, let caller decide
+		}
+		select {
+		case <-ctx.Done():
+			return nil, lastErr
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return nil, lastErr
 }
 
 // NewHandler creates a new API handler
