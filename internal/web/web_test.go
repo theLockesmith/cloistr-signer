@@ -14,7 +14,37 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/discovery"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
+	"github.com/nbd-wtf/go-nostr"
 )
+
+// signedNIP07Auth returns (pubkey, signaturePayload) for a NIP-07 login: a
+// freshly generated keypair and its BIP-340-signed kind-27235 auth event
+// (carrying the challenge tag), JSON-encoded exactly as the browser extension
+// sends it in the request's "signature" field. handleAPINIP07Login verifies
+// this signature before any account lookup, so tests must present a real one.
+func signedNIP07Auth(t *testing.T, challenge string) (pubkey, signature string) {
+	t.Helper()
+	priv := nostr.GeneratePrivateKey()
+	pub, err := nostr.GetPublicKey(priv)
+	if err != nil {
+		t.Fatalf("GetPublicKey: %v", err)
+	}
+	ev := nostr.Event{
+		PubKey:    pub,
+		CreatedAt: nostr.Now(),
+		Kind:      27235,
+		Tags:      nostr.Tags{{"challenge", challenge}},
+		Content:   "",
+	}
+	if err := ev.Sign(priv); err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal auth event: %v", err)
+	}
+	return pub, string(payload)
+}
 
 // TestMain sets up test environment - forces template mode so tests work against Go templates
 func TestMain(m *testing.M) {
@@ -1020,15 +1050,23 @@ func TestHandleAPINIP07Login_MethodNotAllowed(t *testing.T) {
 func TestHandleAPINIP07Login_NoAccount(t *testing.T) {
 	h, _, _ := testHandler(t)
 
-	body := `{"pubkey": "5555555555555555555555555555555555555555555555555555555555555555", "signature": "sig", "challenge": "challenge"}`
-	req := httptest.NewRequest(http.MethodPost, "/web/api/login/nip07", strings.NewReader(body))
+	// A valid signature for a pubkey with no linked account: the handler must
+	// clear signature verification and then reject at the account lookup (403),
+	// not fail early on the signature.
+	pubkey, signature := signedNIP07Auth(t, "challenge")
+	body, _ := json.Marshal(map[string]string{
+		"pubkey":    pubkey,
+		"signature": signature,
+		"challenge": "challenge",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/web/api/login/nip07", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 
 	h.handleAPINIP07Login(rr, req)
 
 	if rr.Code != http.StatusForbidden {
-		t.Errorf("handleAPINIP07Login() no account status = %d, want %d", rr.Code, http.StatusForbidden)
+		t.Errorf("handleAPINIP07Login() no account status = %d, want %d; body: %s", rr.Code, http.StatusForbidden, rr.Body.String())
 	}
 }
 
@@ -1036,7 +1074,9 @@ func TestHandleAPINIP07Login_WithLinkedPubkey(t *testing.T) {
 	h, store, _ := testHandler(t)
 	ctx := context.Background()
 
-	pubkey := "6666666666666666666666666666666666666666666666666666666666666666"
+	// The pubkey must match the signing key, since the handler verifies the
+	// signature against it before looking the account up.
+	pubkey, signature := signedNIP07Auth(t, "challenge")
 	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
 	user := &storage.User{
 		ID:           "nip07user123",
@@ -1047,8 +1087,12 @@ func TestHandleAPINIP07Login_WithLinkedPubkey(t *testing.T) {
 	}
 	store.CreateUser(ctx, user)
 
-	body := `{"pubkey": "6666666666666666666666666666666666666666666666666666666666666666", "signature": "sig", "challenge": "challenge"}`
-	req := httptest.NewRequest(http.MethodPost, "/web/api/login/nip07", strings.NewReader(body))
+	body, _ := json.Marshal(map[string]string{
+		"pubkey":    pubkey,
+		"signature": signature,
+		"challenge": "challenge",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/web/api/login/nip07", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 
