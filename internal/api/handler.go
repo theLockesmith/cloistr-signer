@@ -1898,7 +1898,7 @@ type RegisterRequest struct {
 // be an nsec/hex private key to import, or "" to generate a fresh keypair. The
 // key is local-encrypted: registration runs before the user has a session, so
 // no per-user Vault encryptor is available yet.
-func (h *Handler) createInitialSigningKey(ctx context.Context, ownerID, name, importPriv string) (*storage.Key, error) {
+func (h *Handler) createInitialSigningKey(ctx context.Context, ownerID, name, importPriv, passphrase string) (*storage.Key, error) {
 	var privateKey, pubkey string
 	if strings.TrimSpace(importPriv) != "" {
 		privateKey = strings.TrimSpace(importPriv)
@@ -1923,9 +1923,40 @@ func (h *Handler) createInitialSigningKey(ctx context.Context, ownerID, name, im
 		pubkey = pk
 	}
 
+	// Wrap under the registrant's passphrase, not the server key.
+	//
+	// There is no per-user Vault encryptor at this point in registration -- the
+	// account was provisioned moments ago and no userpass token has been minted --
+	// so the passphrase KEK is the only user-held option available here. It is
+	// also the only one that ever applies to this key: loadUserVaultKeys skips
+	// anything that isn't already Vault ciphertext, so nothing migrates a
+	// registration key into Vault later. A key written under the server's
+	// ENCRYPTION_KEY here stays server-decryptable for its entire life.
+	//
+	// This does not introduce a new recovery cliff. The password is already
+	// cryptographically load-bearing: it is the Vault userpass credential, so a
+	// user who forgets it loses access to Vault-wrapped keys just the same. See
+	// crypto/passphrase_encryptor.go and cloistr-password-reset-recovery-gap.
+	//
+	// The server-held encryptor remains only as a last resort for callers with no
+	// passphrase in hand, and is loud about it.
 	encryptedKey := privateKey
-	encryptionMethod := "local"
-	if h.encryptor != nil {
+	encryptionMethod := string(crypto.EncryptionMethodLocal)
+	switch {
+	case passphrase != "":
+		pe, err := crypto.NewPassphraseEncryptor(passphrase)
+		if err != nil {
+			return nil, fmt.Errorf("failed to derive key encryptor: %w", err)
+		}
+		enc, err := pe.Encrypt(privateKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt key: %w", err)
+		}
+		encryptedKey = enc
+		encryptionMethod = string(crypto.EncryptionMethodPassphrase)
+	case h.encryptor != nil:
+		slog.Warn("initial signing key wrapped with the server-held key: no passphrase supplied",
+			"owner_id", ownerID, "note", "server can decrypt this key")
 		enc, err := h.encryptor.Encrypt(privateKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt key: %w", err)
@@ -2081,7 +2112,7 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 	// we log and still return success — the user can create a key later.
 	// The Primary key is the user's identity under the Option A model.
 	var primaryKey *storage.Key
-	if key, err := h.createInitialSigningKey(r.Context(), userID, "Primary", req.ImportNsec); err != nil {
+	if key, err := h.createInitialSigningKey(r.Context(), userID, "Primary", req.ImportNsec, req.Password); err != nil {
 		slog.Warn("failed to create initial signing key", "error", err, "user_id", userID)
 	} else {
 		primaryKey = key
@@ -2251,6 +2282,18 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	if h.vaultClient != nil && h.config.Vault.Enabled {
 		go h.populateVaultTokenAsync(sessionID, user.ID, user.Username, req.Password)
 	}
+
+	// Load passphrase-wrapped ("pbk:") keys. Independent of Vault: this is the
+	// only path that makes a registration key usable, since createInitialSigningKey
+	// wraps under the passphrase and nothing migrates those into Vault. Detached
+	// context for the same reason as above -- r.Context() dies with the response --
+	// and off the critical path because PBKDF2 at 600k iterations is not something
+	// to put in front of a login response.
+	go func(userID, passphrase string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		h.loadUserPassphraseKeys(ctx, userID, passphrase)
+	}(user.ID, req.Password)
 
 	// Update last login. LastLoginIP intentionally not set (see above). Like the
 	// failed-login reset, this is non-critical bookkeeping against camelot and
@@ -2877,6 +2920,60 @@ func (h *Handler) ensureNostrConnectKeyLoaded(ctx context.Context, sessionID, us
 	}
 	slog.Info("on-demand loaded vault key for nostrconnect", "user_id", userID, "pubkey", key.Pubkey[:16]+"...")
 	return true
+}
+
+// loadUserPassphraseKeys decrypts the user's passphrase-wrapped ("pbk:") keys and
+// registers them in the signer runtime. It is the passphrase-KEK counterpart of
+// loadUserVaultKeys, and exists for the same reason: user-held key material is
+// undecryptable at boot by design, so it has to be loaded at login.
+//
+// Residency is bounded exactly as the Vault path already is. The passphrase lives
+// only for this call -- it is not stored on the session, and nothing persists a
+// derived KEK -- so this adds no key-material lifetime beyond what a login already
+// has. The decrypted private key lands in the same runtime map as every other
+// loaded key and is evicted on logout.
+func (h *Handler) loadUserPassphraseKeys(ctx context.Context, userID, passphrase string) {
+	if passphrase == "" {
+		return
+	}
+
+	keys, err := h.storage.ListKeys(ctx, userID)
+	if err != nil {
+		slog.Error("failed to list user keys for passphrase loading", "error", err, "user_id", userID)
+		return
+	}
+
+	// Built once: PBKDF2 at 600k iterations is deliberately expensive, and the
+	// encryptor caches nothing across instances.
+	pe, err := crypto.NewPassphraseEncryptor(passphrase)
+	if err != nil {
+		return
+	}
+
+	loadedCount := 0
+	for _, key := range keys {
+		if !crypto.IsPassphraseEncrypted(key.EncryptedNsec) {
+			continue
+		}
+		privateKey, err := pe.Decrypt(key.EncryptedNsec)
+		if err != nil {
+			// Expected for keys wrapped under a previous passphrase that a
+			// password change failed to re-wrap; not fatal for the others.
+			slog.Warn("failed to decrypt passphrase-wrapped key",
+				"user_id", userID, "pubkey", key.Pubkey[:16]+"...", "error", err)
+			continue
+		}
+		if key.IsProxy() {
+			h.signer.RegisterProxyKey(key.Pubkey, privateKey, key.BunkerURI)
+		} else {
+			h.signer.RegisterKey(key.Pubkey, privateKey)
+		}
+		loadedCount++
+	}
+
+	if loadedCount > 0 {
+		slog.Info("loaded passphrase-wrapped keys for user", "user_id", userID, "count", loadedCount)
+	}
 }
 
 func (h *Handler) loadUserVaultKeys(ctx context.Context, userID, vaultToken string) {
