@@ -2289,9 +2289,16 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// context for the same reason as above -- r.Context() dies with the response --
 	// and off the critical path because PBKDF2 at 600k iterations is not something
 	// to put in front of a login response.
+	// Drain any legacy server-held keys first, then load the passphrase-wrapped
+	// set. Order matters: re-wrapping turns an "enc:" key into a "pbk:" one, and
+	// the re-wrap hands it to the runtime itself, so the load pass that follows
+	// simply finds nothing left to do for it.
 	go func(userID, passphrase string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		if n := h.rewrapLegacyLocalKeys(ctx, userID, passphrase); n > 0 {
+			slog.Info("migrated legacy server-held keys at login", "user_id", userID, "count", n)
+		}
 		h.loadUserPassphraseKeys(ctx, userID, passphrase)
 	}(user.ID, req.Password)
 
@@ -2920,6 +2927,93 @@ func (h *Handler) ensureNostrConnectKeyLoaded(ctx context.Context, sessionID, us
 	}
 	slog.Info("on-demand loaded vault key for nostrconnect", "user_id", userID, "pubkey", key.Pubkey[:16]+"...")
 	return true
+}
+
+// rewrapLegacyLocalKeys drains the server-held ("enc:") keys that predate
+// passphrase wrapping, re-wrapping each under the user's passphrase on their next
+// login. It returns the number of keys migrated.
+//
+// This is the only workable shape for the migration: re-wrapping needs the user's
+// passphrase, and the server never holds it outside an authenticated request. So
+// it cannot be a batch job -- it has to ride the login that supplies the secret.
+// Accounts that never log in keep their legacy ciphertext, which is exactly the
+// status quo for them and no worse.
+//
+// Safety properties, in order of how badly each would hurt:
+//
+//   - The stored ciphertext is replaced only after the new wrapping has been
+//     produced, so a failure anywhere leaves the original intact and the next
+//     login simply retries.
+//   - The decrypted key is verified to derive the pubkey it is filed under before
+//     anything is written. A key that fails that check is left alone and reported
+//     rather than "migrated" into unreadable material.
+//   - Idempotent by construction: a migrated key is "pbk:" and no longer matches
+//     the legacy filter.
+//
+// The key is registered in the signer runtime here because it is about to stop
+// being loadable at boot: "enc:" keys are server-decryptable and so are loaded by
+// signer.Start(), while "pbk:" keys are user-held and deliberately skipped. This
+// call is the handover.
+func (h *Handler) rewrapLegacyLocalKeys(ctx context.Context, userID, passphrase string) int {
+	if h.encryptor == nil || passphrase == "" {
+		return 0
+	}
+
+	keys, err := h.storage.ListKeys(ctx, userID)
+	if err != nil {
+		slog.Error("failed to list user keys for legacy re-wrap", "error", err, "user_id", userID)
+		return 0
+	}
+
+	pe, err := crypto.NewPassphraseEncryptor(passphrase)
+	if err != nil {
+		return 0
+	}
+
+	migrated := 0
+	for _, key := range keys {
+		// Legacy server-held ciphertext only. Vault and passphrase keys are
+		// user-held already; unprefixed values are not ours to touch.
+		if !crypto.IsEncrypted(key.EncryptedNsec) {
+			continue
+		}
+
+		privateKey, err := h.encryptor.Decrypt(key.EncryptedNsec)
+		if err != nil {
+			slog.Error("legacy re-wrap: decrypt failed, leaving key as-is",
+				"user_id", userID, "pubkey", key.Pubkey[:16]+"...", "error", err)
+			continue
+		}
+		if derived, derr := nostr.GetPublicKey(privateKey); derr != nil || derived != key.Pubkey {
+			slog.Error("legacy re-wrap: decrypted key does not derive its stored pubkey, leaving key as-is",
+				"user_id", userID, "pubkey", key.Pubkey[:16]+"...")
+			continue
+		}
+
+		newCiphertext, err := pe.Encrypt(privateKey)
+		if err != nil {
+			slog.Error("legacy re-wrap: re-encrypt failed, leaving key as-is",
+				"user_id", userID, "pubkey", key.Pubkey[:16]+"...", "error", err)
+			continue
+		}
+		if err := h.storage.UpdateKeyEncryption(ctx, key.ID, newCiphertext, string(crypto.EncryptionMethodPassphrase)); err != nil {
+			slog.Error("legacy re-wrap: persisting new ciphertext failed, original retained",
+				"user_id", userID, "pubkey", key.Pubkey[:16]+"...", "error", err)
+			continue
+		}
+
+		// Now user-held, so no longer loaded at boot -- hand it to the runtime.
+		if key.IsProxy() {
+			h.signer.RegisterProxyKey(key.Pubkey, privateKey, key.BunkerURI)
+		} else {
+			h.signer.RegisterKey(key.Pubkey, privateKey)
+		}
+		migrated++
+		slog.Info("re-wrapped legacy server-held key under the user's passphrase",
+			"user_id", userID, "pubkey", key.Pubkey[:16]+"...")
+	}
+
+	return migrated
 }
 
 // loadUserPassphraseKeys decrypts the user's passphrase-wrapped ("pbk:") keys and

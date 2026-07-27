@@ -4,6 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/nbd-wtf/go-nostr"
 
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
@@ -193,5 +196,174 @@ func TestLoadUserPassphraseKeys_WrongPassphraseLoadsNothing(t *testing.T) {
 	h.loadUserPassphraseKeys(ctx, "owner-5", "")
 	if h.signer.IsKeyLoaded(key.Pubkey) {
 		t.Error("an empty passphrase loaded the key")
+	}
+}
+
+// Legacy drain: existing accounts hold "enc:" keys the server can open. They
+// cannot be migrated by a batch job, because re-wrapping needs the passphrase and
+// the server never holds it outside an authenticated request — so the migration
+// rides the login that supplies it.
+
+// seedLegacyKey writes a key wrapped with the server-held encryptor, as every
+// pre-fix registration did.
+func seedLegacyKey(t *testing.T, h *Handler, store storage.Storage, ownerID string) *storage.Key {
+	t.Helper()
+	priv := "5c0c523f52a5b6fad39ed2403092df8cebc36318b39383bca6c00808626fab3a"
+	pub, err := nostr.GetPublicKey(priv)
+	if err != nil {
+		t.Fatalf("GetPublicKey: %v", err)
+	}
+	ct, err := h.encryptor.Encrypt(priv)
+	if err != nil {
+		t.Fatalf("server encrypt: %v", err)
+	}
+	key := &storage.Key{
+		ID: pub[:16], Name: "Primary", Pubkey: pub, KeyType: storage.KeyTypeLocal,
+		EncryptedNsec: ct, EncryptionMethod: string(crypto.EncryptionMethodLocal),
+		CreatedAt: time.Now(), OwnerID: ownerID,
+	}
+	if err := store.CreateKey(context.Background(), key); err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	return key
+}
+
+func TestRewrapLegacyLocalKeys_MigratesAndServerCanNoLongerDecrypt(t *testing.T) {
+	ctx := context.Background()
+	serverKey, _ := crypto.GenerateKey()
+	h, store := newWrapTestHandler(t, serverKey)
+	seeded := seedLegacyKey(t, h, store, "owner-legacy")
+
+	const passphrase = "the user's password"
+	if n := h.rewrapLegacyLocalKeys(ctx, "owner-legacy", passphrase); n != 1 {
+		t.Fatalf("migrated %d keys, want 1", n)
+	}
+
+	got, err := store.GetKey(ctx, seeded.ID)
+	if err != nil {
+		t.Fatalf("GetKey: %v", err)
+	}
+	if !crypto.IsPassphraseEncrypted(got.EncryptedNsec) {
+		t.Fatalf("key was not re-wrapped: %.12s...", got.EncryptedNsec)
+	}
+	if got.EncryptionMethod != string(crypto.EncryptionMethodPassphrase) {
+		t.Errorf("EncryptionMethod = %q, want passphrase", got.EncryptionMethod)
+	}
+	if _, err := h.encryptor.Decrypt(got.EncryptedNsec); err == nil {
+		t.Error("the server can still decrypt the migrated key")
+	}
+	pe, _ := crypto.NewPassphraseEncryptor(passphrase)
+	if priv, err := pe.Decrypt(got.EncryptedNsec); err != nil || priv != "5c0c523f52a5b6fad39ed2403092df8cebc36318b39383bca6c00808626fab3a" {
+		t.Errorf("migrated key does not round-trip to the original private key (err=%v)", err)
+	}
+	// "enc:" keys are loaded at boot; "pbk:" ones are skipped, so the migration
+	// must hand the key to the runtime itself.
+	if !h.signer.IsKeyLoaded(got.Pubkey) {
+		t.Error("migrated key was not registered in the signer runtime")
+	}
+}
+
+func TestRewrapLegacyLocalKeys_IsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	serverKey, _ := crypto.GenerateKey()
+	h, store := newWrapTestHandler(t, serverKey)
+	seeded := seedLegacyKey(t, h, store, "owner-idem")
+
+	if n := h.rewrapLegacyLocalKeys(ctx, "owner-idem", "pw"); n != 1 {
+		t.Fatalf("first pass migrated %d, want 1", n)
+	}
+	first, _ := store.GetKey(ctx, seeded.ID)
+
+	if n := h.rewrapLegacyLocalKeys(ctx, "owner-idem", "pw"); n != 0 {
+		t.Errorf("second pass migrated %d, want 0", n)
+	}
+	second, _ := store.GetKey(ctx, seeded.ID)
+	if first.EncryptedNsec != second.EncryptedNsec {
+		t.Error("a second pass re-wrapped an already-migrated key")
+	}
+}
+
+// A key whose plaintext doesn't derive its stored pubkey must be left alone, not
+// "migrated" into ciphertext nobody can check.
+func TestRewrapLegacyLocalKeys_LeavesMismatchedKeyUntouched(t *testing.T) {
+	ctx := context.Background()
+	serverKey, _ := crypto.GenerateKey()
+	h, store := newWrapTestHandler(t, serverKey)
+
+	priv := "5c0c523f52a5b6fad39ed2403092df8cebc36318b39383bca6c00808626fab3a"
+	ct, _ := h.encryptor.Encrypt(priv)
+	bogus := &storage.Key{
+		ID: "bogus-id", Name: "Primary",
+		Pubkey:        "0000000000000000000000000000000000000000000000000000000000000000",
+		KeyType:       storage.KeyTypeLocal,
+		EncryptedNsec: ct, EncryptionMethod: string(crypto.EncryptionMethodLocal),
+		CreatedAt: time.Now(), OwnerID: "owner-bad",
+	}
+	if err := store.CreateKey(ctx, bogus); err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+
+	if n := h.rewrapLegacyLocalKeys(ctx, "owner-bad", "pw"); n != 0 {
+		t.Errorf("migrated %d mismatched keys, want 0", n)
+	}
+	got, _ := store.GetKey(ctx, "bogus-id")
+	if got.EncryptedNsec != ct {
+		t.Error("mismatched key was modified; the original ciphertext must be retained")
+	}
+}
+
+// Vault-wrapped and already-passphrase-wrapped keys are user-held already and
+// must not be dragged through the legacy path.
+func TestRewrapLegacyLocalKeys_SkipsUserHeldKeys(t *testing.T) {
+	ctx := context.Background()
+	serverKey, _ := crypto.GenerateKey()
+	h, store := newWrapTestHandler(t, serverKey)
+
+	for i, ct := range []string{
+		"vault:v1:abcdef",
+		"pbk:YWJjZGVm",
+	} {
+		k := &storage.Key{
+			ID: string(rune('a' + i)), Name: "K", Pubkey: strings.Repeat(string(rune('0'+i)), 64),
+			KeyType: storage.KeyTypeLocal, EncryptedNsec: ct,
+			CreatedAt: time.Now(), OwnerID: "owner-userheld",
+		}
+		if err := store.CreateKey(ctx, k); err != nil {
+			t.Fatalf("CreateKey: %v", err)
+		}
+	}
+
+	if n := h.rewrapLegacyLocalKeys(ctx, "owner-userheld", "pw"); n != 0 {
+		t.Errorf("migrated %d user-held keys, want 0", n)
+	}
+	for i, want := range []string{"vault:v1:abcdef", "pbk:YWJjZGVm"} {
+		got, err := store.GetKey(ctx, string(rune('a'+i)))
+		if err != nil {
+			t.Fatalf("GetKey: %v", err)
+		}
+		if got.EncryptedNsec != want {
+			t.Errorf("user-held key %d was modified: %q", i, got.EncryptedNsec)
+		}
+	}
+}
+
+// Without a passphrase (or without a server encryptor to open the legacy
+// ciphertext) the migration must be a no-op rather than an error path.
+func TestRewrapLegacyLocalKeys_NoOpWithoutPassphraseOrEncryptor(t *testing.T) {
+	ctx := context.Background()
+	serverKey, _ := crypto.GenerateKey()
+	h, store := newWrapTestHandler(t, serverKey)
+	seeded := seedLegacyKey(t, h, store, "owner-noop")
+
+	if n := h.rewrapLegacyLocalKeys(ctx, "owner-noop", ""); n != 0 {
+		t.Errorf("migrated %d with no passphrase, want 0", n)
+	}
+	noEnc, _ := newWrapTestHandler(t, "")
+	if n := noEnc.rewrapLegacyLocalKeys(ctx, "owner-noop", "pw"); n != 0 {
+		t.Errorf("migrated %d with no server encryptor, want 0", n)
+	}
+	got, _ := store.GetKey(ctx, seeded.ID)
+	if !crypto.IsEncrypted(got.EncryptedNsec) {
+		t.Error("legacy key was altered by a no-op call")
 	}
 }
