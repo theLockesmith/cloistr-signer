@@ -608,8 +608,8 @@ func (ss *SQLiteStorage) scanKeys(rows *sql.Rows) ([]*Key, error) {
 		}
 		key.RequireApproval = requireApproval != 0
 		key.DisposableMode = disposableMode != 0
-	key.CoverTraffic = coverTraffic != 0
-	key.TorEgress = torEgress != 0
+		key.CoverTraffic = coverTraffic != 0
+		key.TorEgress = torEgress != 0
 
 		keys = append(keys, key)
 	}
@@ -2460,6 +2460,25 @@ func (ss *SQLiteStorage) GetWebAuthnSession(ctx context.Context, id string) (*We
 
 func (ss *SQLiteStorage) DeleteWebAuthnSession(ctx context.Context, id string) error {
 	return nil
+}
+
+// ---- Recovery challenge SQLite stubs ----
+// Recovery challenges require Postgres in production, matching the other
+// short-lived ceremony state above. The stubs fail closed: CreateRecoveryChallenge
+// errors rather than silently succeeding, and ConsumeRecoveryChallenge always
+// reports not-found, so a SQLite deployment cannot accidentally accept a proof it
+// never issued.
+
+func (ss *SQLiteStorage) CreateRecoveryChallenge(ctx context.Context, c *RecoveryChallenge) error {
+	return fmt.Errorf("recovery challenges require postgres storage")
+}
+
+func (ss *SQLiteStorage) ConsumeRecoveryChallenge(ctx context.Context, id string) (*RecoveryChallenge, error) {
+	return nil, ErrChallengeNotFound
+}
+
+func (ss *SQLiteStorage) DeleteExpiredRecoveryChallenges(ctx context.Context) (int, error) {
+	return 0, nil
 }
 
 // ---- Lightning key SQLite stubs ----

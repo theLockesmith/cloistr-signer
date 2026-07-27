@@ -313,6 +313,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/users/logout", h.handleUserLogout)
 	mux.HandleFunc("/api/v1/users/me", h.handleUserMe)
 	mux.HandleFunc("/api/v1/users/password", h.handleUserChangePassword)
+
+	// Account recovery by nsec proof of possession. Unauthenticated by necessity —
+	// the whole point is that the caller has lost the password. Authority comes
+	// from a signature over a server-issued single-use challenge (see recovery.go).
+	mux.HandleFunc("/api/v1/recovery/challenge", h.handleRecoveryChallenge)
+	mux.HandleFunc("/api/v1/recovery/complete", h.handleRecoveryComplete)
 	mux.HandleFunc("/api/v1/users/mfa/setup", h.handleMFASetup)
 	mux.HandleFunc("/api/v1/users/mfa/verify", h.handleMFAVerify)
 	mux.HandleFunc("/api/v1/users/mfa/disable", h.handleMFADisable)
@@ -2549,6 +2555,17 @@ func (h *Handler) handleUserChangePassword(w http.ResponseWriter, r *http.Reques
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to update password")
 		return
+	}
+
+	// Vault's userpass copy has to follow the change. Without this the account
+	// authenticates to the signer with the new password and to Vault with the old
+	// one, so populateVaultTokenAsync fails on every subsequent login and every
+	// vault:-wrapped key silently stops loading. Reported, not fatal: the password
+	// and the passphrase-wrapped keys are already consistent at this point, and
+	// failing the request would leave the caller unsure which half applied.
+	if !h.resetVaultCredential(r.Context(), user.ID, req.NewPassword) && h.vaultClient != nil && h.config.Vault.Enabled {
+		slog.Error("password changed but vault credential update failed; vault-wrapped keys will not load until this is fixed",
+			"user_id", user.ID)
 	}
 
 	slog.Info("password changed", "username", user.Username, "user_id", user.ID, "keys_rewrapped", rewrapped)

@@ -11,9 +11,9 @@ import (
 	"log/slog"
 	"time"
 
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
 	"github.com/lib/pq"
 	"github.com/nbd-wtf/go-nostr"
-	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
 )
 
 // PostgresStorage implements Storage interface using PostgreSQL
@@ -360,6 +360,20 @@ func (ps *PostgresStorage) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_webauthn_sessions_user    ON signer_webauthn_sessions(user_id);
 	CREATE INDEX IF NOT EXISTS idx_signer_webauthn_sessions_expires ON signer_webauthn_sessions(expires_at);
+
+	-- Account-recovery challenges. The primary key IS the challenge value, so a
+	-- caller cannot present one it was never issued. used_at makes consumption
+	-- single-use; the row is kept after use (rather than deleted) so a replay is
+	-- rejected rather than looking like an unknown nonce.
+	CREATE TABLE IF NOT EXISTS signer_recovery_challenges (
+		id         TEXT PRIMARY KEY,
+		user_id    TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
+		expires_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		used_at    TIMESTAMPTZ
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_recovery_challenges_user    ON signer_recovery_challenges(user_id);
+	CREATE INDEX IF NOT EXISTS idx_signer_recovery_challenges_expires ON signer_recovery_challenges(expires_at);
 
 	-- LNURL-auth (LUD-04) linking keys. One row per wallet↔user binding.
 	-- linking_key is the 33-byte compressed secp256k1 pubkey hex derived by
@@ -2644,6 +2658,55 @@ func (ps *PostgresStorage) DeleteWebAuthnSession(ctx context.Context, id string)
 		return fmt.Errorf("delete webauthn session: %w", err)
 	}
 	return nil
+}
+
+// ---- Recovery challenge Postgres implementations ----
+
+func (ps *PostgresStorage) CreateRecoveryChallenge(ctx context.Context, c *RecoveryChallenge) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO signer_recovery_challenges (id, user_id, expires_at, created_at)
+		VALUES ($1, $2, $3, $4)`,
+		c.ID, c.UserID, c.ExpiresAt, c.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("create recovery challenge: %w", err)
+	}
+	return nil
+}
+
+// ConsumeRecoveryChallenge atomically claims the challenge.
+//
+// The guard lives in the UPDATE's WHERE clause rather than in a read-then-write,
+// so concurrent attempts serialise on the row: exactly one updates it and gets a
+// row back, every other gets sql.ErrNoRows. A read-then-write would let two
+// requests both observe used_at IS NULL and both proceed -- which for a
+// credential-reset endpoint is the difference between single-use and not.
+func (ps *PostgresStorage) ConsumeRecoveryChallenge(ctx context.Context, id string) (*RecoveryChallenge, error) {
+	var c RecoveryChallenge
+	err := ps.db.QueryRowContext(ctx, `
+		UPDATE signer_recovery_challenges
+		   SET used_at = NOW()
+		 WHERE id = $1
+		   AND used_at IS NULL
+		   AND expires_at > NOW()
+	 RETURNING id, user_id, expires_at, created_at, used_at`, id,
+	).Scan(&c.ID, &c.UserID, &c.ExpiresAt, &c.CreatedAt, &c.UsedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrChallengeNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("consume recovery challenge: %w", err)
+	}
+	return &c, nil
+}
+
+func (ps *PostgresStorage) DeleteExpiredRecoveryChallenges(ctx context.Context) (int, error) {
+	res, err := ps.db.ExecContext(ctx,
+		`DELETE FROM signer_recovery_challenges WHERE expires_at < NOW() - INTERVAL '24 hours'`)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired recovery challenges: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // ---- Lightning key (LNURL-auth LUD-04) Postgres implementations ----
