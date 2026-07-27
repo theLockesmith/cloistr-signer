@@ -325,6 +325,14 @@ func main() {
 				if err := store.CleanExpiredBunkerSecrets(cleanupCtx); err != nil {
 					slog.Warn("cleanup expired bunker secrets failed", "error", err)
 				}
+				// Recovery challenges are retained past expiry so a replay is
+				// rejected as spent rather than looking like an unknown nonce;
+				// the sweep drops them once that no longer matters (24h).
+				if n, err := store.DeleteExpiredRecoveryChallenges(cleanupCtx); err != nil {
+					slog.Warn("cleanup expired recovery challenges failed", "error", err)
+				} else if n > 0 {
+					slog.Info("cleaned expired recovery challenges", "count", n)
+				}
 				cancel()
 			}
 		}
