@@ -9,3 +9,6 @@ signer
 # Node
 node_modules/
 ui/node_modules/
+CLAUDE.md
+.claude
+.claude/
