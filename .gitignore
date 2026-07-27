@@ -13,6 +13,9 @@ config.yaml
 # Node
 node_modules/
 ui/node_modules/
+CLAUDE.md
+.claude
+.claude/
 
 # Compiled `migrate` helper binary (built from ./cmd/migrate). Anchored so it
 # only ignores the repo-root artifact, not any migrate/ source directory.
