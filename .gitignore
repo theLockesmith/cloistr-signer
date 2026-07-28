@@ -2,9 +2,13 @@ bin/
 *.exe
 .env
 config.yaml
-cloistr-signer
+/cloistr-signer
 
-signer
+# Compiled binary at the repo root. MUST stay anchored with a leading slash: an
+# unanchored "signer" pattern matches any path component of that name, which
+# silently ignored every new file under internal/signer/ (existing files only
+# survived because they were tracked before the rule was added).
+/signer
 
 # Node
 node_modules/
@@ -12,3 +16,20 @@ ui/node_modules/
 CLAUDE.md
 .claude
 .claude/
+
+# Compiled `migrate` helper binary (built from ./cmd/migrate). Anchored so it
+# only ignores the repo-root artifact, not any migrate/ source directory.
+/migrate
+
+# Ad-hoc Playwright/npm scaffolding pulled in for E2E runs; not part of the
+# tracked build (no Go/Docker/Make reference to it).
+/package.json
+/package-lock.json
+
+# Nested clone that lives inside the working tree but is its own repo; must not
+# be committed as an accidental gitlink/submodule.
+/cloistr-tor/
+
+# Local incident/security note; references session IDs and must not be shared
+# via the repo.
+/PRIVACY-DELETION-REQUEST.md

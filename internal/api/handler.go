@@ -112,14 +112,31 @@ func (h *Handler) getUserSessionAwaitingVaultToken(ctx context.Context, sessionI
 // Vault userpass raft-consensus writes on the current cluster peak around 9s
 // on success; the ceiling is a runaway backstop, not the expected duration.
 func (h *Handler) populateVaultTokenAsync(sessionID, userID, username, password string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Fully off the login critical path (login already responded), so we can
+	// afford to be patient: userpass login mints a token, which is a Vault
+	// raft-consensus write, and under write contention a single attempt can
+	// exceed the per-request timeout. A one-shot attempt that times out would
+	// poison this session's VaultToken for its entire lifetime — the password
+	// isn't retained, so nothing can re-mint the token until the next login,
+	// and every sign attempt on this session then fails (nostrconnect 30s
+	// timeout). The generous ceiling bounds the retry loop below.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	var vaultToken string
-	vaultAuth, err := h.vaultClient.AuthenticateUserpass(ctx, userID, password)
+	vaultAuth, err := h.authenticateUserpassWithRetry(ctx, userID, password)
 	if err != nil {
 		if isVaultForbidden(err) {
 			slog.Info("async vault auth returned 403; skipping provision fallback", "user_id", userID)
+			return
+		}
+		// A timeout is transient Vault slowness, NOT a missing user. Do not
+		// provision on timeout: ProvisionUser issues several more raft writes
+		// (transit key + policy + userpass account) and re-auths, piling load
+		// onto an already-slow Vault and making the contention worse. Leave the
+		// token empty; the next login retries cleanly.
+		if vault.IsTimeout(err) {
+			slog.Warn("async vault auth kept timing out after retries; leaving session token empty", "user_id", userID)
 			return
 		}
 		slog.Info("async vault auth failed, attempting to provision", "user_id", userID, "error", err)
@@ -152,6 +169,42 @@ func (h *Handler) populateVaultTokenAsync(sessionID, userID, username, password 
 	// lazy-load on demand if this hasn't finished before the first sign
 	// request arrives.
 	go h.loadUserVaultKeys(context.Background(), userID, vaultToken)
+}
+
+// authenticateUserpassWithRetry authenticates to Vault userpass, retrying with
+// exponential backoff on transient timeouts. Userpass login is a raft-consensus
+// write; a single attempt can exceed the per-request timeout under write
+// contention, which is the observed cause of account-specific intermittent
+// login failures. Because the only caller runs off the login critical path,
+// retrying costs the user nothing and turns a poisoned session (no Vault token
+// for its whole life) into an eventual success.
+//
+// Only timeouts are retried. A 403 or any other non-timeout error is returned
+// immediately so the caller's skip/provision logic runs without extra delay.
+func (h *Handler) authenticateUserpassWithRetry(ctx context.Context, userID, password string) (*vault.AuthResponse, error) {
+	const maxAttempts = 4
+	backoff := 500 * time.Millisecond
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		auth, err := h.vaultClient.AuthenticateUserpass(ctx, userID, password)
+		if err == nil {
+			if attempt > 1 {
+				slog.Info("async vault auth succeeded on retry", "user_id", userID, "attempt", attempt)
+			}
+			return auth, nil
+		}
+		lastErr = err
+		if !vault.IsTimeout(err) {
+			return nil, err // 403 / bad-creds / missing-user: don't spin, let caller decide
+		}
+		select {
+		case <-ctx.Done():
+			return nil, lastErr
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return nil, lastErr
 }
 
 // NewHandler creates a new API handler
@@ -2420,15 +2473,107 @@ func (h *Handler) handleUserChangePassword(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Re-wrap any passphrase-encrypted key material BEFORE committing the new password.
+	// The KEK for those keys is derived from the passphrase, so changing the password
+	// without re-wrapping would render the user's own keys permanently unreadable.
+	// Ordering matters: on failure here the password is left unchanged, so the account
+	// and its keys stay consistent under the old passphrase.
+	rollbackKeys, rewrapped, err := h.rewrapPassphraseKeys(r.Context(), user.ID, req.CurrentPassword, req.NewPassword)
+	if err != nil {
+		slog.Error("password change aborted: key re-wrap failed",
+			"user_id", user.ID, "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "failed to re-encrypt key material; password unchanged")
+		return
+	}
+
 	user.PasswordHash = hash
 	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
+		// Keys are already re-wrapped under the NEW passphrase but the account still
+		// has the OLD one. Roll the keys back or the user loses access to them.
+		if rollbackKeys != nil {
+			if rbErr := rollbackKeys(); rbErr != nil {
+				slog.Error("CRITICAL: password update failed AND key rollback failed; "+
+					"keys are wrapped under a passphrase the account does not have",
+					"user_id", user.ID, "rollback_error", rbErr)
+			}
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to update password")
 		return
 	}
 
-	slog.Info("password changed", "username", user.Username, "user_id", user.ID)
+	slog.Info("password changed", "username", user.Username, "user_id", user.ID, "keys_rewrapped", rewrapped)
 
 	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "password changed successfully"})
+}
+
+// rewrapPassphraseKeys re-encrypts every passphrase-wrapped key this user owns from the
+// old passphrase to the new one, and returns a rollback func restoring the previous
+// ciphertext.
+//
+// Keys encrypted with a passphrase-derived KEK (crypto.PassphraseEncryptor, "pbk:") are
+// readable only via the user's passphrase -- by design, the server cannot decrypt them
+// alone. That means a password change MUST re-wrap them or the material is lost for
+// good, with no operator recovery path.
+//
+// Vault- and local-encrypted keys are untouched: Vault holds its own wrapping key, and
+// the local encryptor uses a server-held key. Neither is tied to the passphrase.
+//
+// Semantics are all-or-nothing. Every re-encryption is computed in memory first, so a
+// bad passphrase or corrupt ciphertext aborts before anything is persisted. If a write
+// fails partway, already-written keys are restored before returning.
+func (h *Handler) rewrapPassphraseKeys(ctx context.Context, userID, oldPassphrase, newPassphrase string) (rollback func() error, count int, err error) {
+	keys, err := h.storage.ListKeys(ctx, userID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list keys: %w", err)
+	}
+
+	// Compute every re-wrap before persisting any of it.
+	type pending struct {
+		key    *storage.Key
+		oldCT  string
+		newCT  string
+	}
+	var todo []pending
+	for _, k := range keys {
+		if k == nil || !crypto.IsPassphraseEncrypted(k.EncryptedNsec) {
+			continue
+		}
+		newCT, err := crypto.ReWrap(oldPassphrase, newPassphrase, k.EncryptedNsec)
+		if err != nil {
+			return nil, 0, fmt.Errorf("re-wrap key %s: %w", k.ID, err)
+		}
+		todo = append(todo, pending{key: k, oldCT: k.EncryptedNsec, newCT: newCT})
+	}
+	if len(todo) == 0 {
+		return nil, 0, nil
+	}
+
+	// Persist, tracking what has been written so it can be undone.
+	var written []pending
+	restore := func() error {
+		var firstErr error
+		for _, p := range written {
+			p.key.EncryptedNsec = p.oldCT
+			if err := h.storage.UpdateKey(ctx, p.key); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return firstErr
+	}
+
+	for _, p := range todo {
+		p.key.EncryptedNsec = p.newCT
+		if err := h.storage.UpdateKey(ctx, p.key); err != nil {
+			if rbErr := restore(); rbErr != nil {
+				slog.Error("key re-wrap rollback failed; some keys may be wrapped under the new passphrase",
+					"user_id", userID, "rollback_error", rbErr)
+			}
+			return nil, 0, fmt.Errorf("persist re-wrapped key %s: %w", p.key.ID, err)
+		}
+		written = append(written, p)
+	}
+
+	return restore, len(written), nil
 }
 
 func (h *Handler) handleMFASetup(w http.ResponseWriter, r *http.Request) {

@@ -169,14 +169,26 @@ func IsVaultEncrypted(value string) bool {
 type EncryptionMethod string
 
 const (
-	EncryptionMethodLocal EncryptionMethod = "local" // AES-256-GCM with local key
-	EncryptionMethodVault EncryptionMethod = "vault" // Vault transit
+	EncryptionMethodLocal      EncryptionMethod = "local"      // AES-256-GCM with local key
+	EncryptionMethodVault      EncryptionMethod = "vault"      // Vault transit
+	EncryptionMethodPassphrase EncryptionMethod = "passphrase" // PBKDF2 KEK from user passphrase
 )
+
+// UserHeldMethods are the methods the server cannot decrypt on its own: they require
+// the user (a Vault token from userpass, or the passphrase itself). Key material stored
+// under these is undecryptable at boot and only becomes available once the user
+// authenticates -- which is why such keys must be warmed at login rather than startup.
+func (m EncryptionMethod) UserHeld() bool {
+	return m == EncryptionMethodVault || m == EncryptionMethodPassphrase
+}
 
 // DetectEncryptionMethod determines how a ciphertext was encrypted
 func DetectEncryptionMethod(ciphertext string) EncryptionMethod {
 	if IsVaultEncrypted(ciphertext) {
 		return EncryptionMethodVault
+	}
+	if IsPassphraseEncrypted(ciphertext) {
+		return EncryptionMethodPassphrase
 	}
 	if IsEncrypted(ciphertext) {
 		return EncryptionMethodLocal

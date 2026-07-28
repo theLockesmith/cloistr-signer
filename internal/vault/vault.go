@@ -232,6 +232,14 @@ func isTimeout(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
+// IsTimeout reports whether err (possibly wrapped) is a request timeout, i.e.
+// transient Vault slowness that is safe to retry rather than a genuine auth
+// failure. Exported so callers can distinguish "Vault was slow" from "the user
+// doesn't exist / bad credentials" and avoid reprovisioning on a mere timeout.
+func IsTimeout(err error) bool {
+	return isTimeout(err)
+}
+
 // StoreKey stores an encrypted key in Vault
 func (c *Client) StoreKey(ctx context.Context, keyID string, data map[string]interface{}) error {
 	start := time.Now()
