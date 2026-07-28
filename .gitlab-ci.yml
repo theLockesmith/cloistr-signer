@@ -5,6 +5,9 @@ stages:
 include:
   - project: 'coldforge/ci-templates'
     ref: main
+    file: '/templates/cloistr-rules.yml'
+  - project: 'coldforge/ci-templates'
+    ref: main
     file: '/templates/kaniko-build.yml'
 
 .go-cache: &go-cache
@@ -21,6 +24,7 @@ include:
 # and it keeps the test-free cmd/ packages out of the race build. The suite is
 # slow under -race (internal/api alone is several minutes), hence the timeout.
 test:unit:
+  extends: .cloistr-rules
   stage: test
   image: golang:1.25-bookworm
   <<: *go-cache
@@ -37,6 +41,7 @@ test:unit:
   timeout: 30m
 
 lint:
+  extends: .cloistr-rules
   stage: test
   image: golang:1.25-bookworm
   <<: *go-cache
