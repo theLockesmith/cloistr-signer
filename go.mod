@@ -3,7 +3,7 @@ module git.aegis-hq.xyz/coldforge/cloistr-signer
 go 1.25.0
 
 require (
-	git.aegis-hq.xyz/coldforge/cloistr-common v0.2.0
+	git.aegis-hq.xyz/coldforge/cloistr-common v0.3.0
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/btcsuite/btcd/btcec/v2 v2.3.6
 	github.com/btcsuite/btcd/btcutil v1.1.5
