@@ -319,6 +319,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// from a signature over a server-issued single-use challenge (see recovery.go).
 	mux.HandleFunc("/api/v1/recovery/challenge", h.handleRecoveryChallenge)
 	mux.HandleFunc("/api/v1/recovery/complete", h.handleRecoveryComplete)
+	// Opt-out lives behind normal auth: only the account holder changes their own
+	// posture, and re-enabling recovery must not be reachable from a recovery.
+	mux.HandleFunc("/api/v1/users/recovery", h.handleRecoverySettings)
 	mux.HandleFunc("/api/v1/users/mfa/setup", h.handleMFASetup)
 	mux.HandleFunc("/api/v1/users/mfa/verify", h.handleMFAVerify)
 	mux.HandleFunc("/api/v1/users/mfa/disable", h.handleMFADisable)

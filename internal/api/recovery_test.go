@@ -419,3 +419,138 @@ func TestRecovery_RejectsShortPassword(t *testing.T) {
 		t.Errorf("retry after validation failure: status %d, want 200", ok.Code)
 	}
 }
+
+// addSecondaryKey registers another key on the same account, of the kind a user
+// might add for a single app.
+func (f *recoveryFixture) addSecondaryKey(t *testing.T, name string) (priv, pub string) {
+	t.Helper()
+	priv = nostr.GeneratePrivateKey()
+	pub, err := nostr.GetPublicKey(priv)
+	if err != nil {
+		t.Fatalf("GetPublicKey: %v", err)
+	}
+	pe, _ := crypto.NewPassphraseEncryptor(f.password)
+	ct, _ := pe.Encrypt(priv)
+	key := &storage.Key{
+		ID: pub[:16], Name: name, Pubkey: pub, KeyType: storage.KeyTypeLocal,
+		EncryptedNsec: ct, EncryptionMethod: string(crypto.EncryptionMethodPassphrase),
+		CreatedAt: time.Now(), OwnerID: f.user.ID,
+	}
+	if err := f.store.CreateKey(context.Background(), key); err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	return priv, pub
+}
+
+// The property that bounds the blast radius: an account is NOT only as strong as
+// its weakest key. A secondary key proves possession of itself and nothing more —
+// otherwise compromising a throwaway app key would reset the password, which
+// resets the Vault credential, which hands over every vault:-wrapped key.
+func TestRecovery_RejectsProofFromNonIdentityKeyOnSameAccount(t *testing.T) {
+	f := newRecoveryFixture(t)
+	secondaryPriv, secondaryPub := f.addSecondaryKey(t, "App key")
+
+	challenge := f.requestChallenge(t, "alice")
+	w := f.post(t, "/api/v1/recovery/complete", recoveryCompleteRequest{
+		Challenge:   challenge,
+		SignedEvent: signChallenge(t, secondaryPriv, challenge, time.Now()),
+		NewPassword: "attacker-password",
+	})
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("secondary key was accepted: status %d, want 401", w.Code)
+	}
+	user, _ := f.store.GetUser(context.Background(), f.user.ID)
+	if !auth.VerifyPassword(f.password, user.PasswordHash) {
+		t.Error("password was reset by a non-identity key")
+	}
+
+	// Sanity: the secondary key really does belong to the account, so the
+	// rejection is about which key it is, not about ownership.
+	keys, _ := f.store.ListKeys(context.Background(), f.user.ID)
+	if !ownsPubkey(keys, secondaryPub) {
+		t.Fatal("precondition failed: secondary key is not on the account")
+	}
+	// And the identity key still works.
+	challenge2 := f.requestChallenge(t, "alice")
+	ok := f.post(t, "/api/v1/recovery/complete", recoveryCompleteRequest{
+		Challenge:   challenge2,
+		SignedEvent: signChallenge(t, f.priv, challenge2, time.Now()),
+		NewPassword: "a-brand-new-password",
+	})
+	if ok.Code != http.StatusOK {
+		t.Errorf("identity key rejected: status %d, body %s", ok.Code, ok.Body.String())
+	}
+}
+
+func TestRecovery_OptOutBlocksRecovery(t *testing.T) {
+	f := newRecoveryFixture(t)
+	if err := f.store.SetSetting(context.Background(), recoveryOptOutKey(f.user.ID), "true"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+
+	challenge := f.requestChallenge(t, "alice")
+	w := f.post(t, "/api/v1/recovery/complete", recoveryCompleteRequest{
+		Challenge:   challenge,
+		SignedEvent: signChallenge(t, f.priv, challenge, time.Now()),
+		NewPassword: "a-brand-new-password",
+	})
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status %d, want 403", w.Code)
+	}
+	user, _ := f.store.GetUser(context.Background(), f.user.ID)
+	if !auth.VerifyPassword(f.password, user.PasswordHash) {
+		t.Error("password was reset despite opt-out")
+	}
+}
+
+// Opting out must not become an oracle: the challenge endpoint has to look the
+// same for an opted-out account as for any other, because it is unauthenticated.
+func TestRecovery_OptOutIsNotVisibleBeforeProof(t *testing.T) {
+	f := newRecoveryFixture(t)
+
+	before := f.post(t, "/api/v1/recovery/challenge", map[string]string{"username": "alice"})
+	if err := f.store.SetSetting(context.Background(), recoveryOptOutKey(f.user.ID), "true"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	after := f.post(t, "/api/v1/recovery/challenge", map[string]string{"username": "alice"})
+
+	if before.Code != after.Code {
+		t.Errorf("challenge status differs once opted out: %d vs %d", before.Code, after.Code)
+	}
+	var a, b recoveryChallengeResponse
+	_ = json.Unmarshal(before.Body.Bytes(), &a)
+	_ = json.Unmarshal(after.Body.Bytes(), &b)
+	if len(a.Challenge) != len(b.Challenge) || b.Challenge == "" {
+		t.Error("challenge shape differs once opted out; that is an opt-out oracle")
+	}
+}
+
+// Default posture is enabled, and a storage read failure must not silently
+// disable recovery for someone who never opted out.
+func TestRecovery_DefaultIsEnabled(t *testing.T) {
+	f := newRecoveryFixture(t)
+	if f.h.recoveryDisabled(context.Background(), f.user.ID) {
+		t.Error("recovery is disabled by default; it must be opt-OUT, not opt-in")
+	}
+	if f.h.recoveryDisabled(context.Background(), "no-such-user") {
+		t.Error("an unknown/unreadable setting must read as enabled, not disabled")
+	}
+}
+
+func TestRecovery_OptOutRoundTripsThroughSettings(t *testing.T) {
+	f := newRecoveryFixture(t)
+	ctx := context.Background()
+
+	for _, enabled := range []bool{false, true, false} {
+		value := "false"
+		if !enabled {
+			value = "true"
+		}
+		if err := f.store.SetSetting(ctx, recoveryOptOutKey(f.user.ID), value); err != nil {
+			t.Fatalf("SetSetting: %v", err)
+		}
+		if got := !f.h.recoveryDisabled(ctx, f.user.ID); got != enabled {
+			t.Errorf("enabled = %v, want %v", got, enabled)
+		}
+	}
+}

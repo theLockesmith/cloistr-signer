@@ -178,17 +178,39 @@ func (h *Handler) handleRecoveryComplete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// The signature proves possession of *a* key. It has to be a key that belongs
-	// to the account being recovered, or anyone with any nsec could reset anyone.
+	// Opt-out is checked only AFTER a valid proof. Refusing earlier would tell an
+	// unauthenticated caller which accounts have recovery disabled; by this point
+	// they have already demonstrated they hold the account's identity key, so the
+	// fact is worth nothing to them.
+	if h.recoveryDisabled(r.Context(), record.UserID) {
+		slog.Info("recovery refused: disabled on this account", "user_id", record.UserID)
+		h.errorResponse(w, http.StatusForbidden, "nsec recovery is disabled for this account")
+		return
+	}
+
+	// The signature proves possession of *a* key. It must be this account's
+	// IDENTITY key, not merely one of its keys.
+	//
+	// Accepting any key would make an account only as strong as its weakest one:
+	// compromise a throwaway key added for some app, and you reset the password,
+	// which resets the Vault userpass credential, which hands over every
+	// vault:-wrapped key on the account. Recovery authority is account authority,
+	// so it belongs to the key that IS the account.
+	//
+	// resolveSigningPubkey is the same resolver reconcilePlatformIdentity uses to
+	// pick the sole platform identity under Option A. Reusing it means recovery
+	// authority and platform identity can never drift apart.
 	keys, err := h.storage.ListKeys(r.Context(), record.UserID)
 	if err != nil {
 		slog.Error("recovery: failed to list keys", "error", err, "user_id", record.UserID)
 		h.errorResponse(w, http.StatusInternalServerError, "recovery failed")
 		return
 	}
-	if !ownsPubkey(keys, pubkey) {
-		slog.Warn("recovery proof used a key not registered to the account",
-			"user_id", record.UserID, "pubkey", safePubkeyPrefix(pubkey))
+	identityPubkey, hasIdentity := h.resolveSigningPubkey(r.Context(), record.UserID)
+	if !hasIdentity || subtle.ConstantTimeCompare([]byte(identityPubkey), []byte(pubkey)) != 1 {
+		slog.Warn("recovery proof did not come from the account's identity key",
+			"user_id", record.UserID, "proved", safePubkeyPrefix(pubkey),
+			"owns_some_key", ownsPubkey(keys, pubkey))
 		h.errorResponse(w, http.StatusUnauthorized, "invalid proof of key possession")
 		return
 	}
@@ -312,7 +334,77 @@ func verifyRecoveryProof(signedEvent, challenge string) (string, error) {
 	return ev.PubKey, nil
 }
 
+// recoveryOptOutKey namespaces the per-account opt-out in the settings table.
+// A per-user boolean does not justify a column plus the six scan sites that come
+// with it on signer_web_accounts; the settings row is a smaller surface with the
+// same fail-open behaviour on a read error (absent == enabled), which matches the
+// default every existing account already has.
+func recoveryOptOutKey(userID string) string {
+	return "recovery_nsec_disabled:" + userID
+}
+
+// recoveryDisabled reports whether the account has opted out of nsec recovery.
+//
+// Reads that fail are treated as "not disabled". That is the honest default: the
+// alternative -- failing closed on a storage blip -- would deny recovery to users
+// who never opted out, which is the exact lockout this whole feature exists to
+// prevent. The opt-out protects against a stolen nsec; a storage error is not
+// that adversary.
+func (h *Handler) recoveryDisabled(ctx context.Context, userID string) bool {
+	v, err := h.storage.GetSetting(ctx, recoveryOptOutKey(userID))
+	if err != nil {
+		return false
+	}
+	return v == "true"
+}
+
+// handleRecoverySettings reads or sets the caller's nsec-recovery opt-out.
+// Authenticated: only the account holder can change their own posture, and
+// turning recovery back ON must not be something a recovery flow can do to
+// itself.
+//
+//	GET  /api/v1/users/recovery -> {nsec_recovery_enabled}
+//	PUT  /api/v1/users/recovery {enabled: bool}
+func (h *Handler) handleRecoverySettings(w http.ResponseWriter, r *http.Request) {
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		h.jsonResponse(w, http.StatusOK, map[string]bool{
+			"nsec_recovery_enabled": !h.recoveryDisabled(r.Context(), claims.UserID),
+		})
+	case http.MethodPut:
+		var req struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Enabled == nil {
+			h.errorResponse(w, http.StatusBadRequest, "enabled (bool) is required")
+			return
+		}
+		value := "false"
+		if !*req.Enabled {
+			value = "true"
+		}
+		if err := h.storage.SetSetting(r.Context(), recoveryOptOutKey(claims.UserID), value); err != nil {
+			slog.Error("failed to persist recovery preference", "error", err, "user_id", claims.UserID)
+			h.errorResponse(w, http.StatusInternalServerError, "failed to save preference")
+			return
+		}
+		slog.Info("nsec recovery preference changed", "user_id", claims.UserID, "enabled", *req.Enabled)
+		h.jsonResponse(w, http.StatusOK, map[string]bool{"nsec_recovery_enabled": *req.Enabled})
+	default:
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 // ownsPubkey reports whether the pubkey belongs to one of the account's keys.
+// Retained for diagnostics: the authorization check requires the identity key
+// specifically, and knowing whether a rejected proof at least belonged to the
+// account distinguishes a stolen secondary key from an unrelated one.
 func ownsPubkey(keys []*storage.Key, pubkey string) bool {
 	for _, k := range keys {
 		if subtle.ConstantTimeCompare([]byte(k.Pubkey), []byte(pubkey)) == 1 {
