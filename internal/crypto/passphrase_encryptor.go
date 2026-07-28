@@ -47,13 +47,47 @@ const (
 	// PassphrasePrefix identifies passphrase-KEK ciphertext.
 	PassphrasePrefix = "pbk:"
 
-	// pbkdf2Iterations matches the browser-side IndexedDB/FROST-share discipline
-	// (600k, OWASP-recommended for PBKDF2-HMAC-SHA-256).
-	pbkdf2Iterations = 600_000
+	// DefaultPBKDF2Iterations matches the browser-side IndexedDB/FROST-share
+	// discipline (600k, OWASP-recommended for PBKDF2-HMAC-SHA-256). This is the
+	// value production runs and the value TestProductionIterationCount pins.
+	DefaultPBKDF2Iterations = 600_000
 
 	pbkdf2SaltLen = 16 // 128-bit salt, stored inline with the ciphertext
 	pbkdf2KeyLen  = 32 // AES-256
 )
+
+// pbkdf2Iterations is a var rather than a const purely so tests can lower it.
+//
+// 600k iterations is deliberately expensive -- that is the entire point of a KEK
+// -- but a test suite pays it on every Encrypt, Decrypt and ReWrap. It made
+// internal/crypto the single slowest package in CI at 196s under -race (against
+// 8s locally without it), which is what pushed the signer suite past Go's
+// default 10-minute test timeout on 2026-07-28.
+//
+// Production NEVER changes this. Only LowerIterationsForTesting does, and
+// TestProductionIterationCount asserts the shipped default is still 600k so this
+// cannot be quietly weakened.
+//
+// The count is NOT stored in the ciphertext, so material encrypted at one count
+// cannot be decrypted at another. That is safe because production only ever uses
+// the default -- but it is why this is a testing hook and not a tuning knob.
+var pbkdf2Iterations = DefaultPBKDF2Iterations
+
+// LowerIterationsForTesting reduces the KEK cost for the duration of a test and
+// returns a function restoring the production value. It exists because the
+// api-package tests also exercise the passphrase path and cannot reach an
+// unexported hook in this package.
+//
+// Call it only from tests:
+//
+//	defer crypto.LowerIterationsForTesting()()
+//
+// It is not safe for parallel use: it mutates package state.
+func LowerIterationsForTesting() func() {
+	prev := pbkdf2Iterations
+	pbkdf2Iterations = 1_000
+	return func() { pbkdf2Iterations = prev }
+}
 
 // ErrEmptyPassphrase is returned when constructing an encryptor with no passphrase.
 var ErrEmptyPassphrase = errors.New("passphrase must not be empty")

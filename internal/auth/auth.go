@@ -18,6 +18,16 @@ const (
 	// DefaultBcryptCost is the default cost for bcrypt hashing
 	DefaultBcryptCost = 12
 
+	// TestingBcryptCost is bcrypt's minimum work factor, for TESTS ONLY.
+	//
+	// DefaultBcryptCost (12) is deliberately expensive — that is the point of a
+	// password hash — but a suite pays it on every fixture user. Under -race it
+	// dominated internal/web (4.7s -> 75s locally, 158s in CI) and was a direct
+	// contributor to the signer suite exceeding Go's 10-minute default test
+	// timeout on 2026-07-28. Production must never use this; DefaultConfig()
+	// returns DefaultBcryptCost and auth_test.go pins that.
+	TestingBcryptCost = 4
+
 	// DefaultTokenExpiry is the default JWT token expiry
 	DefaultTokenExpiry = 24 * time.Hour
 

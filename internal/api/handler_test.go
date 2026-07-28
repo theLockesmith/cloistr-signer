@@ -890,7 +890,7 @@ func TestHandleUserRegister_DuplicateUsername(t *testing.T) {
 	ctx := context.Background()
 
 	// Create existing user
-	hash, _ := auth.HashPassword("password123", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password123", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "existing123",
 		Username:     "existinguser",
@@ -916,7 +916,7 @@ func TestHandleUserLogin(t *testing.T) {
 	ctx := context.Background()
 
 	// Create user
-	hash, _ := auth.HashPassword("correctpassword", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("correctpassword", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "loginuser123",
 		Username:     "loginuser",
@@ -950,7 +950,7 @@ func TestHandleUserLogin_WrongPassword(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	hash, _ := auth.HashPassword("correctpassword", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("correctpassword", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "wrongpw123",
 		Username:     "wrongpwuser",
@@ -976,7 +976,7 @@ func TestHandleUserLogin_LockedAccount(t *testing.T) {
 	ctx := context.Background()
 
 	lockUntil := time.Now().Add(time.Hour)
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "locked123",
 		Username:     "lockeduser",
@@ -1003,7 +1003,7 @@ func TestHandleUserMe(t *testing.T) {
 	ctx := context.Background()
 
 	// Create user
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "meuser123",
 		Username:     "meuser",
@@ -1043,7 +1043,7 @@ func TestHandleUserMe_NoAuth(t *testing.T) {
 func changePwUser(t *testing.T, h *Handler, store *storage.MemoryStorage) (*storage.User, string) {
 	t.Helper()
 	ctx := context.Background()
-	hash, _ := auth.HashPassword("oldpassword", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("oldpassword", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "pwuser123",
 		Username:     "pwuser",
@@ -1153,7 +1153,7 @@ func TestHandleUserMe_UsesSigningKeyAndOmitsLinkedPubkey(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "idmuser123",
 		Username:     "idmuser",
@@ -1202,7 +1202,7 @@ func TestHandleUserLogout(t *testing.T) {
 	ctx := context.Background()
 
 	// Create user
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "logoutuser123",
 		Username:     "logoutuser",
@@ -1230,7 +1230,7 @@ func TestHandleUserSessions(t *testing.T) {
 	ctx := context.Background()
 
 	// Create user and session
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "sessionuser123",
 		Username:     "sessionuser",
@@ -1689,7 +1689,7 @@ func TestHandleMFASetup(t *testing.T) {
 	ctx := context.Background()
 
 	// Create user
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "mfauser123",
 		Username:     "mfauser",
@@ -1730,7 +1730,7 @@ func TestHandleMFASetup_AlreadyEnabled(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "mfaenabled123",
 		Username:     "mfaenableduser",
@@ -1758,7 +1758,7 @@ func TestHandleMFAVerify_NotSetup(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "nosetup123",
 		Username:     "nosetupuser",
@@ -1786,7 +1786,7 @@ func TestHandleMFADisable_NotEnabled(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "nodisable123",
 		Username:     "nodisableuser",
@@ -2019,7 +2019,7 @@ func TestHandleUserLogin_CreatesSession(t *testing.T) {
 	ctx := context.Background()
 
 	// Create user
-	hash, _ := auth.HashPassword("password123", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password123", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "session-test-user",
 		Username:     "sessiontestuser",
@@ -2058,7 +2058,7 @@ func TestHandleUserLogin_NoIPRetention(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()
 
-	hash, _ := auth.HashPassword("password123", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password123", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "noip-test-user",
 		Username:     "noipuser",
@@ -2105,7 +2105,7 @@ func TestHandleUserLogout_DeletesSessions(t *testing.T) {
 	ctx := context.Background()
 
 	// Create user and session
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "logout-test-user",
 		Username:     "logouttestuser",
