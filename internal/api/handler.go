@@ -18,6 +18,7 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/frost"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/ratelimit"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/signer"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/vault"
@@ -39,8 +40,10 @@ type Handler struct {
 	frostKeyGen      *frost.KeyGenerator
 	distributedDKG   *frost.DistributedDKG
 	remoteSigner     *frost.RemoteSigner
-	userDKG          *frost.UserDKG     // FROST 2-of-N user-cosigner DKG (docs/frost-2-of-n-design.md)
-	webauthn         *webauthn.WebAuthn // nil when WebAuthn config is incomplete (e.g. no RPID)
+	userDKG          *frost.UserDKG      // FROST 2-of-N user-cosigner DKG (docs/frost-2-of-n-design.md)
+	webauthn         *webauthn.WebAuthn  // nil when WebAuthn config is incomplete (e.g. no RPID)
+	limiter          ratelimit.Limiter   // rate limiter for unauthenticated endpoints (nil = no limiting)
+	ipHasher         *ratelimit.IPHasher // rotating HMAC hasher for per-IP keys (nil = IP limiting disabled)
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -283,6 +286,16 @@ func (h *Handler) SetDistributedDKG(dkg *frost.DistributedDKG) {
 func (h *Handler) SetRemoteSigner(rs *frost.RemoteSigner) {
 	h.remoteSigner = rs
 }
+
+// SetLimiter wires in a rate limiter for unauthenticated endpoints.
+// Called from main after the handler is constructed so existing call sites
+// need no changes. A nil limiter (the zero value) skips all rate limiting.
+func (h *Handler) SetLimiter(l ratelimit.Limiter) { h.limiter = l }
+
+// SetIPHasher wires in the rotating HMAC hasher used for per-IP rate limiting.
+// Only meaningful when cfg.Recovery.TrustedProxyHeader is set; the handler
+// checks that field before consulting the hasher.
+func (h *Handler) SetIPHasher(ih *ratelimit.IPHasher) { h.ipHasher = ih }
 
 // RegisterRoutes registers all HTTP routes
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
@@ -2599,9 +2612,9 @@ func (h *Handler) rewrapPassphraseKeys(ctx context.Context, userID, oldPassphras
 
 	// Compute every re-wrap before persisting any of it.
 	type pending struct {
-		key    *storage.Key
-		oldCT  string
-		newCT  string
+		key   *storage.Key
+		oldCT string
+		newCT string
 	}
 	var todo []pending
 	for _, k := range keys {

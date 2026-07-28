@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip13"
 	"github.com/nbd-wtf/go-nostr/nip19"
 
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/ratelimit"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
@@ -67,6 +69,10 @@ const (
 
 type recoveryChallengeRequest struct {
 	Username string `json:"username"`
+	// PowEvent is a JSON-serialised Nostr event that demonstrates proof of work
+	// at the difficulty configured in cfg.Recovery.PoWDifficulty. Ignored when
+	// that difficulty is 0 (the default — dark until a client mines it).
+	PowEvent string `json:"pow_event,omitempty"`
 }
 
 type recoveryChallengeResponse struct {
@@ -101,6 +107,12 @@ type recoveryCompleteResponse struct {
 // is unauthenticated by necessity. The unknown-account challenge is a real random
 // value that simply matches no stored row, so it fails at the next step exactly
 // as a wrong signature would.
+//
+// Four independent rate-limiting layers (see RecoveryConfig) are applied before
+// any account lookup. All must pass; none is a fallback for another. Limiter
+// backend failures are fail-open: they log at WARN and let the request proceed.
+// A limiter that fails closed is a recovery outage for exactly the users this
+// flow exists to rescue.
 func (h *Handler) handleRecoveryChallenge(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -116,6 +128,113 @@ func (h *Handler) handleRecoveryChallenge(w http.ResponseWriter, r *http.Request
 	if username == "" {
 		h.errorResponse(w, http.StatusBadRequest, "username is required")
 		return
+	}
+
+	// --- Layer 1: Proof of Work (skipped when PoWDifficulty == 0) ---
+	if h.config.Recovery.PoWDifficulty > 0 {
+		if req.PowEvent == "" {
+			h.errorResponse(w, http.StatusBadRequest,
+				fmt.Sprintf("pow_event is required (target difficulty: %d bits)", h.config.Recovery.PoWDifficulty))
+			return
+		}
+		var ev nostr.Event
+		if err := json.Unmarshal([]byte(req.PowEvent), &ev); err != nil {
+			h.errorResponse(w, http.StatusBadRequest, "pow_event: not a valid nostr event")
+			return
+		}
+		// Timestamp must be within ±5 minutes so a mined event cannot be reused
+		// across multiple recovery windows or stockpiled far in advance.
+		if age := time.Since(ev.CreatedAt.Time()); age > 5*time.Minute || age < -5*time.Minute {
+			h.errorResponse(w, http.StatusBadRequest, "pow_event: timestamp outside the ±5 minute window")
+			return
+		}
+		// The event must bind the username it was mined for.  Without this a
+		// single mined event would be usable against any account.
+		hasUsernameTag := false
+		for _, tag := range ev.Tags {
+			if len(tag) >= 2 && tag[0] == "u" && tag[1] == username {
+				hasUsernameTag = true
+				break
+			}
+		}
+		if !hasUsernameTag {
+			h.errorResponse(w, http.StatusBadRequest, "pow_event: missing [\"u\", <username>] tag")
+			return
+		}
+		// CommittedDifficulty checks the nonce tag's committed target against the
+		// actual leading-zero count in the event ID.  It returns 0 when the target
+		// overstates the work, so an underpowered event is safely rejected.
+		// Signature is intentionally NOT required: PoW is over the event ID, and
+		// requiring a signature would demand a key the caller may not have loaded.
+		if got := nip13.CommittedDifficulty(&ev); got < h.config.Recovery.PoWDifficulty {
+			h.errorResponse(w, http.StatusBadRequest,
+				fmt.Sprintf("insufficient proof of work: got %d bits, need %d", got, h.config.Recovery.PoWDifficulty))
+			return
+		}
+	}
+
+	ctx := r.Context()
+	lim := h.limiter // may be nil in tests / single-replica deploys without CACHE_URL
+
+	// --- Layer 2: Global limit ---
+	// The absolute backstop on row growth regardless of attacker shape.
+	// Deliberately generous: a tight global limit is also a global denial surface.
+	if lim != nil {
+		allowed, err := lim.Allow(ctx, "recovery:global", h.config.Recovery.GlobalLimit, h.config.Recovery.GlobalWindow)
+		if err != nil {
+			slog.Warn("recovery rate limiter error (global)", "error", err)
+		}
+		if !allowed {
+			h.errorResponse(w, http.StatusTooManyRequests, "too many requests")
+			return
+		}
+	}
+
+	// --- Layer 3: Per-username limit ---
+	// Counted on the requested STRING — before and regardless of whether the
+	// account exists.  Counting only real accounts would make a tripped limit
+	// prove the account exists, reintroducing the enumeration oracle this
+	// endpoint is built to avoid.
+	if lim != nil {
+		allowed, err := lim.Allow(ctx,
+			"recovery:user:"+ratelimit.HashKey(username),
+			h.config.Recovery.PerUsernameLimit,
+			h.config.Recovery.PerUsernameWindow,
+		)
+		if err != nil {
+			slog.Warn("recovery rate limiter error (per-username)", "error", err)
+		}
+		if !allowed {
+			h.errorResponse(w, http.StatusTooManyRequests, "too many requests")
+			return
+		}
+	}
+
+	// --- Layer 4: Per-IP limit ---
+	// Only active when TrustedProxyHeader is set.  RemoteAddr is never used
+	// as a fallback: behind the Cloudflare tunnel it is the tunnel pod, so
+	// every client on earth would share one bucket.  A missing or empty header
+	// value on an individual request skips this layer for that request (the
+	// proxy may legitimately not forward the header for internal traffic).
+	if lim != nil && h.config.Recovery.TrustedProxyHeader != "" && h.ipHasher != nil {
+		rawHeader := r.Header.Get(h.config.Recovery.TrustedProxyHeader)
+		if rawHeader != "" {
+			ip := strings.TrimSpace(strings.SplitN(rawHeader, ",", 2)[0])
+			if ip != "" {
+				allowed, err := lim.Allow(ctx,
+					h.ipHasher.Key(ip),
+					h.config.Recovery.PerIPLimit,
+					h.config.Recovery.PerIPWindow,
+				)
+				if err != nil {
+					slog.Warn("recovery rate limiter error (per-IP)", "error", err)
+				}
+				if !allowed {
+					h.errorResponse(w, http.StatusTooManyRequests, "too many requests")
+					return
+				}
+			}
+		}
 	}
 
 	nonce, err := randomHex(recoveryChallengeBytes)

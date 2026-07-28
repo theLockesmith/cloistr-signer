@@ -20,6 +20,7 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/frost"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/metrics"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/nostr"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/ratelimit"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/sessionstore"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/signer"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
@@ -192,6 +193,34 @@ func main() {
 
 	// Initialize HTTP API
 	apiHandler := api.NewHandler(cfg, nip46Signer, store, encryptor, vaultClient)
+
+	// Rate limiter for the recovery endpoint (/api/v1/recovery/challenge).
+	// Prefer Redis/Dragonfly so the limit is cluster-wide across all replicas.
+	// Fall back to in-process memory with a warning: limits will multiply by the
+	// replica count, so the effective ceiling is N * configured value.
+	var recoveryLimiter ratelimit.Limiter
+	if cfg.CacheURL != "" {
+		rl, rlErr := ratelimit.NewRedis(cfg.CacheURL, "signer:rl:")
+		if rlErr != nil {
+			slog.Warn("recovery rate limiter: Redis init failed, falling back to memory (per-replica)", "error", rlErr)
+			recoveryLimiter = ratelimit.NewMemory()
+		} else {
+			slog.Info("recovery rate limiter: Redis-backed (cluster-wide)")
+			recoveryLimiter = rl
+		}
+	} else {
+		slog.Warn("recovery rate limiter: using memory backend (per-replica; accurate only with a single replica)")
+		recoveryLimiter = ratelimit.NewMemory()
+	}
+	apiHandler.SetLimiter(recoveryLimiter)
+
+	// IP hasher for per-IP rate limiting. Created unconditionally — it is cheap
+	// and the handler only consults it when TrustedProxyHeader is configured.
+	if ipHasher, ihErr := ratelimit.NewIPHasher(cfg.Recovery.IPSecretRotation); ihErr != nil {
+		slog.Warn("recovery rate limiter: failed to create IP hasher; per-IP limiting disabled", "error", ihErr)
+	} else {
+		apiHandler.SetIPHasher(ipHasher)
+	}
 
 	// Initialize Web UI
 	webHandler, err := web.New(cfg, store, nip46Signer, nip46Signer, discoveryClient)

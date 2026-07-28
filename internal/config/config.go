@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -28,6 +29,70 @@ type Config struct {
 	Lightning              LightningConfig   `yaml:"lightning"`                 // LNURL-auth (LUD-04)
 	CacheURL               string            `yaml:"cache_url"`                 // Dragonfly/Redis URL for cross-replica request-claim coordination (empty = disabled)
 	RequestClaimTTLSeconds int               `yaml:"request_claim_ttl_seconds"` // TTL for a request claim (default 60)
+	Recovery               RecoveryConfig    `yaml:"recovery"`                  // Gating for the unauthenticated account-recovery endpoints
+}
+
+// RecoveryConfig gates /api/v1/recovery/challenge, which is unauthenticated by
+// necessity and writes a row per request.
+//
+// Four independent layers, all applied together. None is a fallback for another:
+// they bound different things, and a path that relaxes when one is unavailable
+// would be a bypass an attacker simply claims.
+//
+//	PoW          prices each request in client CPU. Does not bound totals, and a
+//	             targeted attacker pays it gladly -- its job is to keep the
+//	             counters below from ever being approached by casual volume.
+//	Per-username bounds grinding against one account. The only layer that stops a
+//	             targeted attack.
+//	Global       the absolute backstop on row growth, whatever shape the attacker
+//	             takes. Deliberately generous: a global ceiling is also a global
+//	             denial surface, so it is the fuse, not the switch.
+//	Per-IP       bounds a single source. Defeated by distribution, and OFF unless
+//	             TrustedProxyHeader is set -- see that field.
+type RecoveryConfig struct {
+	// PoWDifficulty is the required NIP-13 leading-zero bits on the request's
+	// mined event. 0 disables the check.
+	//
+	// Ships at 0 on purpose: PoW is useless until a client mines it, and the
+	// recovery UI does not exist yet. Enabling it before then locks everyone out
+	// of the endpoint. Suggested value once there is a client: 16-18, BELOW
+	// registration's 20-21. This runs for a user who has already lost their
+	// password and may be on a phone; 20 bits there is a ten-second spinner at
+	// the worst possible moment.
+	PoWDifficulty int `yaml:"pow_difficulty"`
+
+	// PerUsernameLimit / PerUsernameWindow bound challenge issuance per requested
+	// username. Counted on the requested STRING, whether or not the account
+	// exists -- counting only real accounts would make a tripped limit prove the
+	// account exists, reintroducing the enumeration oracle the endpoint is built
+	// to avoid.
+	PerUsernameLimit  int           `yaml:"per_username_limit"`
+	PerUsernameWindow time.Duration `yaml:"per_username_window"`
+
+	// GlobalLimit / GlobalWindow bound issuance across the whole endpoint.
+	GlobalLimit  int           `yaml:"global_limit"`
+	GlobalWindow time.Duration `yaml:"global_window"`
+
+	// PerIPLimit / PerIPWindow bound issuance per client address, keyed by a
+	// rotating HMAC so no address is ever stored (see ratelimit.IPHasher).
+	PerIPLimit  int           `yaml:"per_ip_limit"`
+	PerIPWindow time.Duration `yaml:"per_ip_window"`
+
+	// TrustedProxyHeader names the header carrying the real client IP, e.g.
+	// "CF-Connecting-IP". EMPTY BY DEFAULT, which disables per-IP limiting
+	// entirely.
+	//
+	// This is a trust decision, not a tuning knob. The header is only meaningful
+	// if the signer cannot be reached except through the proxy that sets it;
+	// otherwise any client can forge it and choose its own bucket, which is worse
+	// than no per-IP limit at all. RemoteAddr is not used as a fallback for the
+	// same reason it would be useless: behind the Cloudflare tunnel it is the
+	// tunnel pod, so every user on earth would share one bucket.
+	TrustedProxyHeader string `yaml:"trusted_proxy_header"`
+
+	// IPSecretRotation is how often the IP-hashing secret is replaced. Shorter
+	// means buckets are unlinkable sooner and limits reset sooner.
+	IPSecretRotation time.Duration `yaml:"ip_secret_rotation"`
 }
 
 // LightningConfig holds LNURL-auth configuration.
@@ -221,6 +286,17 @@ func Load() (*Config, error) {
 		},
 		Lightning: LightningConfig{
 			Domain: "signer.cloistr.xyz",
+		},
+		Recovery: RecoveryConfig{
+			PoWDifficulty:      0,
+			PerUsernameLimit:   5,
+			PerUsernameWindow:  15 * time.Minute,
+			GlobalLimit:        300,
+			GlobalWindow:       1 * time.Minute,
+			PerIPLimit:         20,
+			PerIPWindow:        15 * time.Minute,
+			TrustedProxyHeader: "",
+			IPSecretRotation:   1 * time.Hour,
 		},
 	}
 
@@ -437,6 +513,67 @@ func Load() (*Config, error) {
 	// Lightning / LNURL-auth configuration
 	if domain := os.Getenv("LNURL_AUTH_DOMAIN"); domain != "" {
 		cfg.Lightning.Domain = domain
+	}
+
+	// Recovery rate-limiting configuration
+	if v := os.Getenv("RECOVERY_POW_DIFFICULTY"); v != "" {
+		i, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid RECOVERY_POW_DIFFICULTY: %w", err)
+		}
+		cfg.Recovery.PoWDifficulty = i
+	}
+	if v := os.Getenv("RECOVERY_PER_USERNAME_LIMIT"); v != "" {
+		i, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid RECOVERY_PER_USERNAME_LIMIT: %w", err)
+		}
+		cfg.Recovery.PerUsernameLimit = i
+	}
+	if v := os.Getenv("RECOVERY_PER_USERNAME_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid RECOVERY_PER_USERNAME_WINDOW: %w", err)
+		}
+		cfg.Recovery.PerUsernameWindow = d
+	}
+	if v := os.Getenv("RECOVERY_GLOBAL_LIMIT"); v != "" {
+		i, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid RECOVERY_GLOBAL_LIMIT: %w", err)
+		}
+		cfg.Recovery.GlobalLimit = i
+	}
+	if v := os.Getenv("RECOVERY_GLOBAL_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid RECOVERY_GLOBAL_WINDOW: %w", err)
+		}
+		cfg.Recovery.GlobalWindow = d
+	}
+	if v := os.Getenv("RECOVERY_PER_IP_LIMIT"); v != "" {
+		i, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid RECOVERY_PER_IP_LIMIT: %w", err)
+		}
+		cfg.Recovery.PerIPLimit = i
+	}
+	if v := os.Getenv("RECOVERY_PER_IP_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid RECOVERY_PER_IP_WINDOW: %w", err)
+		}
+		cfg.Recovery.PerIPWindow = d
+	}
+	if v := os.Getenv("RECOVERY_TRUSTED_PROXY_HEADER"); v != "" {
+		cfg.Recovery.TrustedProxyHeader = v
+	}
+	if v := os.Getenv("RECOVERY_IP_SECRET_ROTATION"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid RECOVERY_IP_SECRET_ROTATION: %w", err)
+		}
+		cfg.Recovery.IPSecretRotation = d
 	}
 
 	return cfg, nil
