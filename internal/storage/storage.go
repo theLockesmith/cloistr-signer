@@ -1171,6 +1171,38 @@ func (m *MemoryStorage) CleanExpiredRequests(ctx context.Context) error {
 
 // User management
 
+// cloneUser returns an independent copy of u. MemoryStorage must never hand a
+// caller a pointer into its own maps, and must never adopt a caller's pointer
+// into them: the mutators below (ResetFailedLogins, LockUser, ...) write to the
+// stored struct while holding m.mu, but a caller holding the same pointer reads
+// it without the lock, which is a genuine data race.
+//
+// The concrete failure this fixes: handleUserLogin fires ResetFailedLogins in a
+// goroutine and then snapshots the user (`reconcileUser := *user`) on the
+// handler goroutine. With a shared pointer those are a concurrent write and
+// read of the same User, and `go test -race` fails TestIntegration_UserIsolation.
+//
+// Reference fields are cloned too, so a caller appending to BackupCodes (the MFA
+// backup-code path does exactly that) cannot reach into stored state.
+func cloneUser(u *User) *User {
+	if u == nil {
+		return nil
+	}
+	c := *u
+	if u.BackupCodes != nil {
+		c.BackupCodes = append([]string(nil), u.BackupCodes...)
+	}
+	if u.LockedUntil != nil {
+		t := *u.LockedUntil
+		c.LockedUntil = &t
+	}
+	if u.LastLoginAt != nil {
+		t := *u.LastLoginAt
+		c.LastLoginAt = &t
+	}
+	return &c
+}
+
 func (m *MemoryStorage) CreateUser(ctx context.Context, user *User) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1187,10 +1219,11 @@ func (m *MemoryStorage) CreateUser(ctx context.Context, user *User) error {
 		}
 	}
 
-	m.users[user.ID] = user
-	m.usersByUsername[user.Username] = user
-	if user.Email != "" {
-		m.usersByEmail[user.Email] = user
+	stored := cloneUser(user)
+	m.users[stored.ID] = stored
+	m.usersByUsername[stored.Username] = stored
+	if stored.Email != "" {
+		m.usersByEmail[stored.Email] = stored
 	}
 	return nil
 }
@@ -1203,7 +1236,7 @@ func (m *MemoryStorage) GetUser(ctx context.Context, id string) (*User, error) {
 	if !exists {
 		return nil, ErrUserNotFound
 	}
-	return user, nil
+	return cloneUser(user), nil
 }
 
 func (m *MemoryStorage) GetUserByUsername(ctx context.Context, username string) (*User, error) {
@@ -1214,7 +1247,7 @@ func (m *MemoryStorage) GetUserByUsername(ctx context.Context, username string) 
 	if !exists {
 		return nil, ErrUserNotFound
 	}
-	return user, nil
+	return cloneUser(user), nil
 }
 
 func (m *MemoryStorage) GetUserByEmail(ctx context.Context, email string) (*User, error) {
@@ -1225,7 +1258,7 @@ func (m *MemoryStorage) GetUserByEmail(ctx context.Context, email string) (*User
 	if !exists {
 		return nil, ErrUserNotFound
 	}
-	return user, nil
+	return cloneUser(user), nil
 }
 
 func (m *MemoryStorage) GetUserByPubkey(ctx context.Context, pubkey string) (*User, error) {
@@ -1234,7 +1267,7 @@ func (m *MemoryStorage) GetUserByPubkey(ctx context.Context, pubkey string) (*Us
 
 	for _, user := range m.users {
 		if user.Pubkey == pubkey {
-			return user, nil
+			return cloneUser(user), nil
 		}
 	}
 	return nil, ErrUserNotFound
@@ -1246,7 +1279,7 @@ func (m *MemoryStorage) ListUsers(ctx context.Context) ([]*User, error) {
 
 	users := make([]*User, 0, len(m.users))
 	for _, user := range m.users {
-		users = append(users, user)
+		users = append(users, cloneUser(user))
 	}
 	return users, nil
 }
@@ -1260,24 +1293,26 @@ func (m *MemoryStorage) UpdateUser(ctx context.Context, user *User) error {
 		return ErrUserNotFound
 	}
 
-	// Handle username change
-	if existing.Username != user.Username {
-		delete(m.usersByUsername, existing.Username)
-		m.usersByUsername[user.Username] = user
-	}
-
-	// Handle email change
-	if existing.Email != user.Email {
-		if existing.Email != "" {
-			delete(m.usersByEmail, existing.Email)
-		}
-		if user.Email != "" {
-			m.usersByEmail[user.Email] = user
-		}
-	}
-
 	user.UpdatedAt = time.Now()
-	m.users[user.ID] = user
+	stored := cloneUser(user)
+
+	// Re-point every index at the new stored copy. The by-username/by-email maps
+	// have to be rewritten even when the value is unchanged: they previously kept
+	// the pointer from the last write, so a rename-less update left them serving
+	// a stale struct.
+	if existing.Username != stored.Username {
+		delete(m.usersByUsername, existing.Username)
+	}
+	m.usersByUsername[stored.Username] = stored
+
+	if existing.Email != stored.Email && existing.Email != "" {
+		delete(m.usersByEmail, existing.Email)
+	}
+	if stored.Email != "" {
+		m.usersByEmail[stored.Email] = stored
+	}
+
+	m.users[stored.ID] = stored
 	return nil
 }
 

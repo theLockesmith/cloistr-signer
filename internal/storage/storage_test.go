@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1072,4 +1073,130 @@ func TestMemoryStorage_Close(t *testing.T) {
 	if err != nil {
 		t.Errorf("Close() error = %v", err)
 	}
+}
+
+// User aliasing / concurrency
+
+// TestMemoryStorage_UserNotAliased pins the invariant that MemoryStorage never
+// shares a *User with its caller in either direction. Before cloneUser, the
+// getters handed out the pointer stored in the maps and CreateUser/UpdateUser
+// adopted the caller's, so a mutator writing under m.mu raced with a caller
+// reading the same struct without it.
+func TestMemoryStorage_UserNotAliased(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStorage()
+
+	in := &User{
+		ID: "u1", Username: "alice", Email: "alice@example.com", Role: "user",
+		BackupCodes: []string{"a", "b"},
+	}
+	if err := s.CreateUser(ctx, in); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	// Mutating what we passed in must not reach stored state.
+	in.Username = "mallory"
+	in.BackupCodes[0] = "tampered"
+
+	got, err := s.GetUser(ctx, "u1")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if got.Username != "alice" {
+		t.Errorf("CreateUser adopted the caller's pointer: username = %q, want %q", got.Username, "alice")
+	}
+	if got.BackupCodes[0] != "a" {
+		t.Errorf("CreateUser shared the BackupCodes slice: [0] = %q, want %q", got.BackupCodes[0], "a")
+	}
+
+	// Mutating what we got back must not reach stored state either.
+	got.Username = "eve"
+	got.BackupCodes[1] = "tampered"
+	again, err := s.GetUserByUsername(ctx, "alice")
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if again.Username != "alice" || again.BackupCodes[1] != "b" {
+		t.Errorf("getter returned a pointer into storage: got %q / %q", again.Username, again.BackupCodes[1])
+	}
+}
+
+// TestMemoryStorage_UpdateUserRefreshesIndexes covers the stale-index bug found
+// alongside the aliasing one: UpdateUser rewrote m.users but left the
+// by-username/by-email maps pointing at the previous struct unless the name or
+// address had changed, so a rename-less update was invisible to those lookups.
+func TestMemoryStorage_UpdateUserRefreshesIndexes(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStorage()
+
+	if err := s.CreateUser(ctx, &User{ID: "u1", Username: "alice", Email: "alice@example.com", Role: "user"}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	u, err := s.GetUser(ctx, "u1")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	u.Role = "admin" // neither username nor email changes
+	if err := s.UpdateUser(ctx, u); err != nil {
+		t.Fatalf("UpdateUser: %v", err)
+	}
+
+	byName, err := s.GetUserByUsername(ctx, "alice")
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if byName.Role != "admin" {
+		t.Errorf("by-username index is stale after UpdateUser: role = %q, want %q", byName.Role, "admin")
+	}
+	byEmail, err := s.GetUserByEmail(ctx, "alice@example.com")
+	if err != nil {
+		t.Fatalf("GetUserByEmail: %v", err)
+	}
+	if byEmail.Role != "admin" {
+		t.Errorf("by-email index is stale after UpdateUser: role = %q, want %q", byEmail.Role, "admin")
+	}
+}
+
+// TestMemoryStorage_ConcurrentUserReadWrite reproduces the handleUserLogin
+// shape: a detached goroutine calling ResetFailedLogins while the request
+// goroutine reads the user it fetched. Only meaningful under -race, where it
+// failed before cloneUser.
+func TestMemoryStorage_ConcurrentUserReadWrite(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStorage()
+
+	if err := s.CreateUser(ctx, &User{ID: "u1", Username: "alice", Role: "user", FailedLoginAttempts: 3}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if err := s.ResetFailedLogins(ctx, "u1"); err != nil {
+				t.Errorf("ResetFailedLogins: %v", err)
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			u, err := s.GetUserByUsername(ctx, "alice")
+			if err != nil {
+				t.Errorf("GetUserByUsername: %v", err)
+				return
+			}
+			// The read that raced: the login handler snapshots the whole struct.
+			snapshot := *u
+			_ = snapshot.FailedLoginAttempts
+		}
+	}()
+
+	wg.Wait()
 }
