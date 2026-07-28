@@ -8,31 +8,31 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nbd-wtf/go-nostr"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
+	"github.com/nbd-wtf/go-nostr"
 )
 
 var (
-	ErrKeyNotFound         = errors.New("key not found")
-	ErrKeyExists           = errors.New("key already exists")
-	ErrNotAuthorized       = errors.New("not authorized")
-	ErrSessionNotFound     = errors.New("session not found")
-	ErrPolicyNotFound      = errors.New("policy not found")
-	ErrTokenNotFound       = errors.New("token not found")
-	ErrTokenExpired        = errors.New("token expired")
-	ErrTokenRedeemed       = errors.New("token already redeemed")
-	ErrRequestNotFound     = errors.New("request not found")
-	ErrRequestExpired      = errors.New("request expired")
-	ErrUserNotFound        = errors.New("user not found")
-	ErrUserExists          = errors.New("user already exists")
-	ErrInvalidPassword     = errors.New("invalid password")
-	ErrAccountLocked       = errors.New("account locked")
-	ErrMFARequired         = errors.New("MFA verification required")
-	ErrInvalidMFACode      = errors.New("invalid MFA code")
-	ErrBunkerSecretInvalid = errors.New("invalid bunker secret")
-	ErrSettingNotFound     = errors.New("setting not found")
-	ErrConsentNotFound     = errors.New("app consent not found")
+	ErrKeyNotFound          = errors.New("key not found")
+	ErrKeyExists            = errors.New("key already exists")
+	ErrNotAuthorized        = errors.New("not authorized")
+	ErrSessionNotFound      = errors.New("session not found")
+	ErrPolicyNotFound       = errors.New("policy not found")
+	ErrTokenNotFound        = errors.New("token not found")
+	ErrTokenExpired         = errors.New("token expired")
+	ErrTokenRedeemed        = errors.New("token already redeemed")
+	ErrRequestNotFound      = errors.New("request not found")
+	ErrRequestExpired       = errors.New("request expired")
+	ErrUserNotFound         = errors.New("user not found")
+	ErrUserExists           = errors.New("user already exists")
+	ErrInvalidPassword      = errors.New("invalid password")
+	ErrAccountLocked        = errors.New("account locked")
+	ErrMFARequired          = errors.New("MFA verification required")
+	ErrInvalidMFACode       = errors.New("invalid MFA code")
+	ErrBunkerSecretInvalid  = errors.New("invalid bunker secret")
+	ErrSettingNotFound      = errors.New("setting not found")
+	ErrConsentNotFound      = errors.New("app consent not found")
 	ErrLightningKeyNotFound = errors.New("lightning key not found")
 	ErrLightningKeyExists   = errors.New("lightning key already exists")
 )
@@ -49,20 +49,20 @@ type Key struct {
 	ID               string    `json:"id"`
 	Name             string    `json:"name"`
 	Pubkey           string    `json:"pubkey"`
-	KeyType          string    `json:"key_type"`          // "local" or "proxy" (default: local)
-	EncryptedNsec    string    `json:"-"`                 // For local keys: never exposed in JSON
-	EncryptionMethod string    `json:"-"`                 // "local" (AES-GCM) or "vault" (Vault transit)
-	BunkerURI        string    `json:"-"`                 // For proxy keys: bunker:// URI to upstream signer
+	KeyType          string    `json:"key_type"`                  // "local" or "proxy" (default: local)
+	EncryptedNsec    string    `json:"-"`                         // For local keys: never exposed in JSON
+	EncryptionMethod string    `json:"-"`                         // "local" (AES-GCM) or "vault" (Vault transit)
+	BunkerURI        string    `json:"-"`                         // For proxy keys: bunker:// URI to upstream signer
 	UpstreamPubkey   string    `json:"upstream_pubkey,omitempty"` // For proxy keys: pubkey of the upstream signer
-	RequireApproval  bool      `json:"require_approval"`  // If true, requests need manual approval
-	DisposableMode   bool      `json:"disposable_mode"`   // If true, signer enforces privacy guardrails: refuses identity-linking kinds (0/3/10002), refuses NIP-04 encrypt, strips client tags, jitters response timing
-	CoverTraffic     bool      `json:"cover_traffic"`     // If true, signer emits ephemeral NIP-17 gift-wrap decoys to this key's relays at randomized intervals to mask online/offline presence (privacy-architecture §3.11 paid-tier behavior)
-	TorEgress        bool      `json:"tor_egress"`        // If true, signer routes outbound relay connections for this key through the configured Tor SOCKS5 proxy (privacy-architecture §3.10)
-	Relays           []string  `json:"relays,omitempty"`  // Custom relays for this key (nil = use global config)
-	RelayMode        string    `json:"relay_mode,omitempty"` // Relay selection: "auto", "manual", "discovery"
+	RequireApproval  bool      `json:"require_approval"`          // If true, requests need manual approval
+	DisposableMode   bool      `json:"disposable_mode"`           // If true, signer enforces privacy guardrails: refuses identity-linking kinds (0/3/10002), refuses NIP-04 encrypt, strips client tags, jitters response timing
+	CoverTraffic     bool      `json:"cover_traffic"`             // If true, signer emits ephemeral NIP-17 gift-wrap decoys to this key's relays at randomized intervals to mask online/offline presence (privacy-architecture §3.11 paid-tier behavior)
+	TorEgress        bool      `json:"tor_egress"`                // If true, signer routes outbound relay connections for this key through the configured Tor SOCKS5 proxy (privacy-architecture §3.10)
+	Relays           []string  `json:"relays,omitempty"`          // Custom relays for this key (nil = use global config)
+	RelayMode        string    `json:"relay_mode,omitempty"`      // Relay selection: "auto", "manual", "discovery"
 	CreatedAt        time.Time `json:"created_at"`
 	CreatedBy        string    `json:"created_by"`
-	OwnerID          string    `json:"owner_id"`          // User who owns this key (for multi-user isolation)
+	OwnerID          string    `json:"owner_id"` // User who owns this key (for multi-user isolation)
 }
 
 // IsProxy returns true if this is a proxy key
@@ -74,7 +74,7 @@ func (k *Key) IsProxy() bool {
 type Permission struct {
 	KeyID           string     `json:"key_id"`
 	UserPubkey      string     `json:"user_pubkey"`
-	Methods         []string   `json:"methods"` // "sign_event", "encrypt", "decrypt", "ping", etc.
+	Methods         []string   `json:"methods"`                 // "sign_event", "encrypt", "decrypt", "ping", etc.
 	AllowedKinds    []int      `json:"allowed_kinds,omitempty"` // Empty = all kinds
 	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 	PolicyID        string     `json:"policy_id,omitempty"`        // Source policy for usage tracking
@@ -123,21 +123,21 @@ type PolicyRule struct {
 	PolicyID     string `json:"policy_id"`
 	Method       string `json:"method"` // "sign_event", "encrypt", "decrypt", "ping", "*"
 	AllowedKinds []int  `json:"allowed_kinds,omitempty"`
-	MaxUsage     int    `json:"max_usage,omitempty"`  // 0 = unlimited
+	MaxUsage     int    `json:"max_usage,omitempty"` // 0 = unlimited
 	CurrentUsage int    `json:"current_usage"`
 }
 
 // Token represents a one-time redeemable access token
 type Token struct {
-	ID          string     `json:"id"`
-	PolicyID    string     `json:"policy_id"`
-	KeyID       string     `json:"key_id"` // Which key this token grants access to
-	ClientName  string     `json:"client_name,omitempty"`
-	CreatedBy   string     `json:"created_by,omitempty"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	RedeemedAt  *time.Time `json:"redeemed_at,omitempty"`
-	RedeemedBy  string     `json:"redeemed_by,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID         string     `json:"id"`
+	PolicyID   string     `json:"policy_id"`
+	KeyID      string     `json:"key_id"` // Which key this token grants access to
+	ClientName string     `json:"client_name,omitempty"`
+	CreatedBy  string     `json:"created_by,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	RedeemedAt *time.Time `json:"redeemed_at,omitempty"`
+	RedeemedBy string     `json:"redeemed_by,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 // PendingRequest represents a NIP-46 request awaiting authorization
@@ -157,12 +157,12 @@ type User struct {
 	ID                  string     `json:"id"`
 	Username            string     `json:"username"`
 	Email               string     `json:"email,omitempty"`
-	Pubkey              string     `json:"pubkey,omitempty"`  // Nostr public key (hex)
-	Role                string     `json:"role"`              // "admin" or "user"
-	PasswordHash        string     `json:"-"`                 // Never exposed in JSON
-	MFASecret           string     `json:"-"`                 // TOTP secret, never exposed
+	Pubkey              string     `json:"pubkey,omitempty"` // Nostr public key (hex)
+	Role                string     `json:"role"`             // "admin" or "user"
+	PasswordHash        string     `json:"-"`                // Never exposed in JSON
+	MFASecret           string     `json:"-"`                // TOTP secret, never exposed
 	MFAEnabled          bool       `json:"mfa_enabled"`
-	BackupCodes         []string   `json:"-"`                 // Hashed backup codes
+	BackupCodes         []string   `json:"-"` // Hashed backup codes
 	BackupCodesUsed     int        `json:"backup_codes_used"`
 	FailedLoginAttempts int        `json:"failed_login_attempts"`
 	LockedUntil         *time.Time `json:"locked_until,omitempty"`
@@ -179,11 +179,11 @@ func (u *User) IsAdmin() bool {
 
 // PlatformUser represents a user in the cloistr platform with service access info
 type PlatformUser struct {
-	Pubkey    string           `json:"pubkey"`
-	Enabled   bool             `json:"enabled"`
-	Services  []ServiceAccess  `json:"services"`
-	CreatedAt time.Time        `json:"created_at"`
-	UpdatedAt time.Time        `json:"updated_at"`
+	Pubkey    string          `json:"pubkey"`
+	Enabled   bool            `json:"enabled"`
+	Services  []ServiceAccess `json:"services"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
 }
 
 // ServiceAccess represents a user's access to a service
@@ -206,22 +206,22 @@ type Service struct {
 
 // UserSession represents an authenticated user session (JWT-based)
 type UserSession struct {
-	ID             string     `json:"id"`
-	UserID         string     `json:"user_id"`
-	Token          string     `json:"-"` // JWT token hash for revocation check
-	VaultToken     string     `json:"-"` // User's Vault token for key operations (encrypted at rest)
+	ID         string `json:"id"`
+	UserID     string `json:"user_id"`
+	Token      string `json:"-"` // JWT token hash for revocation check
+	VaultToken string `json:"-"` // User's Vault token for key operations (encrypted at rest)
 	// P4e: browser-side cosign listener's ephemeral pubkey. Populated
 	// via POST /api/v1/frost/cosign-listener/register when the SPA
 	// starts up. Read at FROST-key sign_event time to determine the
 	// p-tag on outgoing kind:24135 requests. Empty for sessions that
 	// haven't registered yet.
-	CosignListenerPubkey string `json:"-"`
-	UserAgent      string     `json:"user_agent,omitempty"`
-	IPAddress      string     `json:"ip_address,omitempty"`
-	RememberDevice bool       `json:"remember_device"`            // If true, use extended expiry instead of inactivity timeout
-	LastActivity   *time.Time `json:"last_activity,omitempty"`    // Last request time for inactivity tracking
-	ExpiresAt      time.Time  `json:"expires_at"`                 // Absolute expiry (30 days for remember, or max session length)
-	CreatedAt      time.Time  `json:"created_at"`
+	CosignListenerPubkey string     `json:"-"`
+	UserAgent            string     `json:"user_agent,omitempty"`
+	IPAddress            string     `json:"ip_address,omitempty"`
+	RememberDevice       bool       `json:"remember_device"`         // If true, use extended expiry instead of inactivity timeout
+	LastActivity         *time.Time `json:"last_activity,omitempty"` // Last request time for inactivity tracking
+	ExpiresAt            time.Time  `json:"expires_at"`              // Absolute expiry (30 days for remember, or max session length)
+	CreatedAt            time.Time  `json:"created_at"`
 }
 
 // AppConsent records that a user has approved a cross-subdomain nostrconnect
@@ -230,7 +230,7 @@ type UserSession struct {
 // See unified-auth-design §5 ("first-time consent then silent").
 type AppConsent struct {
 	UserID     string    `json:"user_id"`
-	AppID      string    `json:"app_id"`            // nostrconnect client pubkey
+	AppID      string    `json:"app_id"` // nostrconnect client pubkey
 	AppName    string    `json:"app_name,omitempty"`
 	ApprovedAt time.Time `json:"approved_at"`
 }
@@ -261,6 +261,31 @@ type WebAuthnSession struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// RecoveryChallenge is a single-use, expiring nonce the user signs with their
+// Nostr key to prove key possession during account recovery.
+//
+// The challenge is server-issued rather than client-supplied on purpose. The
+// NIP-07 login path lets the client pick its own challenge, which is tolerable
+// there because a replayed proof only re-establishes a session the holder could
+// obtain anyway. Recovery resets a credential, so a captured signature must not
+// be replayable: the nonce is minted here, bound to one account, expires quickly,
+// and is consumed atomically on first use.
+//
+// ID is the challenge value itself -- there is no separate handle, so a caller
+// cannot present a challenge it did not receive.
+type RecoveryChallenge struct {
+	ID        string     `json:"id"`
+	UserID    string     `json:"user_id"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	CreatedAt time.Time  `json:"created_at"`
+	UsedAt    *time.Time `json:"used_at,omitempty"`
+}
+
+// ErrChallengeNotFound is returned when a recovery challenge is unknown, already
+// consumed, or expired. Deliberately one error for all three: distinguishing them
+// would tell an attacker whether a guessed nonce ever existed.
+var ErrChallengeNotFound = errors.New("recovery challenge not found, already used, or expired")
+
 // LightningKey represents a linked LNURL-auth linking key for a user.
 // The linking key is a secp256k1 pubkey (33 bytes, hex-encoded) derived
 // deterministically by the wallet from the domain per LUD-04 §4.
@@ -275,11 +300,11 @@ type LightningKey struct {
 
 // BunkerSecret represents a secret for bunker:// URI validation
 type BunkerSecret struct {
-	ID        string    `json:"id"`
-	KeyPubkey string    `json:"key_pubkey"` // The signer key this secret is for
-	Secret    string    `json:"-"`          // The secret value (never exposed in JSON)
-	ExpiresAt time.Time `json:"expires_at"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string     `json:"id"`
+	KeyPubkey string     `json:"key_pubkey"` // The signer key this secret is for
+	Secret    string     `json:"-"`          // The secret value (never exposed in JSON)
+	ExpiresAt time.Time  `json:"expires_at"`
+	CreatedAt time.Time  `json:"created_at"`
 	UsedAt    *time.Time `json:"used_at,omitempty"` // When the secret was used (one-time use)
 }
 
@@ -288,14 +313,14 @@ type BunkerSecret struct {
 type FrostKey struct {
 	ID                 string    `json:"id"`
 	Name               string    `json:"name,omitempty"`
-	Pubkey             string    `json:"pubkey"`               // Group public key (hex) - the Nostr identity
-	Threshold          int       `json:"threshold"`            // t in t-of-n
-	TotalShares        int       `json:"total_shares"`         // n in t-of-n
-	GroupPublicKey     []byte    `json:"-"`                    // Encoded group public key (for FROST operations)
-	VerificationShares []byte    `json:"-"`                    // Encoded verification shares (for verifying partial sigs)
+	Pubkey             string    `json:"pubkey"`       // Group public key (hex) - the Nostr identity
+	Threshold          int       `json:"threshold"`    // t in t-of-n
+	TotalShares        int       `json:"total_shares"` // n in t-of-n
+	GroupPublicKey     []byte    `json:"-"`            // Encoded group public key (for FROST operations)
+	VerificationShares []byte    `json:"-"`            // Encoded verification shares (for verifying partial sigs)
 	CreatedAt          time.Time `json:"created_at"`
 	CreatedBy          string    `json:"created_by,omitempty"`
-	OwnerID            string    `json:"owner_id,omitempty"`   // User who owns this FROST key (for per-user encryption)
+	OwnerID            string    `json:"owner_id,omitempty"` // User who owns this FROST key (for per-user encryption)
 }
 
 // FrostUserShare is the signer-side share of a 2-of-N user-cosigner FROST
@@ -348,12 +373,12 @@ type FrostUserShare struct {
 type FrostShare struct {
 	ID              string    `json:"id"`
 	FrostKeyID      string    `json:"frost_key_id"`
-	ShareIndex      int       `json:"share_index"`              // 1 to n
-	EncryptedShare  []byte    `json:"-"`                        // Local share (encrypted with AES-256-GCM)
-	HolderPubkey    string    `json:"holder_pubkey,omitempty"`  // Remote holder's Nostr pubkey
+	ShareIndex      int       `json:"share_index"`                 // 1 to n
+	EncryptedShare  []byte    `json:"-"`                           // Local share (encrypted with AES-256-GCM)
+	HolderPubkey    string    `json:"holder_pubkey,omitempty"`     // Remote holder's Nostr pubkey
 	HolderBunkerURI string    `json:"holder_bunker_uri,omitempty"` // Remote holder's bunker:// URI
 	IsLocal         bool      `json:"is_local"`
-	PublicShare     []byte    `json:"-"`                        // Public key share for this participant
+	PublicShare     []byte    `json:"-"` // Public key share for this participant
 	CreatedAt       time.Time `json:"created_at"`
 }
 
@@ -506,6 +531,14 @@ type Storage interface {
 	GetWebAuthnSession(ctx context.Context, id string) (*WebAuthnSession, error)
 	DeleteWebAuthnSession(ctx context.Context, id string) error
 
+	// Account-recovery challenges (nsec proof-of-possession).
+	// ConsumeRecoveryChallenge MUST be atomic: it marks the challenge used and
+	// returns it only if it was unused and unexpired, so two concurrent attempts
+	// on one challenge cannot both succeed.
+	CreateRecoveryChallenge(ctx context.Context, challenge *RecoveryChallenge) error
+	ConsumeRecoveryChallenge(ctx context.Context, id string) (*RecoveryChallenge, error)
+	DeleteExpiredRecoveryChallenges(ctx context.Context) (int, error)
+
 	// Lightning key management (LNURL-auth LUD-04)
 	CreateLightningKey(ctx context.Context, key *LightningKey) error
 	GetLightningKeyByLinkingKey(ctx context.Context, linkingKey string) (*LightningKey, error)
@@ -562,58 +595,60 @@ type MemoryStorage struct {
 	bunkerSecrets      map[string]*BunkerSecret           // secret value -> BunkerSecret
 	settings           map[string]string                  // key -> value
 	// FROST threshold signing
-	frostKeys          map[string]*FrostKey             // id -> FrostKey
-	frostKeysByPubkey  map[string]*FrostKey             // pubkey -> FrostKey
-	frostShares        map[string]*FrostShare           // id -> FrostShare
-	frostSharesByKey   map[string]map[int]*FrostShare   // keyID -> index -> FrostShare
-	frostUserShares    map[string]*FrostUserShare       // id -> FrostUserShare
-	frostUserShareByKey map[string]*FrostUserShare      // key_id -> FrostUserShare (one signer-held share per key)
+	frostKeys           map[string]*FrostKey           // id -> FrostKey
+	frostKeysByPubkey   map[string]*FrostKey           // pubkey -> FrostKey
+	frostShares         map[string]*FrostShare         // id -> FrostShare
+	frostSharesByKey    map[string]map[int]*FrostShare // keyID -> index -> FrostShare
+	frostUserShares     map[string]*FrostUserShare     // id -> FrostUserShare
+	frostUserShareByKey map[string]*FrostUserShare     // key_id -> FrostUserShare (one signer-held share per key)
 	// App consents for cross-subdomain SSO (unified-auth-design §5)
-	appConsents        map[string]map[string]*AppConsent // userID -> appID -> AppConsent
+	appConsents map[string]map[string]*AppConsent // userID -> appID -> AppConsent
 
 	// WebAuthn / passkey storage
-	passkeyCredentials       map[string]*PasskeyCredential  // id -> cred
-	passkeyCredsByCredID     map[string]*PasskeyCredential  // base64(credentialID) -> cred
-	passkeyCredsByUser       map[string][]*PasskeyCredential // userID -> []cred
-	webauthnSessions         map[string]*WebAuthnSession    // id -> session
+	passkeyCredentials   map[string]*PasskeyCredential   // id -> cred
+	passkeyCredsByCredID map[string]*PasskeyCredential   // base64(credentialID) -> cred
+	passkeyCredsByUser   map[string][]*PasskeyCredential // userID -> []cred
+	webauthnSessions     map[string]*WebAuthnSession     // id -> session
+	recoveryChallenges   map[string]*RecoveryChallenge   // challenge -> record
 
 	// Lightning key storage (LNURL-auth LUD-04)
-	lightningKeys              map[string]*LightningKey  // id -> key
-	lightningKeysByLinkingKey  map[string]*LightningKey  // linkingKey -> key
+	lightningKeys             map[string]*LightningKey // id -> key
+	lightningKeysByLinkingKey map[string]*LightningKey // linkingKey -> key
 }
 
 // NewMemoryStorage creates a new in-memory storage
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
-		keys:               make(map[string]*Key),
-		keysByPubkey:       make(map[string]*Key),
-		keysByName:         make(map[string]*Key),
-		permissions:        make(map[string]map[string]*Permission),
-		sessions:           make(map[string]*Session),
-		policies:           make(map[string]*Policy),
-		policyRules:        make(map[string]*PolicyRule),
-		tokens:             make(map[string]*Token),
-		tokensByKey:        make(map[string]map[string]*Token),
-		pendingRequests:    make(map[string]*PendingRequest),
-		users:              make(map[string]*User),
-		usersByUsername:    make(map[string]*User),
-		usersByEmail:       make(map[string]*User),
-		userSessions:       make(map[string]*UserSession),
-		userSessionsByUser: make(map[string]map[string]*UserSession),
-		bunkerSecrets:      make(map[string]*BunkerSecret),
-		settings:           make(map[string]string),
-		frostKeys:          make(map[string]*FrostKey),
-		frostKeysByPubkey:  make(map[string]*FrostKey),
-		frostShares:        make(map[string]*FrostShare),
-		frostSharesByKey:   make(map[string]map[int]*FrostShare),
-		frostUserShares:    make(map[string]*FrostUserShare),
+		keys:                make(map[string]*Key),
+		keysByPubkey:        make(map[string]*Key),
+		keysByName:          make(map[string]*Key),
+		permissions:         make(map[string]map[string]*Permission),
+		sessions:            make(map[string]*Session),
+		policies:            make(map[string]*Policy),
+		policyRules:         make(map[string]*PolicyRule),
+		tokens:              make(map[string]*Token),
+		tokensByKey:         make(map[string]map[string]*Token),
+		pendingRequests:     make(map[string]*PendingRequest),
+		users:               make(map[string]*User),
+		usersByUsername:     make(map[string]*User),
+		usersByEmail:        make(map[string]*User),
+		userSessions:        make(map[string]*UserSession),
+		userSessionsByUser:  make(map[string]map[string]*UserSession),
+		bunkerSecrets:       make(map[string]*BunkerSecret),
+		settings:            make(map[string]string),
+		frostKeys:           make(map[string]*FrostKey),
+		frostKeysByPubkey:   make(map[string]*FrostKey),
+		frostShares:         make(map[string]*FrostShare),
+		frostSharesByKey:    make(map[string]map[int]*FrostShare),
+		frostUserShares:     make(map[string]*FrostUserShare),
 		frostUserShareByKey: make(map[string]*FrostUserShare),
-		appConsents:        make(map[string]map[string]*AppConsent),
+		appConsents:         make(map[string]map[string]*AppConsent),
 
 		passkeyCredentials:   make(map[string]*PasskeyCredential),
 		passkeyCredsByCredID: make(map[string]*PasskeyCredential),
 		passkeyCredsByUser:   make(map[string][]*PasskeyCredential),
 		webauthnSessions:     make(map[string]*WebAuthnSession),
+		recoveryChallenges:   make(map[string]*RecoveryChallenge),
 
 		lightningKeys:             make(map[string]*LightningKey),
 		lightningKeysByLinkingKey: make(map[string]*LightningKey),
@@ -2036,6 +2071,50 @@ func (m *MemoryStorage) DeleteWebAuthnSession(ctx context.Context, id string) er
 	defer m.mu.Unlock()
 	delete(m.webauthnSessions, id)
 	return nil
+}
+
+// ---- Recovery challenge memory implementations ----
+
+func (m *MemoryStorage) CreateRecoveryChallenge(ctx context.Context, c *RecoveryChallenge) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	stored := *c
+	m.recoveryChallenges[stored.ID] = &stored
+	return nil
+}
+
+// ConsumeRecoveryChallenge marks the challenge used and returns it, but only if it
+// was unused and unexpired. The check and the mark happen under one lock hold, so
+// two concurrent attempts on the same challenge cannot both succeed.
+func (m *MemoryStorage) ConsumeRecoveryChallenge(ctx context.Context, id string) (*RecoveryChallenge, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	c, ok := m.recoveryChallenges[id]
+	if !ok || c.UsedAt != nil || time.Now().After(c.ExpiresAt) {
+		return nil, ErrChallengeNotFound
+	}
+	now := time.Now()
+	c.UsedAt = &now
+
+	out := *c
+	return &out, nil
+}
+
+func (m *MemoryStorage) DeleteExpiredRecoveryChallenges(ctx context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	removed := 0
+	for id, c := range m.recoveryChallenges {
+		if now.After(c.ExpiresAt) {
+			delete(m.recoveryChallenges, id)
+			removed++
+		}
+	}
+	return removed, nil
 }
 
 // ---- Lightning key memory implementations ----
