@@ -189,6 +189,19 @@ class ApiClient {
     });
   }
 
+  /**
+   * Make this key the account's identity key. Exactly one key per account can
+   * be primary, so this demotes the previous one.
+   *
+   * Deliberately a separate call from updateKey: promoting a key changes the
+   * pubkey that identifies you across Cloistr and the only key that can
+   * authorise an nsec password recovery, so it must never ride along with a
+   * rename or a relay edit.
+   */
+  async setPrimaryKey(id: string): Promise<{ id: string; pubkey: string; is_primary: boolean }> {
+    return this.fetch(`/keys/${id}/primary`, { method: 'PUT' });
+  }
+
   async getBunkerUrl(id: string): Promise<{ bunker_uri: string; signer_pubkey: string; relays: string[]; secret?: string }> {
     return this.fetch(`/bunker/${id}`);
   }
