@@ -63,6 +63,17 @@ type Key struct {
 	CreatedAt        time.Time `json:"created_at"`
 	CreatedBy        string    `json:"created_by"`
 	OwnerID          string    `json:"owner_id"` // User who owns this key (for multi-user isolation)
+
+	// IsPrimary marks this key as the account's identity key: the pubkey that
+	// IS the user on the platform (Option A), and the only key accepted as
+	// proof in nsec password recovery.
+	//
+	// This used to be inferred from Name == "Primary". Name is a display
+	// string the user can edit freely, so renaming a key silently moved the
+	// account identity and the recovery anchor, and nothing stopped two keys
+	// from claiming it. At most one key per owner may have this set --
+	// enforced by a partial unique index, not just by convention.
+	IsPrimary bool `json:"is_primary"`
 }
 
 // IsProxy returns true if this is a proxy key
@@ -394,6 +405,12 @@ type Storage interface {
 	UpdateKey(ctx context.Context, key *Key) error
 	UpdateKeyEncryption(ctx context.Context, keyID, encryptedNsec, encryptionMethod string) error // For migration
 	DeleteKey(ctx context.Context, id string) error
+
+	// SetPrimaryKey makes keyID the owner's identity key and clears the flag
+	// from every other key they own, atomically. UpdateKey deliberately does
+	// not touch is_primary, so this is the only way it changes -- which keeps
+	// a routine rename or relay edit from moving the account identity.
+	SetPrimaryKey(ctx context.Context, ownerID, keyID string) error
 
 	// Permission management
 	SetPermission(ctx context.Context, perm *Permission) error
@@ -784,6 +801,25 @@ func (m *MemoryStorage) DeleteKey(ctx context.Context, id string) error {
 		delete(m.keysByName, key.Name)
 	}
 	delete(m.permissions, id)
+	return nil
+}
+
+// SetPrimaryKey makes keyID the owner's identity key, clearing the flag from
+// their other keys. The SQL backends get atomicity from a transaction; here the
+// write lock provides it.
+func (m *MemoryStorage) SetPrimaryKey(ctx context.Context, ownerID, keyID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	target, exists := m.keys[keyID]
+	if !exists || target.OwnerID != ownerID {
+		return ErrKeyNotFound
+	}
+	for _, k := range m.keys {
+		if k.OwnerID == ownerID {
+			k.IsPrimary = k.ID == keyID
+		}
+	}
 	return nil
 }
 

@@ -100,6 +100,9 @@ func (ss *SQLiteStorage) initSchema() error {
 		disposable_mode INTEGER NOT NULL DEFAULT 0,
 		cover_traffic INTEGER NOT NULL DEFAULT 0,
 		tor_egress INTEGER NOT NULL DEFAULT 0,
+		-- The account's identity key, as an attribute rather than an inference
+		-- from Name == "Primary". See storage.Key.IsPrimary.
+		is_primary INTEGER NOT NULL DEFAULT 0,
 		relays TEXT,  -- JSON array
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		created_by TEXT,
@@ -108,6 +111,10 @@ func (ss *SQLiteStorage) initSchema() error {
 
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_pubkey ON signer_keys(pubkey);
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_owner ON signer_keys(owner_id);
+
+	-- At most one primary per owner, same guarantee as the Postgres schema.
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_signer_keys_one_primary
+		ON signer_keys(owner_id) WHERE is_primary = 1;
 
 	-- Permissions table
 	CREATE TABLE IF NOT EXISTS signer_permissions (
@@ -385,10 +392,10 @@ func (ss *SQLiteStorage) GetKey(ctx context.Context, id string) (*Key, error) {
 	var requireApproval, disposableMode, coverTraffic, torEgress int
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
 		FROM signer_keys WHERE id = ?`, id).
 		Scan(&key.ID, &name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID)
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -439,10 +446,10 @@ func (ss *SQLiteStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*Ke
 	var requireApproval, disposableMode, coverTraffic, torEgress int
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
 		FROM signer_keys WHERE pubkey = ?`, pubkey).
 		Scan(&key.ID, &name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID)
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -493,10 +500,10 @@ func (ss *SQLiteStorage) GetKeyByName(ctx context.Context, name string) (*Key, e
 	var requireApproval, disposableMode, coverTraffic, torEgress int
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
 		FROM signer_keys WHERE name = ?`, name).
 		Scan(&key.ID, &keyName, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID)
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -543,7 +550,7 @@ func (ss *SQLiteStorage) GetKeyByName(ctx context.Context, name string) (*Key, e
 
 func (ss *SQLiteStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key, error) {
 	rows, err := ss.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
 		FROM signer_keys WHERE owner_id = ? ORDER BY created_at DESC`, ownerID)
 	if err != nil {
 		return nil, err
@@ -555,7 +562,7 @@ func (ss *SQLiteStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key, 
 
 func (ss *SQLiteStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 	rows, err := ss.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
 		FROM signer_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -573,7 +580,7 @@ func (ss *SQLiteStorage) scanKeys(rows *sql.Rows) ([]*Key, error) {
 		var requireApproval, disposableMode, coverTraffic, torEgress int
 
 		if err := rows.Scan(&key.ID, &name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID); err != nil {
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary); err != nil {
 			return nil, err
 		}
 
@@ -667,6 +674,36 @@ func (ss *SQLiteStorage) DeleteKey(ctx context.Context, id string) error {
 		return ErrKeyNotFound
 	}
 	return nil
+}
+
+// SetPrimaryKey makes keyID the owner's identity key, atomically.
+// Mirrors the Postgres implementation: clear then set, inside one transaction,
+// with ownership enforced in the UPDATE rather than by a prior read.
+func (ss *SQLiteStorage) SetPrimaryKey(ctx context.Context, ownerID, keyID string) error {
+	tx, err := ss.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE signer_keys SET is_primary = 0 WHERE owner_id = ? AND is_primary = 1`, ownerID); err != nil {
+		return err
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE signer_keys SET is_primary = 1 WHERE id = ? AND owner_id = ?`, keyID, ownerID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrKeyNotFound
+	}
+	return tx.Commit()
 }
 
 // Helper functions
