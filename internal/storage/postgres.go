@@ -98,6 +98,34 @@ func (ps *PostgresStorage) migrate() error {
 	-- Add tor_egress column for per-key Tor routing (Phase: Privacy Architecture §3.10)
 	ALTER TABLE signer_keys ADD COLUMN IF NOT EXISTS tor_egress BOOLEAN NOT NULL DEFAULT FALSE;
 
+	-- The account's identity key, as an attribute rather than an inference.
+	-- Previously this was "the key whose name happens to be 'Primary'", so
+	-- renaming a key silently moved both the platform identity and the nsec
+	-- recovery anchor, and two keys could claim it at once.
+	ALTER TABLE signer_keys ADD COLUMN IF NOT EXISTS is_primary BOOLEAN NOT NULL DEFAULT FALSE;
+
+	-- At most one primary per owner. Partial, so the many non-primary keys do
+	-- not collide with each other on a plain UNIQUE.
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_signer_keys_one_primary
+		ON signer_keys(owner_id) WHERE is_primary;
+
+	-- Backfill, preserving exactly what resolveSigningPubkey used to compute:
+	-- the key named 'Primary', else the owner's oldest key. Runs only for
+	-- owners that have no primary yet, so it is idempotent and never overrides
+	-- a choice the user has since made.
+	WITH ranked AS (
+		SELECT id, owner_id,
+		       ROW_NUMBER() OVER (
+		           PARTITION BY owner_id
+		           ORDER BY (name = 'Primary') DESC, created_at ASC
+		       ) AS rn
+		FROM signer_keys
+		WHERE owner_id IS NOT NULL
+		  AND owner_id NOT IN (SELECT owner_id FROM signer_keys WHERE is_primary AND owner_id IS NOT NULL)
+	)
+	UPDATE signer_keys k SET is_primary = TRUE
+	FROM ranked r WHERE k.id = r.id AND r.rn = 1;
+
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_pubkey ON signer_keys(pubkey);
 	CREATE INDEX IF NOT EXISTS idx_signer_keys_name ON signer_keys(name);
 
@@ -434,10 +462,10 @@ func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) 
 	key := &Key{}
 	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
 		FROM signer_keys WHERE id = $1`, id).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &key.IsPrimary)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -466,10 +494,10 @@ func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*
 	key := &Key{}
 	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
 		FROM signer_keys WHERE pubkey = $1`, pubkey).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &key.IsPrimary)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -498,10 +526,10 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 	key := &Key{}
 	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
 		FROM signer_keys WHERE name = $1`, name).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull)
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &key.IsPrimary)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -528,7 +556,7 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 
 func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, encryption_method
+		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, encryption_method, is_primary
 		FROM signer_keys WHERE owner_id = $1 ORDER BY created_at DESC`, ownerID)
 	if err != nil {
 		return nil, err
@@ -540,7 +568,7 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key
 		key := &Key{}
 		var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull, encryptionMethod sql.NullString
 		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod); err != nil {
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod, &key.IsPrimary); err != nil {
 			return nil, err
 		}
 		if encryptedNsec.Valid {
@@ -567,7 +595,7 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key
 
 func (ps *PostgresStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, encryption_method
+		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, encryption_method, is_primary
 		FROM signer_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -579,7 +607,7 @@ func (ps *PostgresStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 		key := &Key{}
 		var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull, encryptionMethod sql.NullString
 		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod); err != nil {
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod, &key.IsPrimary); err != nil {
 			return nil, err
 		}
 		if encryptedNsec.Valid {
@@ -658,6 +686,40 @@ func (ps *PostgresStorage) DeleteKey(ctx context.Context, id string) error {
 	// Also delete related permissions
 	_, _ = ps.db.ExecContext(ctx, `DELETE FROM signer_permissions WHERE key_id = $1`, id)
 	return nil
+}
+
+// SetPrimaryKey makes keyID the owner's identity key, atomically.
+//
+// Clearing runs before setting, in one transaction, because the partial unique
+// index allows only one primary per owner -- doing it the other way round would
+// collide with the outgoing primary. Ownership is checked in the UPDATE itself
+// rather than with a prior read, so a caller cannot promote a key belonging to
+// somebody else even if they guess its id.
+func (ps *PostgresStorage) SetPrimaryKey(ctx context.Context, ownerID, keyID string) error {
+	tx, err := ps.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE signer_keys SET is_primary = FALSE WHERE owner_id = $1 AND is_primary`, ownerID); err != nil {
+		return err
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE signer_keys SET is_primary = TRUE WHERE id = $1 AND owner_id = $2`, keyID, ownerID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrKeyNotFound
+	}
+	return tx.Commit()
 }
 
 // Permission management

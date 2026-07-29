@@ -546,6 +546,17 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(parts) == 2 && parts[1] == "primary" {
+		// /api/v1/keys/{id}/primary
+		switch r.Method {
+		case http.MethodPut:
+			h.handleSetPrimaryKey(w, r, keyID)
+		default:
+			h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	}
+
 	if len(parts) >= 2 && parts[1] == "permissions" {
 		if len(parts) == 2 {
 			// /api/v1/keys/{id}/permissions
@@ -986,6 +997,72 @@ func (h *Handler) handleDeleteKey(w http.ResponseWriter, r *http.Request, id str
 
 	slog.Info("deleted key", "id", id, "owner", claims.UserID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSetPrimaryKey makes a key the account's identity key.
+//
+// PUT /api/v1/keys/{id}/primary
+//
+// This is deliberately its own endpoint rather than a field on PATCH
+// /api/v1/keys/{id}. Promoting a key changes the pubkey that IS the user on the
+// platform and the only key that can authorise an nsec password recovery, so it
+// should not be something a client can do by accident while renaming a key or
+// editing its relay list. handleUpdateKey does not touch IsPrimary.
+//
+// Proxy keys are refused: the signer does not hold their nsec, so the user could
+// not produce the recovery proof their own identity key is supposed to give
+// them, and reconcilePlatformIdentity would register an identity this signer
+// cannot sign for.
+func (h *Handler) handleSetPrimaryKey(w http.ResponseWriter, r *http.Request, id string) {
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	key, err := h.storage.GetKey(r.Context(), id)
+	if err != nil {
+		if err == storage.ErrKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return
+	}
+
+	// Not-found rather than forbidden: do not confirm the key exists to
+	// someone who does not own it.
+	if key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusNotFound, "key not found")
+		return
+	}
+
+	if key.IsProxy() {
+		h.errorResponse(w, http.StatusBadRequest, "a proxy key cannot be the identity key: this signer does not hold its private key")
+		return
+	}
+
+	if err := h.storage.SetPrimaryKey(r.Context(), claims.UserID, id); err != nil {
+		if err == storage.ErrKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to set primary key")
+		return
+	}
+
+	// The platform identity follows the primary key, so re-register it now
+	// rather than leaving the old pubkey authoritative until the next login.
+	if user, err := h.storage.GetUser(r.Context(), claims.UserID); err == nil && user != nil {
+		h.reconcilePlatformIdentity(r.Context(), user)
+	}
+
+	slog.Info("primary key changed", "key_id", id, "pubkey", key.Pubkey, "owner", claims.UserID)
+	h.jsonResponse(w, http.StatusOK, map[string]any{
+		"id":         key.ID,
+		"pubkey":     key.Pubkey,
+		"is_primary": true,
+	})
 }
 
 // Permission management endpoints
@@ -2138,6 +2215,13 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("failed to create initial signing key", "error", err, "user_id", userID)
 	} else {
 		primaryKey = key
+		// "Primary" above is only a default display name the user may rename.
+		// What actually makes this the identity key is the attribute, set here.
+		if err := h.storage.SetPrimaryKey(r.Context(), userID, key.ID); err != nil {
+			slog.Warn("failed to flag initial key as primary", "error", err, "user_id", userID, "key_id", key.ID)
+		} else {
+			key.IsPrimary = true
+		}
 		slog.Info("created initial signing key", "user_id", userID, "pubkey", key.Pubkey[:16]+"...")
 	}
 
@@ -2413,11 +2497,20 @@ func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveSigningPubkey returns the user's canonical signing pubkey under the
-// Option A identity model: the key named "Primary", else the oldest key
-// (created_at ASC — the last entry in ListKeys' DESC ordering). The bool is
-// false when the user has no signing keys, in which case the caller should fall
-// back to the derived platform pubkey (user.Pubkey) so the identity is never
-// empty.
+// Option A identity model: the key flagged IsPrimary. The bool is false when the
+// user has no signing keys, in which case the caller should fall back to the
+// derived platform pubkey (user.Pubkey) so the identity is never empty.
+//
+// This used to mean "the key whose Name is 'Primary', else the oldest key".
+// Name is a display string the user can edit, so a rename silently moved both
+// the account identity and the nsec-recovery anchor, and two keys could claim
+// the title at once. It is now an attribute the user sets deliberately
+// (PUT /api/v1/keys/{id}/primary), with at most one per owner enforced by a
+// partial unique index.
+//
+// The oldest-key fallback is retained ONLY for rows the backfill could not
+// reach — a key with no owner_id, or a storage backend that has not run the
+// migration. It is a safety net, not the selection rule.
 func (h *Handler) resolveSigningPubkey(ctx context.Context, userID string) (string, bool) {
 	keys, err := h.storage.ListKeys(ctx, userID)
 	if err != nil || len(keys) == 0 {
@@ -2425,7 +2518,7 @@ func (h *Handler) resolveSigningPubkey(ctx context.Context, userID string) (stri
 	}
 	chosen := keys[len(keys)-1] // oldest key (last in DESC list)
 	for _, k := range keys {
-		if k.Name == "Primary" {
+		if k.IsPrimary {
 			chosen = k
 			break
 		}

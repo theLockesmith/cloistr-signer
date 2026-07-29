@@ -65,13 +65,19 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 	}
 	pe, _ := crypto.NewPassphraseEncryptor(password)
 	ct, _ := pe.Encrypt(priv)
+	// Name is deliberately NOT "Primary": identity comes from the attribute, and
+	// this fixture should break if anything starts inferring it from the name
+	// again.
 	key := &storage.Key{
-		ID: pub[:16], Name: "Primary", Pubkey: pub, KeyType: storage.KeyTypeLocal,
+		ID: pub[:16], Name: "Alice's laptop", Pubkey: pub, KeyType: storage.KeyTypeLocal,
 		EncryptedNsec: ct, EncryptionMethod: string(crypto.EncryptionMethodPassphrase),
 		CreatedAt: time.Now(), OwnerID: user.ID,
 	}
 	if err := store.CreateKey(context.Background(), key); err != nil {
 		t.Fatalf("CreateKey: %v", err)
+	}
+	if err := store.SetPrimaryKey(context.Background(), user.ID, key.ID); err != nil {
+		t.Fatalf("SetPrimaryKey: %v", err)
 	}
 
 	mux := http.NewServeMux()
