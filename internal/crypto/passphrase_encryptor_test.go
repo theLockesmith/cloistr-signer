@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -180,4 +181,63 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestProductionIterationCount pins the shipped KEK cost.
+//
+// LowerIterationsForTesting exists so the suite does not pay 600k rounds on every
+// operation, and the risk it introduces is that someone lowers the DEFAULT to
+// make CI fast and silently weakens every user's key material. This test is the
+// guard: it asserts the production constant, and that the package initialises to
+// it, independent of whatever any test has done to the var.
+func TestProductionIterationCount(t *testing.T) {
+	if DefaultPBKDF2Iterations != 600_000 {
+		t.Errorf("production KEK cost changed to %d — 600k is the OWASP floor for PBKDF2-HMAC-SHA256; lowering it weakens every passphrase-wrapped key",
+			DefaultPBKDF2Iterations)
+	}
+	// TestMain has already lowered the var for this suite, so assert the hook
+	// round-trips to whatever was in effect rather than to the constant.
+	before := pbkdf2Iterations
+	restore := LowerIterationsForTesting()
+	if pbkdf2Iterations != 1_000 {
+		t.Errorf("LowerIterationsForTesting did not take effect: %d", pbkdf2Iterations)
+	}
+	restore()
+	if pbkdf2Iterations != before {
+		t.Errorf("restore() left iterations at %d, want %d", pbkdf2Iterations, before)
+	}
+}
+
+// TestKEKRoundTripsAtProductionCost keeps one end-to-end exercise at the real
+// cost, so the fast path in every other test cannot hide a bug that only appears
+// at 600k rounds.
+func TestKEKRoundTripsAtProductionCost(t *testing.T) {
+	// Opt back out of TestMain's cheap setting for this one test.
+	prev := pbkdf2Iterations
+	pbkdf2Iterations = DefaultPBKDF2Iterations
+	defer func() { pbkdf2Iterations = prev }()
+
+	pe, err := NewPassphraseEncryptor("production-cost round trip")
+	if err != nil {
+		t.Fatalf("NewPassphraseEncryptor: %v", err)
+	}
+	const secret = "5c0c523f52a5b6fad39ed2403092df8cebc36318b39383bca6c00808626fab3a"
+	ct, err := pe.Encrypt(secret)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	got, err := pe.Decrypt(ct)
+	if err != nil || got != secret {
+		t.Fatalf("round trip failed at production cost: err=%v", err)
+	}
+}
+
+// TestMain lowers the KEK cost for this package's suite. The two tests above
+// deliberately opt back out: one pins the production constant, the other runs a
+// real 600k round trip.
+func TestMain(m *testing.M) {
+	restore := LowerIterationsForTesting()
+	code := m.Run()
+	restore()
+	os.Exit(code)
 }

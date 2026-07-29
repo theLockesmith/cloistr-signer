@@ -115,7 +115,7 @@ func testHandler(t *testing.T) (*Handler, *storage.MemoryStorage, *mockRequestHa
 // createTestUser creates a user and returns the auth token
 func createTestUser(t *testing.T, h *Handler, store *storage.MemoryStorage, username string) (string, *storage.User) {
 	ctx := context.Background()
-	hash, _ := auth.HashPassword("password123", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password123", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "user-" + username,
 		Username:     username,
@@ -467,7 +467,7 @@ func TestHandleUsers_Admin(t *testing.T) {
 	ctx := context.Background()
 
 	// Create admin user
-	hash, _ := auth.HashPassword("password123", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password123", auth.TestingBcryptCost)
 	adminUser := &storage.User{
 		ID:           "admin-123",
 		Username:     "adminuser",
@@ -497,7 +497,7 @@ func TestHandleAPILogin_Success(t *testing.T) {
 	ctx := context.Background()
 
 	// Create user
-	hash, _ := auth.HashPassword("correctpassword", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("correctpassword", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "logintest123",
 		Username:     "logintest",
@@ -541,7 +541,7 @@ func TestHandleAPILogin_WrongPassword(t *testing.T) {
 	h, store, _ := testHandler(t)
 	ctx := context.Background()
 
-	hash, _ := auth.HashPassword("correctpassword", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("correctpassword", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "wrongpw123",
 		Username:     "wrongpwuser",
@@ -567,7 +567,7 @@ func TestHandleAPILogin_LockedAccount(t *testing.T) {
 	ctx := context.Background()
 
 	lockUntil := time.Now().Add(time.Hour)
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "locked123",
 		Username:     "lockeduser",
@@ -606,7 +606,7 @@ func TestHandleAPILogin_MFARequired(t *testing.T) {
 	h, store, _ := testHandler(t)
 	ctx := context.Background()
 
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "mfauser123",
 		Username:     "mfauser",
@@ -686,7 +686,7 @@ func TestHandleAPIRegister_DuplicateUsername(t *testing.T) {
 	ctx := context.Background()
 
 	// Create existing user
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	store.CreateUser(ctx, &storage.User{
 		ID:           "existing123",
 		Username:     "existinguser",
@@ -1077,7 +1077,7 @@ func TestHandleAPINIP07Login_WithLinkedPubkey(t *testing.T) {
 	// The pubkey must match the signing key, since the handler verifies the
 	// signature against it before looking the account up.
 	pubkey, signature := signedNIP07Auth(t, "challenge")
-	hash, _ := auth.HashPassword("password", auth.DefaultBcryptCost)
+	hash, _ := auth.HashPassword("password", auth.TestingBcryptCost)
 	user := &storage.User{
 		ID:           "nip07user123",
 		Username:     "nip07user",
