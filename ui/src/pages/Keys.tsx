@@ -20,6 +20,7 @@ export function KeysPage() {
   const { requireFullAuth } = useSignerAuth();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [keyToDelete, setKeyToDelete] = useState<Key | null>(null);
+  const [keyToPromote, setKeyToPromote] = useState<Key | null>(null);
   const [frostResult, setFrostResult] = useState<{ pubkey: string } | null>(null);
   // FROST creation runs in two stages: generate phrase → user confirms →
   // run DKG with that phrase. frostPhrase is the in-flight phrase shown
@@ -63,6 +64,17 @@ export function KeysPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['keys'] });
       setKeyToDelete(null);
+    },
+  });
+
+  // Promoting a key changes the pubkey that identifies this account across
+  // Cloistr and the only key that can authorise an nsec password recovery, so
+  // it goes through requireFullAuth like deletion does — not a bare click.
+  const setPrimaryMutation = useMutation({
+    mutationFn: (id: string) => apiClient.setPrimaryKey(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['keys'] });
+      setKeyToPromote(null);
     },
   });
 
@@ -224,6 +236,7 @@ export function KeysPage() {
               onDelete={() => setKeyToDelete(key)}
               onRecover={() => setRecoveryTarget(key)}
               onMigrate={() => setMigrateTarget(key)}
+              onMakePrimary={() => setKeyToPromote(key)}
             />
           ))}
         </div>
@@ -262,6 +275,21 @@ export function KeysPage() {
           }}
           loading={deleteMutation.isPending}
           error={deleteMutation.error?.message}
+        />
+      )}
+
+      {keyToPromote && (
+        <MakePrimaryModal
+          keyData={keyToPromote}
+          currentPrimary={keys?.find((k) => k.is_primary) ?? null}
+          onCancel={() => {
+            if (!setPrimaryMutation.isPending) setKeyToPromote(null);
+          }}
+          onConfirm={async () => {
+            if (await requireFullAuth()) setPrimaryMutation.mutate(keyToPromote.id);
+          }}
+          loading={setPrimaryMutation.isPending}
+          error={setPrimaryMutation.error?.message}
         />
       )}
 
@@ -325,6 +353,79 @@ export function KeysPage() {
   );
 }
 
+/**
+ * Confirmation for promoting a key to primary.
+ *
+ * This is not a routine setting. The primary key is the pubkey that represents
+ * the account across Cloistr, and the only key whose nsec can authorise a
+ * password reset — so the modal names the key being demoted and says plainly
+ * what stops working, rather than asking "are you sure?".
+ */
+function MakePrimaryModal({
+  keyData,
+  currentPrimary,
+  onCancel,
+  onConfirm,
+  loading,
+  error,
+}: {
+  keyData: Key;
+  currentPrimary: Key | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+  loading: boolean;
+  error?: string;
+}) {
+  const pubkeyShort = `${keyData.pubkey.slice(0, 12)}…${keyData.pubkey.slice(-12)}`;
+  return (
+    <div
+      className="cloistr-modal-backdrop"
+      onClick={(e) => e.target === e.currentTarget && !loading && onCancel()}
+    >
+      <div className="cloistr-modal" style={{ maxWidth: '460px' }}>
+        <div className="cloistr-modal-header">
+          <h2>Make Primary Key</h2>
+          <button className="cloistr-modal-close" onClick={onCancel} disabled={loading}>×</button>
+        </div>
+        <div className="cloistr-modal-content">
+          {error && <div className="auth-error">{error}</div>}
+          <p style={{ marginTop: 0 }}>
+            Make <strong>{keyData.name}</strong> your identity key? It becomes the public key that
+            represents you across Cloistr, and the only key that can reset your password by proving
+            possession of its nsec.
+          </p>
+          <div style={{
+            fontFamily: 'monospace',
+            fontSize: '12px',
+            color: 'var(--signer-text-muted)',
+            background: 'var(--signer-bg)',
+            padding: '8px 10px',
+            borderRadius: '4px',
+            wordBreak: 'break-all',
+          }}>
+            {pubkeyShort}
+          </div>
+          {currentPrimary && (
+            <p style={{ marginTop: '14px', marginBottom: 0 }}>
+              <strong>{currentPrimary.name}</strong> is your primary key today. It stays on your
+              account and keeps signing for the apps that use it, but it will no longer identify you
+              and will no longer be able to recover your password.
+            </p>
+          )}
+          <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end', marginTop: '20px' }}>
+            <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={loading}>
+              Cancel
+            </button>
+            <button type="button" className="btn btn-primary" onClick={onConfirm} disabled={loading}>
+              {loading ? 'Updating…' : 'Make Primary'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DeleteKeyModal({
   keyData,
   onCancel,
@@ -380,7 +481,7 @@ function DeleteKeyModal({
   );
 }
 
-function KeyCard({ keyData, hasLocalShare, onDelete, onRecover, onMigrate }: { keyData: Key; hasLocalShare: boolean; onDelete: () => void; onRecover: () => void; onMigrate: () => void }) {
+function KeyCard({ keyData, hasLocalShare, onDelete, onRecover, onMigrate, onMakePrimary }: { keyData: Key; hasLocalShare: boolean; onDelete: () => void; onRecover: () => void; onMigrate: () => void; onMakePrimary: () => void }) {
   const queryClient = useQueryClient();
   const [showBunkerUrl, setShowBunkerUrl] = useState(false);
   const [bunkerUrl, setBunkerUrl] = useState<string | null>(null);
@@ -474,6 +575,11 @@ function KeyCard({ keyData, hasLocalShare, onDelete, onRecover, onMigrate }: { k
         <span>
           {keyData.is_active ? '✅ Active' : '⏸️ Inactive'}
         </span>
+        {keyData.is_primary && (
+          <span title="This key is your identity on Cloistr, and the only key that can reset your password with its nsec. Renaming it does not change that.">
+            ⭐ Primary
+          </span>
+        )}
         {keyData.nip05 && <span>📧 {keyData.nip05}</span>}
         {keyData.disposable_mode && <span title="Privacy guardrails enforced: refuses identity-linking kinds (0/3/10002), refuses NIP-04 DMs, strips client tags, jitters timing">🛡️ Disposable</span>}
         {keyData.key_type === 'frost-user' && (
@@ -503,6 +609,20 @@ function KeyCard({ keyData, hasLocalShare, onDelete, onRecover, onMigrate }: { k
             title="Upgrade this key to FROST 2-of-2. Pubkey is preserved; signer will no longer be able to sign without this browser."
           >
             🛡️ Upgrade to FROST
+          </button>
+        </div>
+      )}
+      {/* Proxy keys are excluded: the signer holds no private key for them, so
+          one could never produce the nsec proof a primary key must be able to. */}
+      {!keyData.is_primary && !keyData.is_proxy && (
+        <div style={{ marginTop: '12px' }}>
+          <button
+            className="btn btn-secondary"
+            onClick={onMakePrimary}
+            style={{ fontSize: '14px' }}
+            title="Make this your identity key. It becomes the pubkey that represents you across Cloistr and the only key that can reset your password."
+          >
+            ⭐ Make primary
           </button>
         </div>
       )}

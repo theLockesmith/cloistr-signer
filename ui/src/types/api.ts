@@ -64,6 +64,11 @@ export interface Key {
    * and signing requires this browser to cosign. See
    * docs/frost-2-of-n-design.md. */
   key_type?: 'local' | 'proxy' | 'frost-user';
+  /** The account's identity key: the pubkey that IS you on the platform, and
+   * the only key accepted as proof when recovering your password with an nsec.
+   * Exactly one key per account has this. It is an attribute, not the key's
+   * name — renaming a key does not change it. */
+  is_primary?: boolean;
 }
 
 export interface UpdateKeyRequest {
