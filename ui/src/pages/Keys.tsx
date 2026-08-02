@@ -13,6 +13,7 @@ import {
 } from '../lib/frost';
 import { listShareIds, isShareStorageUnlocked } from '../lib/frostStorage';
 import { useSignerAuth } from '../hooks/useSignerAuth';
+import { nip19 } from 'nostr-tools';
 import type { Key, CreateKeyRequest } from '../types/api';
 
 export function KeysPage() {
@@ -488,6 +489,8 @@ function KeyCard({ keyData, hasLocalShare, onDelete, onRecover, onMigrate, onMak
   const [bunkerError, setBunkerError] = useState<string | null>(null);
   const [bunkerLoading, setBunkerLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const [disposableError, setDisposableError] = useState<string | null>(null);
 
   const disposableMutation = useMutation({
@@ -547,12 +550,59 @@ function KeyCard({ keyData, hasLocalShare, onDelete, onRecover, onMigrate, onMak
 
   const pubkeyShort = `${keyData.pubkey.slice(0, 12)}...${keyData.pubkey.slice(-12)}`;
 
+  // npub is what other Nostr apps ask for; hex is what our own APIs take. The
+  // card only ever showed a truncated hex string with no way to get either out,
+  // so both are offered rather than making the user guess which one is wanted.
+  // npubEncode throws on a malformed key — fall back rather than blank the card.
+  let npub: string | null = null;
+  try {
+    npub = nip19.npubEncode(keyData.pubkey);
+  } catch {
+    npub = null;
+  }
+
+  const copyValue = async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedField(label);
+      setTimeout(() => setCopiedField(null), 1500);
+    } catch {
+      // Clipboard is unavailable outside a secure context. Say so instead of
+      // silently doing nothing.
+      setCopyError('Clipboard blocked by the browser — select the key and copy manually.');
+      setTimeout(() => setCopyError(null), 4000);
+    }
+  };
+
   return (
     <div className="key-card">
       <div className="key-header">
         <div>
           <h3 className="key-name">{keyData.name}</h3>
-          <div className="key-pubkey">{pubkeyShort}</div>
+          <div className="key-pubkey" title={keyData.pubkey}>{pubkeyShort}</div>
+          <div style={{ display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' }}>
+            <button
+              className="btn btn-secondary"
+              style={{ fontSize: '12px', padding: '2px 8px' }}
+              onClick={() => copyValue(keyData.pubkey, 'hex')}
+              title="Copy the 64-character hex public key (what Cloistr APIs expect)"
+            >
+              {copiedField === 'hex' ? '✓ copied' : 'copy hex'}
+            </button>
+            {npub && (
+              <button
+                className="btn btn-secondary"
+                style={{ fontSize: '12px', padding: '2px 8px' }}
+                onClick={() => copyValue(npub, 'npub')}
+                title="Copy the npub (bech32) form — what most Nostr apps ask for"
+              >
+                {copiedField === 'npub' ? '✓ copied' : 'copy npub'}
+              </button>
+            )}
+          </div>
+          {copyError && (
+            <div className="auth-error" style={{ marginTop: '6px', fontSize: '12px' }}>{copyError}</div>
+          )}
         </div>
         <div className="key-actions">
           <button className="btn btn-secondary" onClick={handleGetBunkerUrl} disabled={bunkerLoading}>
