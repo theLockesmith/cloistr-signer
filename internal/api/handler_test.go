@@ -322,6 +322,102 @@ func TestHandleGetKey_NotFound(t *testing.T) {
 	}
 }
 
+// TestKeyResponse_IsPrimarySerialised asserts that is_primary survives the
+// storage → handler → JSON round-trip for both GET /api/v1/keys/{id} and the
+// full list GET /api/v1/keys. This is the exact field whose absence caused the
+// phantom "wrong key" session bugs: every UI call site has to know which key is
+// primary so it does not silently fall back to keys[0].
+func TestKeyResponse_IsPrimarySerialised(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	// Create two keys owned by the test user.
+	key1 := &storage.Key{
+		ID:        "primary-key-00001",
+		Name:      "main",
+		Pubkey:    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		OwnerID:   testUserID,
+		CreatedAt: time.Now(),
+	}
+	key2 := &storage.Key{
+		ID:        "secondary-key-002",
+		Name:      "secondary",
+		Pubkey:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		OwnerID:   testUserID,
+		CreatedAt: time.Now(),
+	}
+	store.CreateKey(ctx, key1)
+	store.CreateKey(ctx, key2)
+
+	// Mark key1 as primary.
+	if err := store.SetPrimaryKey(ctx, testUserID, key1.ID); err != nil {
+		t.Fatalf("SetPrimaryKey: %v", err)
+	}
+
+	// --- GET /api/v1/keys/{id} for the primary key ---
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/keys/"+key1.ID, nil)
+	addAuthHeader(t, h, req)
+	rr := httptest.NewRecorder()
+	h.handleGetKey(rr, req, key1.ID)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handleGetKey(primary) status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var got KeyResponse
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode handleGetKey(primary): %v", err)
+	}
+	if !got.IsPrimary {
+		t.Errorf("handleGetKey: primary key has IsPrimary = false, want true")
+	}
+
+	// --- GET /api/v1/keys/{id} for the non-primary key ---
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/keys/"+key2.ID, nil)
+	addAuthHeader(t, h, req2)
+	rr2 := httptest.NewRecorder()
+	h.handleGetKey(rr2, req2, key2.ID)
+
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("handleGetKey(secondary) status = %d, want %d", rr2.Code, http.StatusOK)
+	}
+	var got2 KeyResponse
+	if err := json.NewDecoder(rr2.Body).Decode(&got2); err != nil {
+		t.Fatalf("decode handleGetKey(secondary): %v", err)
+	}
+	if got2.IsPrimary {
+		t.Errorf("handleGetKey: non-primary key has IsPrimary = true, want false")
+	}
+
+	// --- GET /api/v1/keys (list) ---
+	reqList := httptest.NewRequest(http.MethodGet, "/api/v1/keys", nil)
+	addAuthHeader(t, h, reqList)
+	rrList := httptest.NewRecorder()
+	h.handleKeys(rrList, reqList)
+
+	if rrList.Code != http.StatusOK {
+		t.Fatalf("handleListKeys status = %d, want %d", rrList.Code, http.StatusOK)
+	}
+	var list []KeyResponse
+	if err := json.NewDecoder(rrList.Body).Decode(&list); err != nil {
+		t.Fatalf("decode handleListKeys: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("handleListKeys: got %d keys, want 2", len(list))
+	}
+
+	byID := make(map[string]KeyResponse, len(list))
+	for _, k := range list {
+		byID[k.ID] = k
+	}
+
+	if !byID[key1.ID].IsPrimary {
+		t.Errorf("list: primary key %q has IsPrimary = false, want true", key1.ID)
+	}
+	if byID[key2.ID].IsPrimary {
+		t.Errorf("list: secondary key %q has IsPrimary = true, want false", key2.ID)
+	}
+}
+
 func TestHandleDeleteKey(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()

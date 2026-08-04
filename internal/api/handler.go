@@ -506,6 +506,7 @@ type KeyResponse struct {
 	TorEgress       bool      `json:"tor_egress"`
 	Relays          []string  `json:"relays,omitempty"` // Custom relays for this key
 	CreatedAt       time.Time `json:"created_at"`
+	IsPrimary       bool      `json:"is_primary"`
 }
 
 func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
@@ -618,6 +619,7 @@ func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
 			TorEgress:       key.TorEgress,
 			Relays:          key.Relays,
 			CreatedAt:       key.CreatedAt,
+			IsPrimary:       key.IsPrimary,
 		}
 	}
 
@@ -741,6 +743,7 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		TorEgress:       key.TorEgress,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
+		IsPrimary:       key.IsPrimary,
 	})
 }
 
@@ -842,6 +845,7 @@ func (h *Handler) handleCreateProxyKey(w http.ResponseWriter, r *http.Request, r
 		TorEgress:       key.TorEgress,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
+		IsPrimary:       key.IsPrimary,
 	})
 }
 
@@ -881,6 +885,7 @@ func (h *Handler) handleGetKey(w http.ResponseWriter, r *http.Request, id string
 		TorEgress:       key.TorEgress,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
+		IsPrimary:       key.IsPrimary,
 	})
 }
 
@@ -962,6 +967,7 @@ func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id str
 		TorEgress:       key.TorEgress,
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
+		IsPrimary:       key.IsPrimary,
 	})
 }
 
