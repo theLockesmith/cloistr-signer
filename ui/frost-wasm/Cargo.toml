@@ -40,7 +40,7 @@ js-sys = "0.3"
 # Random number generation in a WASM environment. getrandom routes to the
 # browser's crypto.getRandomValues via the "js" feature.
 getrandom = { version = "0.2", features = ["js"] }
-rand_core = { version = "0.6", features = ["getrandom"] }
+rand_core = { version = "0.10.1", features = ["getrandom"] }
 
 # Hex encoding/decoding
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
