@@ -31,7 +31,7 @@ bip39 = { version = "2.2.2", default-features = false, features = ["std"] }
 
 # HKDF-SHA-256 - expands the 64-byte BIP39 seed into two 32-byte scalars
 # for the polynomial coefficients (a0, a1) with a domain-separation tag.
-hkdf = { version = "0.12", default-features = false }
+hkdf = { version = "0.13.0", default-features = false }
 
 # WASM-side glue
 wasm-bindgen = "0.2"
