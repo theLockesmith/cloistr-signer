@@ -27,7 +27,7 @@ sha2 = { version = "0.10", default-features = false }
 # English-only by deliberate choice: bundling all-languages bloats the
 # WASM by ~200KB. If we ship localized wordlists later it should be as
 # a separate WASM module loaded on demand.
-bip39 = { version = "2.1", default-features = false, features = ["std"] }
+bip39 = { version = "2.2.2", default-features = false, features = ["std"] }
 
 # HKDF-SHA-256 - expands the 64-byte BIP39 seed into two 32-byte scalars
 # for the polynomial coefficients (a0, a1) with a domain-separation tag.
