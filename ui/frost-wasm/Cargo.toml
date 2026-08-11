@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 # compatible. ZcashFoundation's frost-secp256k1 stays an option for the
 # later signing primitives (P4).
 k256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "schnorr"] }
-elliptic-curve = { version = "0.13", default-features = false, features = ["arithmetic"] }
+elliptic-curve = { version = "0.14.1", default-features = false, features = ["arithmetic"] }
 sha2 = { version = "0.11.0", default-features = false }
 
 # BIP39 mnemonic (24-word English wordlist). Used to derive the user's
