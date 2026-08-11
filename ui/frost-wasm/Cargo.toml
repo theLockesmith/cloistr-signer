@@ -34,7 +34,7 @@ bip39 = { version = "2.2.2", default-features = false, features = ["std"] }
 hkdf = { version = "0.13.0", default-features = false }
 
 # WASM-side glue
-wasm-bindgen = "0.2"
+wasm-bindgen = "0.2.127"
 js-sys = "0.3.104"
 
 # Random number generation in a WASM environment. getrandom routes to the
