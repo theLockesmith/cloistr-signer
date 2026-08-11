@@ -1,5 +1,5 @@
 # Go build stage
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
@@ -25,7 +25,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /signer ./cmd/signer
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /migrate ./cmd/migrate
 
 # Runtime stage
-FROM alpine:3.20
+FROM alpine:3.24
 
 # Retry logic for transient network errors
 RUN for i in 1 2 3 4 5; do \
