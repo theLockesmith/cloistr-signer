@@ -15,7 +15,7 @@ crate-type = ["cdylib", "rlib"]
 # 2-of-N degree-1 polynomial math directly keeps the two sides byte-for-byte
 # compatible. ZcashFoundation's frost-secp256k1 stays an option for the
 # later signing primitives (P4).
-k256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "schnorr"] }
+k256 = { version = "0.14.0", default-features = false, features = ["arithmetic", "ecdsa", "schnorr"] }
 elliptic-curve = { version = "0.14.1", default-features = false, features = ["arithmetic"] }
 sha2 = { version = "0.11.0", default-features = false }
 
