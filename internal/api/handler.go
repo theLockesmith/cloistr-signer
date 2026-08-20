@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -2982,7 +2983,65 @@ func (h *Handler) validateAuthHeader(r *http.Request) (*auth.JWTClaims, error) {
 		return nil, auth.ErrInvalidToken
 	}
 
-	return auth.ValidateJWT(h.authConfig, token)
+	claims, err := auth.ValidateJWT(h.authConfig, token)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := h.ensureSessionLive(r.Context(), claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+// ensureSessionLive rejects a JWT whose server-side session has been deleted.
+//
+// WHY THIS EXISTS
+//
+// JWT validation is stateless: signature plus expiry, nothing else. So until
+// this check existed, SIGNING OUT DID NOT REVOKE ANYTHING. handleUserLogout
+// does the right things — deletes every session, revokes Vault tokens, revokes
+// SSO app consents — but a token already issued kept working for the remainder
+// of its 24h life (auth.DefaultTokenExpiry) because nothing ever asked whether
+// its session still existed.
+//
+// The visible symptom: sign out of mail.cloistr.xyz, open signer.cloistr.xyz,
+// and you are still signed in. Each origin holds its own JWT in its own
+// localStorage, which no other origin can clear, and the signer's initAuth
+// trusts that local token first. Clearing the shared .cloistr.xyz cookie could
+// never reach it. Revocation has to be server-side; there is no client-side fix.
+//
+// The session row is created at login with ExpiresAt set to the JWT's OWN
+// expiry, so this can never log anyone out earlier than the token would have
+// died anyway. It only closes the gap between "logged out" and "token expired".
+//
+// FAILS OPEN on infrastructure errors, deliberately. Sessions live in
+// Dragonfly; treating an unreachable session store as "everyone is logged out"
+// would turn a cache blip into a total outage of the identity service every
+// other Cloistr service authenticates against. Only a definitive
+// ErrSessionNotFound — the record is gone or expired — rejects.
+//
+// A token with no SessionID is allowed through: auth.GenerateJWT issues those
+// for the admin pubkey path (internal/web), which has no session row to check.
+// Every real user login path uses GenerateJWTWithSession.
+func (h *Handler) ensureSessionLive(ctx context.Context, claims *auth.JWTClaims) error {
+	if claims == nil || claims.SessionID == "" {
+		return nil
+	}
+
+	_, err := h.storage.GetUserSession(ctx, claims.SessionID)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, storage.ErrSessionNotFound) {
+		slog.Debug("rejecting token for revoked session",
+			"session_id", claims.SessionID, "user_id", claims.UserID)
+		return auth.ErrInvalidToken
+	}
+
+	slog.Warn("session liveness check failed; allowing request",
+		"error", err, "session_id", claims.SessionID)
+	return nil
 }
 
 // getSessionVaultToken retrieves the Vault token from the user's session.
