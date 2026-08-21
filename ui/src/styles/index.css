@@ -507,9 +507,11 @@ a:hover {
 
 .key-header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: flex-start;
   margin-bottom: var(--space-md);
+  gap: var(--space-sm);
 }
 
 .key-name {
@@ -528,6 +530,7 @@ a:hover {
 .key-actions {
   display: flex;
   gap: var(--space-sm);
+  flex-shrink: 0;
 }
 
 .key-meta {
@@ -572,7 +575,10 @@ a:hover {
    Modal
    ========================================== */
 
-.modal-backdrop {
+/* .modal-overlay is the name used by the FROST modals (phrase/recovery/migrate/import).
+   It is identical to .modal-backdrop — one definition, two selectors. */
+.modal-backdrop,
+.modal-overlay {
   position: fixed;
   top: 0;
   left: 0;
@@ -625,7 +631,9 @@ a:hover {
   color: var(--signer-text);
 }
 
-.modal-body {
+/* .modal-content is used by FROST modals as a content wrapper; same padding as .modal-body */
+.modal-body,
+.modal-content {
   padding: var(--space-lg);
 }
 
@@ -726,4 +734,17 @@ small {
   .welcome-content p {
     font-size: 16px;
   }
+}
+
+/* ==========================================
+   Dashboard Card Grid
+   ========================================== */
+
+/* Replaces the inline gridTemplateColumns: '1fr 1fr' in Dashboard.tsx.
+   auto-fit + minmax lets the grid collapse to a single column on narrow
+   viewports instead of forcing 163px columns that cramp card content. */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 24px;
 }

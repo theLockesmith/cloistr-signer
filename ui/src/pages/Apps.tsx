@@ -116,7 +116,7 @@ function ConnectAppForm() {
         <select
           value={effectiveKeyId}
           onChange={(e) => setKeyId(e.target.value)}
-          style={{ padding: '8px' }}
+          style={{ padding: '8px', width: '100%' }}
         >
           {(keys || []).map((k) => (
             <option key={k.id} value={k.id}>

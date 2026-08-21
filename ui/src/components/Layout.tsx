@@ -1,5 +1,5 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { Header, Footer, LoginModal } from '@cloistr/ui/components';
+import { Header, Footer, LoginModal, ThemeToggle } from '@cloistr/ui/components';
 import { useSignerAuth } from '../hooks/useSignerAuth';
 import { useFrostCosignListener } from '../hooks/useFrostCosignListener';
 import { FrostCosignApprovalModal } from './FrostCosignApprovalModal';
@@ -81,6 +81,7 @@ export function Layout() {
               Users
             </Link>
           )}
+          <ThemeToggle />
         </nav>
       )}
 
