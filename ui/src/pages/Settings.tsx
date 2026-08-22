@@ -31,7 +31,7 @@ export function SettingsPage() {
                 <label style={{ fontSize: '12px', color: 'var(--signer-text-muted)' }}>
                   Nostr Identity (Primary Key)
                 </label>
-                <div style={{ fontFamily: 'monospace', fontSize: '13px' }}>{user.pubkey}</div>
+                <div style={{ fontFamily: 'monospace', fontSize: '13px', wordBreak: 'break-all' }}>{user.pubkey}</div>
               </div>
             )}
             {user?.linked_pubkey && user.linked_pubkey !== user.pubkey && (
@@ -45,7 +45,7 @@ export function SettingsPage() {
                     (?)
                   </span>
                 </label>
-                <div style={{ fontFamily: 'monospace', fontSize: '12px', color: 'var(--signer-text-muted)' }}>
+                <div style={{ fontFamily: 'monospace', fontSize: '12px', color: 'var(--signer-text-muted)', wordBreak: 'break-all' }}>
                   {user.linked_pubkey}
                 </div>
               </div>
