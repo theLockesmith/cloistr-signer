@@ -4,6 +4,13 @@ import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
+  test: {
+    // No jsdom: tests run in node (vitest default). DOM-level behavioural tests
+    // would require jsdom + @testing-library/react; that's a follow-up once we
+    // have those dependencies. Current tests are source-level structural only.
+    environment: 'node',
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+  },
   resolve: {
     // @cloistr/auth MUST be deduped: @cloistr/ui's SharedAuthProvider and the
     // signer's useSignerAuth both import it, and without dedupe Vite bundles two

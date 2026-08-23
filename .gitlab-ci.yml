@@ -37,5 +37,24 @@ test:unit:
   variables:
     GO_TEST_PACKAGES: "./internal/..."
 
+# UI unit tests (vitest, node environment — no browser required).
+# Runs in the same test stage as the Go suite so a failing test blocks build.
+test:ui:
+  stage: test
+  extends: .cloistr-rules
+  image: node:20-bookworm-slim
+  before_script:
+    - cd ui
+    - npm ci --ignore-scripts
+  script:
+    - npm run test
+  cache:
+    key:
+      files:
+        - ui/package-lock.json
+    paths:
+      - ui/node_modules/
+    policy: pull-push
+
 lint:
   extends: [.go-lint, .cloistr-rules]

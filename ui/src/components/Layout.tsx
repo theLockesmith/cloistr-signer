@@ -51,6 +51,10 @@ export function Layout() {
       {/* Shared Cloistr navbar (service menu + auth). The signer manages its own
           JWT session (bootstrapped from Nostr), so we feed the Header explicit
           auth state instead of letting it use the Nostr context. */}
+      {/* ThemeToggle lives in the persistent header so it is always reachable,
+          even before the user authenticates.  Previously it sat inside the
+          auth-gated sub-header nav, making it inaccessible on the sign-in
+          screen.  The Header accepts children in its right-side slot. */}
       <Header
         activeServiceId="signer"
         auth={{
@@ -59,7 +63,9 @@ export function Layout() {
           onLogout: logout,
           onSignIn: showLoginModal,
         }}
-      />
+      >
+        <ThemeToggle />
+      </Header>
 
       {/* Sub-header nav strip - only show when authenticated */}
       {isAuthenticated && (
@@ -81,7 +87,6 @@ export function Layout() {
               Users
             </Link>
           )}
-          <ThemeToggle />
         </nav>
       )}
 

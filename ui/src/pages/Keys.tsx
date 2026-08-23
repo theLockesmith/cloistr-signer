@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiClient from '../api/client';
+import { Toggle } from '../components/Toggle';
 import {
   createFrostKeyWithPhrase,
   generateFrostRecoveryPhrase,
@@ -702,24 +703,12 @@ function KeyCard({ keyData, hasLocalShare, onDelete, onRecover, onMigrate, onMak
             <div className="auth-error" style={{ marginTop: '8px' }}>{disposableError}</div>
           )}
         </div>
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            cursor: disposableMutation.isPending ? 'wait' : 'pointer',
-            opacity: disposableMutation.isPending ? 0.6 : 1,
-            whiteSpace: 'nowrap',
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={!!keyData.disposable_mode}
-            disabled={disposableMutation.isPending}
-            onChange={(e) => disposableMutation.mutate(e.target.checked)}
-          />
-          <span>{keyData.disposable_mode ? 'On' : 'Off'}</span>
-        </label>
+        <Toggle
+          checked={!!keyData.disposable_mode}
+          disabled={disposableMutation.isPending}
+          onChange={(v) => disposableMutation.mutate(v)}
+          label={keyData.disposable_mode ? 'On' : 'Off'}
+        />
       </div>
 
       <div
@@ -744,24 +733,12 @@ function KeyCard({ keyData, hasLocalShare, onDelete, onRecover, onMigrate, onMak
             you are online or idle.
           </div>
         </div>
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            cursor: coverTrafficMutation.isPending ? 'wait' : 'pointer',
-            opacity: coverTrafficMutation.isPending ? 0.6 : 1,
-            whiteSpace: 'nowrap',
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={!!keyData.cover_traffic}
-            disabled={coverTrafficMutation.isPending}
-            onChange={(e) => coverTrafficMutation.mutate(e.target.checked)}
-          />
-          <span>{keyData.cover_traffic ? 'On' : 'Off'}</span>
-        </label>
+        <Toggle
+          checked={!!keyData.cover_traffic}
+          disabled={coverTrafficMutation.isPending}
+          onChange={(v) => coverTrafficMutation.mutate(v)}
+          label={keyData.cover_traffic ? 'On' : 'Off'}
+        />
       </div>
 
       <div
@@ -786,24 +763,12 @@ function KeyCard({ keyData, hasLocalShare, onDelete, onRecover, onMigrate, onMak
             an upstream go-nostr change.
           </div>
         </div>
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '6px',
-            cursor: torEgressMutation.isPending ? 'wait' : 'pointer',
-            opacity: torEgressMutation.isPending ? 0.6 : 1,
-            whiteSpace: 'nowrap',
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={!!keyData.tor_egress}
-            disabled={torEgressMutation.isPending}
-            onChange={(e) => torEgressMutation.mutate(e.target.checked)}
-          />
-          <span>{keyData.tor_egress ? 'On' : 'Off'}</span>
-        </label>
+        <Toggle
+          checked={!!keyData.tor_egress}
+          disabled={torEgressMutation.isPending}
+          onChange={(v) => torEgressMutation.mutate(v)}
+          label={keyData.tor_egress ? 'On' : 'Off'}
+        />
       </div>
 
       {showBunkerUrl && bunkerError && (
