@@ -712,9 +712,10 @@ small {
 
 .btn-sm {
   padding: var(--space-xs) var(--space-sm);
-  /* Small buttons stay visually compact but keep a 44px tap area via min-height
-     on the parent .btn. Override only removes extra padding, not the tap target. */
-  min-height: 36px;
+  /* .btn-sm and .btn are on THE SAME element. Both are single-class selectors at
+     equal specificity; the later rule wins. Omitting min-height here lets the
+     44px floor from .btn hold. Visual compactness comes from reduced padding and
+     font-size, not from shrinking the tap target below the 44px minimum. */
   font-size: 13px;
 }
 
