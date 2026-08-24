@@ -42,7 +42,7 @@ test:unit:
 test:ui:
   stage: test
   extends: .cloistr-rules
-  image: node:20-bookworm-slim
+  image: node:20.20.2-bookworm-slim
   before_script:
     - cd ui
     - npm ci --ignore-scripts
