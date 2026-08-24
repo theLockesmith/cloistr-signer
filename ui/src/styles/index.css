@@ -58,7 +58,7 @@
 html, body {
   margin: 0;
   padding: 0;
-  min-height: 100vh;
+  min-height: 100dvh;
   background: var(--signer-bg);
   color: var(--signer-text);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
@@ -82,7 +82,7 @@ a:hover {
 .app-layout {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .app-main {
@@ -108,10 +108,15 @@ a:hover {
 
 .app-subheader {
   display: flex;
-  flex-wrap: wrap;
+  /* Horizontal scroll on mobile rather than wrap — prevents the nav strip from
+     eating 2+ lines of vertical space on 390px viewports. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  /* Hide scrollbar visually on webkit but keep it functional */
+  scrollbar-width: none;
   align-items: center;
   gap: var(--space-xs);
-  padding: 0 var(--space-lg);
+  padding: 0 var(--space-sm);
   background: var(--cloistr-bg-elevated, var(--signer-bg-secondary));
   border-bottom: 1px solid var(--cloistr-border, var(--signer-border));
   position: sticky;
@@ -119,10 +124,15 @@ a:hover {
   z-index: 100;
 }
 
+.app-subheader::-webkit-scrollbar {
+  display: none;
+}
+
 .app-subheader-link {
   display: inline-flex;
   align-items: center;
   padding: var(--space-sm) var(--space-md);
+  min-height: 44px;
   color: var(--cloistr-text-muted, var(--signer-text-muted));
   text-decoration: none;
   font-size: 14px;
@@ -130,6 +140,8 @@ a:hover {
   border-bottom: 2px solid transparent;
   transition: color 0.15s, border-color 0.15s;
   white-space: nowrap;
+  /* No flex-shrink so links don't compress — they scroll instead */
+  flex-shrink: 0;
 }
 
 .app-subheader-link:hover {
@@ -150,7 +162,7 @@ a:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .spinner {
@@ -249,6 +261,7 @@ a:hover {
   justify-content: center;
   gap: var(--space-sm);
   padding: var(--space-sm) var(--space-md);
+  min-height: 44px;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   font-size: 14px;
@@ -259,8 +272,7 @@ a:hover {
 
 .btn:disabled {
   opacity: 0.5;
-  cursor: not-allowed;
-}
+  cursor: not-allowed;}
 
 .btn-primary {
   background: var(--signer-primary);
@@ -422,7 +434,7 @@ a:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 100vh;
+  min-height: 100dvh;
   padding: var(--space-lg);
 }
 
@@ -549,7 +561,7 @@ a:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: calc(100vh - var(--header-height) - var(--footer-height) - var(--space-xl) * 2);
+  min-height: calc(100dvh - var(--header-height) - var(--footer-height) - var(--space-xl) * 2);
 }
 
 .welcome-content {
@@ -598,7 +610,7 @@ a:hover {
   border-radius: var(--radius-lg);
   width: 100%;
   max-width: 480px;
-  max-height: 90vh;
+  max-height: 90dvh;
   overflow-y: auto;
 }
 
@@ -700,12 +712,17 @@ small {
 
 .btn-sm {
   padding: var(--space-xs) var(--space-sm);
+  /* .btn-sm and .btn are on THE SAME element. Both are single-class selectors at
+     equal specificity; the later rule wins. Omitting min-height here lets the
+     44px floor from .btn hold. Visual compactness comes from reduced padding and
+     font-size, not from shrinking the tap target below the 44px minimum. */
   font-size: 13px;
 }
 
 .btn-lg {
   padding: var(--space-md) var(--space-xl);
   font-size: 16px;
+  min-height: 48px;
 }
 
 /* ==========================================
@@ -713,16 +730,6 @@ small {
    ========================================== */
 
 @media (max-width: 768px) {
-  .app-subheader {
-    padding: 0 var(--space-sm);
-    gap: 0;
-  }
-
-  .app-subheader-link {
-    padding: var(--space-sm);
-    font-size: 13px;
-  }
-
   .stats-grid {
     grid-template-columns: 1fr;
   }
@@ -747,4 +754,78 @@ small {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 24px;
+}
+
+/* ==========================================
+   Local Toggle Component
+   No shared Toggle exists in @cloistr/ui v0.20.x; built locally.
+   Follow-up: replace when @cloistr/ui ships a Toggle/Switch.
+   ========================================== */
+
+.toggle-root {
+  /* Entire row is a touch target (label wraps input + track) */
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  min-height: 44px;
+  user-select: none;
+}
+
+.toggle-root[data-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.toggle-track {
+  position: relative;
+  width: 40px;
+  height: 24px;
+  border-radius: 12px;
+  background: var(--cloistr-border, var(--signer-border));
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.toggle-track[data-checked="true"] {
+  background: var(--cloistr-primary, var(--signer-primary));
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: transform 0.2s;
+}
+
+.toggle-track[data-checked="true"] .toggle-thumb {
+  transform: translateX(16px);
+}
+
+/* Visually hidden but keyboard-accessible native input */
+.toggle-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.toggle-track:focus-within {
+  outline: 2px solid var(--cloistr-primary, var(--signer-primary));
+  outline-offset: 2px;
+}
+
+.toggle-label {
+  font-size: 14px;
+  color: var(--cloistr-text, var(--signer-text));
 }

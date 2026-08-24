@@ -8,6 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "build:wasm": "cd frost-wasm && wasm-pack build --target web --release",
     "prebuild": "npm run build:wasm"
   },
@@ -26,7 +28,8 @@
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.7.0",
     "typescript": "^5.9.3",
-    "vite": "^5.4.21"
+    "vite": "^5.4.21",
+    "vitest": "^2.1.9"
   },
   "overrides": {
     "@cloistr/collab-common": "^0.2.14",
