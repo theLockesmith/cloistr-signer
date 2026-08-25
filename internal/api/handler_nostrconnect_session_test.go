@@ -40,6 +40,17 @@ const (
 )
 
 // seedUser creates a user and a key owned by that user in the in-memory store.
+// unlockKey puts the key into the running signer's in-memory map, which is what
+// a real user login does (Signer.RegisterKey, "runtime, not persisted").
+//
+// Every key in production is user-held, so a key that has NOT been unlocked on
+// this process cannot be served — the session handler now refuses with 409
+// key_locked rather than approving and going silent. The happy-path tests
+// therefore have to say out loud that the user has logged in.
+func unlockKey(h *Handler, key *storage.Key) {
+	h.signer.RegisterKey(key.Pubkey, "0000000000000000000000000000000000000000000000000000000000000001")
+}
+
 func seedUserAndKey(t *testing.T, store *storage.MemoryStorage) *storage.Key {
 	t.Helper()
 	user := &storage.User{
@@ -150,6 +161,7 @@ func TestHandleNostrConnectSession_ConsentRequired(t *testing.T) {
 func TestHandleNostrConnectSession_OptOutAutoApprove(t *testing.T) {
 	h, store := testHandler(t)
 	key := seedUserAndKey(t, store) // RequireApproval defaults to false
+	unlockKey(h, key)               // the user has logged in; their key is unlocked
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"uri":    validNostrConnectURI(testClientPubkey, "wss://relay.cloistr.xyz", "TestApp"),
@@ -330,5 +342,49 @@ func TestHandleNostrConnectRevoke_All(t *testing.T) {
 	perm, err := store.GetPermission(context.Background(), key.Pubkey, testClientPubkey)
 	if err == nil && perm != nil {
 		t.Error("permission still present after revoke-all")
+	}
+}
+
+// A locked key must be REFUSED, not approved-then-silently-unanswered.
+//
+// This is the regression that cost the most: the handler approved the session,
+// returned 200, and SendNostrConnectResponse then found no key and returned
+// without publishing. The browser waited 30 seconds for an ack that was never
+// coming and blamed the network — for a signer that was healthy throughout.
+//
+// Every key in production is user-held, so "not unlocked on this replica" is
+// the normal state after a pod restart or a request that landed on the wrong
+// replica. It has to be a fast, honest answer.
+func TestHandleNostrConnectSession_RefusesLockedKey(t *testing.T) {
+	h, store := testHandler(t)
+	seedUserAndKey(t, store)
+	// Deliberately NOT unlocked: no unlockKey() call here.
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"uri":    validNostrConnectURI(testClientPubkey, "wss://relay.cloistr.xyz", "TestApp"),
+		"key_id": "key-sso-001",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/nostrconnect/session", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+makeSessionToken(t, h, testUserIDSess))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.handleNostrConnectSession(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 for a locked key\nbody: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The CODE is the point: a client cannot tell a locked key from an
+	// unreachable relay by prose, and guessing wrong is what pushed the user
+	// toward an extension login they did not need.
+	if resp["code"] != "key_locked" {
+		t.Errorf("code = %q, want %q", resp["code"], "key_locked")
+	}
+	if resp["error"] == "" {
+		t.Error("error message empty; the user must be told what to do")
 	}
 }
