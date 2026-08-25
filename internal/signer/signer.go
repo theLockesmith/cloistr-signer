@@ -2263,6 +2263,16 @@ func (s *Signer) SendNostrConnectResponse(ctx context.Context, signerPubkey, cli
 		return
 	}
 
+	// A signer with no relay client cannot deliver the ack. Crashing here would
+	// take the whole process down over one client's connect attempt, so refuse
+	// loudly instead — this is the same "client will get NO response" class as
+	// a locked key, and must be as visible.
+	if s.relayClient == nil {
+		slog.Error("no relay client; nostrconnect ack cannot be sent, client will get NO response",
+			"relay", relayURL, "client", clientPubkey[:16]+"...")
+		return
+	}
+
 	// Publish to the specified relay
 	if err := s.relayClient.PublishToRelay(ctx, relayURL, &event); err != nil {
 		slog.Error("failed to publish nostrconnect response", "relay", relayURL, "error", err)
