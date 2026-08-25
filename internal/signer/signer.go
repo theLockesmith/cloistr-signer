@@ -2145,11 +2145,79 @@ func (s *Signer) sendResponse(ctx context.Context, signerPubkey, privateKey, cli
 	)
 }
 
+// resolveSigningKey returns the private key for pubkey, loading it from storage
+// if this process has not got it in memory.
+//
+// WHY THIS EXISTS
+//
+// s.keys is a PER-PROCESS map. It is populated at startup, and by RegisterKey
+// at login — which is documented "runtime, not persisted". cloistr-signer runs
+// with 2 replicas and no session affinity, so a key unlocked on pod A simply
+// does not exist on pod B.
+//
+// Measured in production 2026-08-25, same 30-minute window:
+//
+//   pod 4vcrl:  5 nostrconnect responses sent,  2 "key not found"
+//   pod qbhtp:  0 nostrconnect responses sent,  4 "key not found"
+//
+// So whether a user's sign-in worked was a coin flip on which pod took the
+// request. POST /nostrconnect/session returned 200 either way, then the
+// responder found no key and returned silently, and the browser waited 30s for
+// an ack that was never going to come.
+//
+// Falling back to storage makes any replica able to answer for any
+// server-held key. It deliberately applies the SAME rules as the startup
+// loader: user-held keys (Vault transit or a passphrase-derived KEK) cannot be
+// decrypted server-side by design and are reported as unavailable rather than
+// being passed through as if the ciphertext were the key.
+func (s *Signer) resolveSigningKey(ctx context.Context, pubkey string) (string, bool) {
+	s.keysLock.RLock()
+	privateKey, ok := s.keys[pubkey]
+	s.keysLock.RUnlock()
+	if ok && privateKey != "" {
+		return privateKey, true
+	}
+
+	key, err := s.storage.GetKeyByPubkey(ctx, pubkey)
+	if err != nil || key == nil || key.EncryptedNsec == "" {
+		return "", false
+	}
+
+	material := key.EncryptedNsec
+	if method := crypto.DetectEncryptionMethod(material); method.UserHeld() {
+		// Genuinely unavailable to this process without the user. Not an error
+		// to shout about; the caller decides how to surface it.
+		return "", false
+	}
+	if crypto.IsEncrypted(material) && s.encryptor != nil {
+		decrypted, decErr := s.encryptor.Decrypt(material)
+		if decErr != nil {
+			slog.Error("failed to decrypt key on demand", "pubkey", pubkey[:16]+"...", "error", decErr)
+			return "", false
+		}
+		material = decrypted
+	}
+
+	// Cache so the next request on this pod takes the fast path.
+	s.keysLock.Lock()
+	s.keys[pubkey] = material
+	s.keysLock.Unlock()
+
+	slog.Info("loaded key on demand (not in this pod's memory)", "pubkey", pubkey[:16]+"...")
+	return material, true
+}
+
 // SendNostrConnectResponse sends a connect response to a client for nostrconnect:// flow
 func (s *Signer) SendNostrConnectResponse(ctx context.Context, signerPubkey, clientPubkey, relayURL, secret string) {
-	privateKey, ok := s.keys[signerPubkey]
+	privateKey, ok := s.resolveSigningKey(ctx, signerPubkey)
 	if !ok {
-		slog.Error("key not found for nostrconnect", "pubkey", signerPubkey[:16]+"...")
+		// Returning silently here is what stranded the browser for 30s: the
+		// session had already been approved with a 200, so the client sat
+		// waiting for an ack that was never sent. Log loudly enough to alert on.
+		slog.Error("key not found for nostrconnect, client will get NO response",
+			"pubkey", signerPubkey[:16]+"...",
+			"client", clientPubkey[:16]+"...",
+			"hint", "user-held key not unlocked on this replica, or key missing from storage")
 		return
 	}
 
