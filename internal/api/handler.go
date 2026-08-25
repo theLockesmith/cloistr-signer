@@ -3933,6 +3933,28 @@ func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Reque
 		})
 
 	default:
+		// GATE: refuse a session this process cannot actually serve.
+		//
+		// Every key here is USER-HELD (measured 2026-08-25: 6 vault, 2
+		// passphrase, 1 vault proxy — zero server-decryptable), so a key lives
+		// only in the memory of the replica that handled that user's login.
+		// Without this check the handler approved the session, answered 200,
+		// and then SendNostrConnectResponse found no key and returned
+		// silently — leaving the browser waiting 30 seconds for an ack that
+		// was never coming, and finally showing "Could not reach your signer"
+		// about a signer that was healthy the whole time.
+		//
+		// A 409 with a machine-readable code lets the client do the honest
+		// thing immediately: ask for the passphrase that unlocks the key,
+		// rather than blaming the network after half a minute.
+		if !h.signer.IsKeyLoaded(key.Pubkey) {
+			slog.Warn("nostrconnect refused: key not unlocked on this replica",
+				"client", clientPubkey[:16]+"...", "key", req.KeyID, "user", claims.UserID)
+			h.errorResponseCode(w, http.StatusConflict, "key_locked",
+				"Your signing key is locked on this server. Sign in with your password to unlock it.")
+			return
+		}
+
 		// Opt-OUT default (unified-auth-design §9): a valid signer session is
 		// the first-party gate, so auto-approve first-time connects silently
 		// (zero friction for normies) and record consent so the app is listed
@@ -5171,6 +5193,18 @@ func (h *Handler) jsonResponse(w http.ResponseWriter, status int, data interface
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+// errorResponseCode is errorResponse plus a stable machine-readable code, so a
+// client can act on WHICH failure it was instead of pattern-matching prose.
+//
+// Added for "key_locked": a locked user-held key and an unreachable relay look
+// identical to a browser otherwise, and conflating them is what showed a
+// network error over a healthy signer.
+func (h *Handler) errorResponseCode(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message, "code": code})
 }
 
 func (h *Handler) errorResponse(w http.ResponseWriter, status int, message string) {
