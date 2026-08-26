@@ -3302,6 +3302,115 @@ func (h *Handler) loadUserVaultKeys(ctx context.Context, userID, vaultToken stri
 	}
 }
 
+// userTokenRenewInterval is how often live sessions' Vault tokens are renewed.
+// Comfortably inside the 24h token period so a renewal can fail three times
+// running and the token still survives.
+const userTokenRenewInterval = 6 * time.Hour
+
+// StartUserTokenRenewal keeps every live session's per-user Vault token alive.
+//
+// Without it a user's Vault token expired long before their session did — the
+// session runs for JWT_EXPIRY hours (720 = 30 days in production) while the
+// token was capped at 72h — and nothing could re-mint it, because minting needs
+// the PASSWORD and only the login handler ever has one. The user stayed signed
+// in on a perfectly valid cookie while every key decrypt 403'd, so signing
+// failed and the client retried forever.
+//
+// Intended to run in a goroutine; returns when ctx is cancelled. The first pass
+// is deferred by one interval because RestoreVaultKeysOnStartup already runs
+// one at boot.
+func (h *Handler) StartUserTokenRenewal(ctx context.Context) {
+	if h.vaultClient == nil {
+		return
+	}
+	slog.Info("user vault token renewal started", "interval", userTokenRenewInterval)
+
+	ticker := time.NewTicker(userTokenRenewInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		h.refreshUserVaultTokens(ctx)
+	}
+}
+
+// refreshUserVaultTokens migrates userpass roles to periodic tokens and renews
+// the Vault token on every live session. Safe to call repeatedly: the migration
+// short-circuits once a role is already periodic, and renewing a healthy token
+// just extends its lease.
+//
+// A token that has ALREADY lapsed cannot be revived here — Vault answers 403.
+// That session's keys stay undecryptable until the user logs in again, which is
+// the one path that holds a password. The 403 is logged per user so the
+// condition is visible in logs rather than only as a failed sign.
+func (h *Handler) refreshUserVaultTokens(ctx context.Context) {
+	if h.vaultClient == nil {
+		return
+	}
+
+	users, err := h.storage.ListUsers(ctx)
+	if err != nil {
+		slog.Error("user vault token refresh: failed to list users", "error", err)
+		return
+	}
+
+	var migrated, renewed, expired, failed int
+	for _, user := range users {
+		// Migrate the role first so the NEXT token this user is issued is
+		// periodic. Existing tokens keep the ceiling they were minted with.
+		changed, err := h.vaultClient.EnsureUserpassPeriodic(ctx, user.ID)
+		if err != nil {
+			slog.Warn("userpass periodic migration failed", "user_id", user.ID, "error", err)
+		} else if changed {
+			migrated++
+			slog.Info("userpass role migrated to periodic token", "user_id", user.ID)
+		}
+
+		sessions, err := h.storage.ListUserSessions(ctx, user.ID)
+		if err != nil {
+			slog.Warn("user vault token refresh: failed to list sessions", "user_id", user.ID, "error", err)
+			continue
+		}
+
+		// Several live sessions can carry the same token; renew each distinct
+		// one once rather than per session.
+		seen := make(map[string]bool, len(sessions))
+		for _, sess := range sessions {
+			if sess.VaultToken == "" || seen[sess.VaultToken] {
+				continue
+			}
+			seen[sess.VaultToken] = true
+
+			lease, err := h.vaultClient.RenewToken(ctx, sess.VaultToken)
+			if err != nil {
+				if isVaultForbidden(err) {
+					expired++
+					slog.Warn("user vault token has expired and cannot be renewed; user must log in again to restore signing",
+						"user_id", user.ID, "session_id", sess.ID)
+				} else {
+					failed++
+					slog.Warn("user vault token renewal failed", "user_id", user.ID, "session_id", sess.ID, "error", err)
+				}
+				continue
+			}
+			renewed++
+			slog.Debug("user vault token renewed", "user_id", user.ID, "session_id", sess.ID, "lease_seconds", lease)
+		}
+	}
+
+	slog.Info("user vault token refresh complete",
+		"users", len(users),
+		"roles_migrated", migrated,
+		"tokens_renewed", renewed,
+		"tokens_expired", expired,
+		"renew_failures", failed,
+	)
+}
+
 // RestoreVaultKeysOnStartup walks every user, picks their most recent active
 // session, and loads that user's Vault-encrypted keys into the signer runtime
 // using the stored Vault token. Without this, a pod restart leaves every
@@ -3311,6 +3420,12 @@ func (h *Handler) RestoreVaultKeysOnStartup(ctx context.Context) {
 	if h.vaultClient == nil {
 		return
 	}
+
+	// Renew before restoring. After a long pod downtime a session's token can
+	// be alive but close to its TTL; renewing first turns a restore that would
+	// have 403'd into one that succeeds. This also performs the one-time
+	// migration of each userpass role to periodic tokens.
+	h.refreshUserVaultTokens(ctx)
 
 	users, err := h.storage.ListUsers(ctx)
 	if err != nil {

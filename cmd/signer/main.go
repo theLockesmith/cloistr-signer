@@ -274,6 +274,12 @@ func main() {
 	// breaks for every user until they each log out and back in.
 	go apiHandler.RestoreVaultKeysOnStartup(context.Background())
 
+	// Keep each live session's per-user Vault token alive. A session outlives
+	// the token it was issued by roughly ten to one, and the token cannot be
+	// re-minted without the user's password, so without renewal every session
+	// eventually loses Vault access while still looking signed in.
+	go apiHandler.StartUserTokenRenewal(ctx)
+
 	// Initialize admin handler for DM-based management
 	adminHandler := admin.New(cfg, store, relayClient, relayPrefsClient, nip46Signer, nip46Signer)
 
