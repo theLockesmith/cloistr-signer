@@ -17,7 +17,7 @@
     "@cloistr/auth": "^0.6.0",
     "@cloistr/collab-common": "^0.2.14",
     "@cloistr/ui": "^0.38.0",
-    "@tanstack/react-query": "^5.102.7",
+    "@tanstack/react-query": "^5.102.8",
     "nostr-tools": "^2.25.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
