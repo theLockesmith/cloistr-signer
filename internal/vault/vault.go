@@ -162,14 +162,14 @@ func maybeTraceRequest(req *http.Request) (*http.Request, *phaseTimings) {
 	}
 	t := &phaseTimings{start: time.Now()}
 	trace := &httptrace.ClientTrace{
-		DNSStart:             func(httptrace.DNSStartInfo) { t.dnsStart = time.Now() },
-		DNSDone:              func(httptrace.DNSDoneInfo) { t.dnsDone = time.Now() },
-		ConnectStart:         func(string, string) { t.connectStart = time.Now() },
-		ConnectDone:          func(string, string, error) { t.connectDone = time.Now() },
-		TLSHandshakeStart:    func() { t.tlsStart = time.Now() },
-		TLSHandshakeDone:     func(tls.ConnectionState, error) { t.tlsDone = time.Now() },
-		WroteHeaders:         func() { t.wroteHeaders = time.Now() },
-		Wait100Continue:      func() { t.wait100Continue = time.Now() },
+		DNSStart:          func(httptrace.DNSStartInfo) { t.dnsStart = time.Now() },
+		DNSDone:           func(httptrace.DNSDoneInfo) { t.dnsDone = time.Now() },
+		ConnectStart:      func(string, string) { t.connectStart = time.Now() },
+		ConnectDone:       func(string, string, error) { t.connectDone = time.Now() },
+		TLSHandshakeStart: func() { t.tlsStart = time.Now() },
+		TLSHandshakeDone:  func(tls.ConnectionState, error) { t.tlsDone = time.Now() },
+		WroteHeaders:      func() { t.wroteHeaders = time.Now() },
+		Wait100Continue:   func() { t.wait100Continue = time.Now() },
 		Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
 			t.got1xxResponse = time.Now()
 			t.got1xxCode = code
@@ -761,6 +761,19 @@ func (c *Client) CreateTransitKey(ctx context.Context, keyName string) error {
 	return nil
 }
 
+// userpassTokenPeriod makes tokens minted by this role PERIODIC. A periodic
+// token has no max TTL: it lives forever as long as something renews it inside
+// each period, which is what StartUserTokenRenewal does.
+//
+// The previous role used token_max_ttl 72h, which Vault enforces as a hard
+// ceiling regardless of renewal. User SESSIONS run for JWT_EXPIRY hours (720 =
+// 30 days in production), so the Vault token died roughly ten times over
+// inside a single session, and nothing could re-mint it: populateVaultTokenAsync
+// needs the PASSWORD, and the only caller that has one is the login handler.
+// The user stayed signed in on a valid cookie while every key decrypt 403'd —
+// observed as "startup vault restore complete users_restored=0" with 8 users.
+const userpassTokenPeriod = "24h"
+
 // CreateUserpassAccount creates a new userpass auth account for a user
 func (c *Client) CreateUserpassAccount(ctx context.Context, username, password string, policies []string) error {
 	path := fmt.Sprintf("auth/userpass/users/%s", username)
@@ -768,8 +781,8 @@ func (c *Client) CreateUserpassAccount(ctx context.Context, username, password s
 	payload := map[string]interface{}{
 		"password":       password,
 		"policies":       policies,
-		"token_ttl":      "24h",
-		"token_max_ttl":  "72h",
+		"token_ttl":      userpassTokenPeriod,
+		"token_period":   userpassTokenPeriod,
 		"token_policies": policies,
 	}
 
@@ -798,6 +811,103 @@ func (c *Client) CreateUserpassAccount(ctx context.Context, username, password s
 	}
 
 	return nil
+}
+
+// EnsureUserpassPeriodic migrates an EXISTING userpass role to periodic tokens.
+// Roles created before userpassTokenPeriod carry token_max_ttl 72h, a hard
+// ceiling Vault applies no matter how often a token is renewed, so renewal
+// alone cannot keep those users' tokens alive for a 30-day session.
+//
+// It reads the current role first and writes every field back, because Vault's
+// userpass write is a full replace of the token_* tunables — a partial write
+// would silently reset the user's policies and lock them out of their own
+// transit key. The password is NOT sent: Vault's userpass handler only rehashes
+// a password when the field is present, so omitting it leaves the credential
+// untouched.
+//
+// Returns true when the role was actually changed. Note this only affects
+// tokens minted from now on; a token already issued keeps the ceiling it was
+// born with, so existing users still need one more login to get a periodic one.
+func (c *Client) EnsureUserpassPeriodic(ctx context.Context, username string) (bool, error) {
+	path := fmt.Sprintf("auth/userpass/users/%s", username)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", c.address+"/v1/"+path, nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to create read request: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", c.token)
+
+	resp, err := c.do(req)
+	if err != nil {
+		return false, fmt.Errorf("failed to read userpass account: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		// No role yet — nothing to migrate. The user provisions on next login.
+		return false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("vault error (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var read struct {
+		Data struct {
+			TokenPolicies []string `json:"token_policies"`
+			Policies      []string `json:"policies"`
+			TokenPeriod   int      `json:"token_period"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&read); err != nil {
+		return false, fmt.Errorf("failed to decode userpass account: %w", err)
+	}
+
+	if read.Data.TokenPeriod > 0 {
+		return false, nil // already periodic
+	}
+
+	policies := read.Data.TokenPolicies
+	if len(policies) == 0 {
+		policies = read.Data.Policies
+	}
+	if len(policies) == 0 {
+		// Writing back an empty policy set would strip the user's access to
+		// their own transit key. Refuse rather than break them.
+		return false, fmt.Errorf("userpass role %q has no policies; refusing to rewrite", username)
+	}
+
+	payload := map[string]interface{}{
+		"policies":       policies,
+		"token_policies": policies,
+		"token_ttl":      userpassTokenPeriod,
+		"token_period":   userpassTokenPeriod,
+		"token_max_ttl":  0, // clear the 72h ceiling; the period supersedes it
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	wreq, err := http.NewRequestWithContext(ctx, "POST", c.address+"/v1/"+path, strings.NewReader(string(body)))
+	if err != nil {
+		return false, fmt.Errorf("failed to create write request: %w", err)
+	}
+	wreq.Header.Set("X-Vault-Token", c.token)
+	wreq.Header.Set("Content-Type", "application/json")
+
+	wresp, err := c.do(wreq)
+	if err != nil {
+		return false, fmt.Errorf("failed to update userpass account: %w", err)
+	}
+	defer wresp.Body.Close()
+
+	if wresp.StatusCode != http.StatusOK && wresp.StatusCode != http.StatusNoContent {
+		bodyBytes, _ := io.ReadAll(wresp.Body)
+		return false, fmt.Errorf("vault error (status %d): %s", wresp.StatusCode, string(bodyBytes))
+	}
+
+	return true, nil
 }
 
 // UpdateUserpassPassword updates a user's password in Vault
@@ -1040,6 +1150,47 @@ func (c *Client) RenewSelf(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("failed to create renew request: %w", err)
 	}
 	req.Header.Set("X-Vault-Token", c.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.do(req)
+	if err != nil {
+		return 0, fmt.Errorf("token renew request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("vault renew error (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result struct {
+		Auth struct {
+			LeaseDuration int `json:"lease_duration"`
+		} `json:"auth"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("failed to decode renew response: %w", err)
+	}
+	return result.Auth.LeaseDuration, nil
+}
+
+// RenewToken renews an arbitrary Vault token (a per-user token held on a
+// session) rather than the signer's own, and returns the new lease duration in
+// seconds. renew-self acts on whatever token authenticates the request, so this
+// is RenewSelf with a caller-supplied token.
+//
+// A token that has already lapsed cannot be revived — Vault answers 403 and the
+// caller must treat that session's Vault access as gone.
+func (c *Client) RenewToken(ctx context.Context, token string) (int, error) {
+	if token == "" {
+		return 0, fmt.Errorf("empty token")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.address+"/v1/auth/token/renew-self", strings.NewReader("{}"))
+	if err != nil {
+		return 0, fmt.Errorf("failed to create renew request: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.do(req)

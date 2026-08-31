@@ -481,8 +481,15 @@ func TestClient_CreateUserpassAccount(t *testing.T) {
 			if payload["token_ttl"] != "24h" {
 				t.Errorf("token_ttl = %v", payload["token_ttl"])
 			}
-			if payload["token_max_ttl"] != "72h" {
-				t.Errorf("token_max_ttl = %v", payload["token_max_ttl"])
+			// The role must mint PERIODIC tokens. token_max_ttl is a ceiling
+			// Vault enforces regardless of renewal; with it set, a user's token
+			// died inside a 30-day session and nothing could re-mint it without
+			// their password. token_period has no such ceiling.
+			if payload["token_period"] != "24h" {
+				t.Errorf("token_period = %v, want 24h", payload["token_period"])
+			}
+			if _, ok := payload["token_max_ttl"]; ok {
+				t.Errorf("token_max_ttl must not be set on a periodic role, got %v", payload["token_max_ttl"])
 			}
 
 			w.WriteHeader(http.StatusNoContent)
@@ -986,4 +993,165 @@ func TestAuthResponse_Fields(t *testing.T) {
 	if len(auth.Policies) != 2 {
 		t.Errorf("Policies = %v", auth.Policies)
 	}
+}
+
+func TestClient_EnsureUserpassPeriodic(t *testing.T) {
+	t.Run("migrates a legacy max-ttl role", func(t *testing.T) {
+		var wrote map[string]interface{}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/auth/userpass/users/user123" {
+				t.Errorf("unexpected path: %s", r.URL.Path)
+			}
+			switch r.Method {
+			case http.MethodGet:
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`{"data":{"policies":["signer-user-user123"],"token_policies":["signer-user-user123"],"token_ttl":86400,"token_max_ttl":259200,"token_period":0}}`))
+			case http.MethodPost:
+				if err := json.NewDecoder(r.Body).Decode(&wrote); err != nil {
+					t.Errorf("failed to decode write body: %v", err)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				t.Errorf("unexpected method %s", r.Method)
+			}
+		}))
+		defer server.Close()
+
+		client, _ := NewClient(&Config{Address: server.URL, Token: "service-token"})
+
+		changed, err := client.EnsureUserpassPeriodic(context.Background(), "user123")
+		if err != nil {
+			t.Fatalf("EnsureUserpassPeriodic() error = %v", err)
+		}
+		if !changed {
+			t.Error("expected changed=true for a legacy token_max_ttl role")
+		}
+		if wrote["token_period"] != "24h" {
+			t.Errorf("token_period = %v, want 24h", wrote["token_period"])
+		}
+		if wrote["token_max_ttl"] != float64(0) {
+			t.Errorf("token_max_ttl = %v, want 0 (ceiling cleared)", wrote["token_max_ttl"])
+		}
+		// Rewriting the role must not strip the user's policies — that would
+		// lock them out of their own transit key.
+		pols, ok := wrote["token_policies"].([]interface{})
+		if !ok || len(pols) != 1 || pols[0] != "signer-user-user123" {
+			t.Errorf("token_policies = %v, want the existing policy preserved", wrote["token_policies"])
+		}
+		// The password must NOT be sent: Vault only rehashes when the field is
+		// present, so omitting it leaves the credential untouched.
+		if _, ok := wrote["password"]; ok {
+			t.Error("password must not be sent when migrating a role")
+		}
+	})
+
+	t.Run("no-op when already periodic", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				t.Error("must not rewrite a role that is already periodic")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data":{"token_policies":["p"],"token_ttl":86400,"token_period":86400}}`))
+		}))
+		defer server.Close()
+
+		client, _ := NewClient(&Config{Address: server.URL, Token: "service-token"})
+
+		changed, err := client.EnsureUserpassPeriodic(context.Background(), "user123")
+		if err != nil {
+			t.Fatalf("EnsureUserpassPeriodic() error = %v", err)
+		}
+		if changed {
+			t.Error("expected changed=false when the role is already periodic")
+		}
+	})
+
+	t.Run("refuses to rewrite a role with no policies", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				t.Error("must not write back an empty policy set")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data":{"token_policies":[],"policies":[],"token_period":0}}`))
+		}))
+		defer server.Close()
+
+		client, _ := NewClient(&Config{Address: server.URL, Token: "service-token"})
+
+		if _, err := client.EnsureUserpassPeriodic(context.Background(), "user123"); err == nil {
+			t.Error("expected an error rather than a policy-stripping rewrite")
+		}
+	})
+
+	t.Run("missing role is not an error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer server.Close()
+
+		client, _ := NewClient(&Config{Address: server.URL, Token: "service-token"})
+
+		changed, err := client.EnsureUserpassPeriodic(context.Background(), "nobody")
+		if err != nil {
+			t.Fatalf("EnsureUserpassPeriodic() error = %v", err)
+		}
+		if changed {
+			t.Error("expected changed=false when no role exists")
+		}
+	})
+}
+
+func TestClient_RenewToken(t *testing.T) {
+	t.Run("renews the supplied token, not the client's own", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/auth/token/renew-self" {
+				t.Errorf("unexpected path: %s", r.URL.Path)
+			}
+			// renew-self acts on the authenticating token, so the USER's token
+			// must be the one on the wire — not the signer's service token.
+			if got := r.Header.Get("X-Vault-Token"); got != "user-token" {
+				t.Errorf("X-Vault-Token = %q, want the user's token", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"auth":{"lease_duration":86400}}`))
+		}))
+		defer server.Close()
+
+		client, _ := NewClient(&Config{Address: server.URL, Token: "service-token"})
+
+		lease, err := client.RenewToken(context.Background(), "user-token")
+		if err != nil {
+			t.Fatalf("RenewToken() error = %v", err)
+		}
+		if lease != 86400 {
+			t.Errorf("lease = %d, want 86400", lease)
+		}
+	})
+
+	t.Run("expired token surfaces the 403", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"errors":["permission denied"]}`))
+		}))
+		defer server.Close()
+
+		client, _ := NewClient(&Config{Address: server.URL, Token: "service-token"})
+
+		if _, err := client.RenewToken(context.Background(), "dead-token"); err == nil {
+			t.Error("RenewToken() should return an error on 403")
+		}
+	})
+
+	t.Run("empty token does not hit vault", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("must not call vault with an empty token")
+		}))
+		defer server.Close()
+
+		client, _ := NewClient(&Config{Address: server.URL, Token: "service-token"})
+
+		if _, err := client.RenewToken(context.Background(), ""); err == nil {
+			t.Error("RenewToken() should reject an empty token")
+		}
+	})
 }
