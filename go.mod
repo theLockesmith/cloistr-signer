@@ -1,6 +1,6 @@
 module git.aegis-hq.xyz/coldforge/cloistr-signer
 
-go 1.25.0
+go 1.26.0
 
 require (
 	git.aegis-hq.xyz/coldforge/cloistr-common v0.3.0
@@ -8,9 +8,9 @@ require (
 	github.com/btcsuite/btcd/btcec/v2 v2.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.2.0
-	github.com/bytemare/ecc v0.8.2
+	github.com/bytemare/ecc v0.10.0
 	github.com/bytemare/frost v0.0.0-20241019112700-8c6db5b04145
-	github.com/bytemare/secret-sharing v0.7.0
+	github.com/bytemare/secret-sharing v0.8.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/go-webauthn/webauthn v0.18.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -37,9 +37,9 @@ require (
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.14.2 // indirect
 	github.com/bytedance/sonic/loader v0.4.0 // indirect
-	github.com/bytemare/hash v0.3.0 // indirect
-	github.com/bytemare/hash2curve v0.3.0 // indirect
-	github.com/bytemare/secp256k1 v0.1.6 // indirect
+	github.com/bytemare/hash v0.6.3 // indirect
+	github.com/bytemare/hash2curve v0.5.4 // indirect
+	github.com/bytemare/secp256k1 v0.5.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/coder/websocket v1.8.14 // indirect
