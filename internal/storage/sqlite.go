@@ -116,7 +116,19 @@ func (ss *SQLiteStorage) initSchema() error {
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_signer_keys_one_primary
 		ON signer_keys(owner_id) WHERE is_primary = 1;
 
-	-- Permissions table
+	-- Permissions table.
+	-- key_id here holds the KEY'S PUBKEY (see internal/api/handler.go and
+	-- internal/signer/signer.go, which always populate Permission.KeyID
+	-- from key.Pubkey / targetPubkey), NOT signer_keys.id -- signer_keys.id
+	-- is a separate short identifier (pubkey[:16]). The FK below must
+	-- therefore reference signer_keys(pubkey), which is UNIQUE NOT NULL,
+	-- not signer_keys(id). Referencing (id) was a latent schema bug that
+	-- went unnoticed because modernc.org/sqlite < v1.58.0 silently ignored
+	-- the _foreign_keys=on DSN parameter (see NewSQLiteStorage) and never
+	-- actually enforced any FK constraint; with the fixed driver every
+	-- SetPermission() would otherwise fail with "FOREIGN KEY constraint
+	-- failed" since key_id (a full pubkey) never matches signer_keys.id
+	-- (a 16-char prefix).
 	CREATE TABLE IF NOT EXISTS signer_permissions (
 		key_id TEXT NOT NULL,
 		user_pubkey TEXT NOT NULL,
@@ -132,7 +144,7 @@ func (ss *SQLiteStorage) initSchema() error {
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		last_used_at TEXT,
 		PRIMARY KEY (key_id, user_pubkey),
-		FOREIGN KEY (key_id) REFERENCES signer_keys(id) ON DELETE CASCADE
+		FOREIGN KEY (key_id) REFERENCES signer_keys(pubkey) ON DELETE CASCADE
 	);
 
 	-- Pending requests
