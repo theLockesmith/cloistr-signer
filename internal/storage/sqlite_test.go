@@ -7,6 +7,24 @@ import (
 	"time"
 )
 
+// mustCreateOwner inserts a minimal signer_web_accounts row so that
+// FK-referencing rows (signer_keys.owner_id, signer_frost_keys.owner_id)
+// can be created against it. Needed because modernc.org/sqlite < v1.58.0
+// silently ignored the _foreign_keys=on DSN parameter and never actually
+// enforced this FK; the newer driver does, and these tests were relying
+// on that lack of enforcement.
+func mustCreateOwner(t *testing.T, s *SQLiteStorage, ctx context.Context, id string) {
+	t.Helper()
+	if err := s.CreateUser(ctx, &User{
+		ID:           id,
+		Username:     id,
+		PasswordHash: "test-hash",
+		CreatedAt:    time.Now(),
+	}); err != nil {
+		t.Fatalf("mustCreateOwner(%q): CreateUser() error = %v", id, err)
+	}
+}
+
 func TestNewSQLiteStorage(t *testing.T) {
 	// Use temp file
 	tmpFile := t.TempDir() + "/test.db"
@@ -32,6 +50,8 @@ func TestSQLiteStorage_KeyLifecycle(t *testing.T) {
 	defer s.Close()
 
 	ctx := context.Background()
+
+	mustCreateOwner(t, s, ctx, "owner1")
 
 	key := &Key{
 		ID:               "key1",
@@ -117,6 +137,9 @@ func TestSQLiteStorage_ListKeysOwnerIsolation(t *testing.T) {
 	defer s.Close()
 
 	ctx := context.Background()
+
+	mustCreateOwner(t, s, ctx, "owner1")
+	mustCreateOwner(t, s, ctx, "owner2")
 
 	// Create keys for different owners
 	s.CreateKey(ctx, &Key{ID: "key1", Pubkey: "pub1", OwnerID: "owner1"})
@@ -449,6 +472,8 @@ func TestSQLiteStorage_FrostKeyLifecycle(t *testing.T) {
 	defer s.Close()
 
 	ctx := context.Background()
+
+	mustCreateOwner(t, s, ctx, "owner1")
 
 	key := &FrostKey{
 		ID:                 "frost1",
