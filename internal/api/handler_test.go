@@ -896,9 +896,24 @@ func TestHandleListRequests_MissingKeyPubkey(t *testing.T) {
 }
 
 func TestHandleListRequests_WithKeyPubkey(t *testing.T) {
-	h, _ := testHandler(t)
+	h, store := testHandler(t)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/requests?key_pubkey=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil)
+	// key_pubkey is no longer a free pass: the caller must be authenticated
+	// AND own the key. See handler_pending_request_auth_test.go for the
+	// anonymous and non-owner cases.
+	const pubkey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := store.CreateKey(context.Background(), &storage.Key{
+		ID:        "listreqkey",
+		Name:      "listreqkey",
+		Pubkey:    pubkey,
+		OwnerID:   testUserID,
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/requests?key_pubkey="+pubkey, nil)
+	addAuthHeader(t, h, req)
 	rr := httptest.NewRecorder()
 
 	h.handleRequests(rr, req)
