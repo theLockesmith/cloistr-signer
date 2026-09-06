@@ -797,6 +797,20 @@ func (ss *SQLiteStorage) GetPermission(ctx context.Context, keyID, userPubkey st
 	if expiresAt.Valid {
 		t := parseTime(expiresAt.String)
 		perm.ExpiresAt = &t
+		// An expired permission is not a permission. This backend used to
+		// read expires_at, store it on the struct and then hand the
+		// permission back anyway, so expiry was decorative here while both
+		// the Postgres and in-memory backends enforced it. Production runs
+		// Postgres, so this was latent rather than live — but a scoped,
+		// expiring NIP-46 grant is only worth minting if every backend
+		// honours the expiry.
+		//
+		// parseTime returns the zero time for anything it cannot parse, so
+		// the IsZero guard keeps an unreadable timestamp from silently
+		// revoking a permission that was never given one.
+		if !t.IsZero() && time.Now().After(t) {
+			return nil, ErrNotAuthorized
+		}
 	}
 	if policyID.Valid {
 		perm.PolicyID = policyID.String
