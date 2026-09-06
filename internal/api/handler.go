@@ -1793,11 +1793,57 @@ func (h *Handler) handleRequestByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// requireRequestOwner authenticates the caller and verifies they own the
+// signing key a pending NIP-46 request is addressed to.
+//
+// A pending request is an instruction to use somebody's key. Reading one
+// exposes its params, approving one can mint a persistent permission, and
+// denying one destroys it — so all three are acts only the key's owner may
+// perform. Before this existed these handlers took no identity at all and a
+// request id was the entire credential.
+//
+// Failures are written by this function; callers return immediately when ok
+// is false. A key owned by somebody else yields the same 404 as a request
+// that does not exist, so this cannot be used to probe which ids are live.
+func (h *Handler) requireRequestOwner(w http.ResponseWriter, r *http.Request, keyPubkey, notFoundMsg string) bool {
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return false
+	}
+
+	key, err := h.storage.GetKeyByPubkey(r.Context(), keyPubkey)
+	if err != nil {
+		if err == storage.ErrKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, notFoundMsg)
+			return false
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get key")
+		return false
+	}
+
+	if key.OwnerID != claims.UserID {
+		slog.Warn("rejected pending-request access for non-owner",
+			"user", claims.UserID,
+			"key", keyPubkey[:16]+"...",
+		)
+		h.errorResponse(w, http.StatusNotFound, notFoundMsg)
+		return false
+	}
+
+	return true
+}
+
 func (h *Handler) handleListRequests(w http.ResponseWriter, r *http.Request) {
 	keyPubkey := r.URL.Query().Get("key_pubkey")
 
 	var requests []*storage.PendingRequest
 	if keyPubkey != "" {
+		// Only the owner of this key may see what is queued against it.
+		if !h.requireRequestOwner(w, r, keyPubkey, "key not found") {
+			return
+		}
+
 		reqs, err := h.storage.ListPendingRequests(r.Context(), keyPubkey)
 		if err != nil {
 			h.errorResponse(w, http.StatusInternalServerError, "failed to list requests")
@@ -1856,6 +1902,11 @@ func (h *Handler) handleGetRequest(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	// The response carries the request's params. Owner only.
+	if !h.requireRequestOwner(w, r, req.KeyPubkey, "request not found or expired") {
+		return
+	}
+
 	h.jsonResponse(w, http.StatusOK, PendingRequestResponse{
 		ID:           req.ID,
 		KeyPubkey:    req.KeyPubkey,
@@ -1889,6 +1940,12 @@ func (h *Handler) handleApproveRequest(w http.ResponseWriter, r *http.Request, r
 			return
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to get request")
+		return
+	}
+
+	// Approving is what mints a persistent permission on somebody's key.
+	// Owner only.
+	if !h.requireRequestOwner(w, r, pendingReq.KeyPubkey, "request not found or expired") {
 		return
 	}
 
@@ -1954,6 +2011,11 @@ func (h *Handler) handleDenyRequest(w http.ResponseWriter, r *http.Request, requ
 			return
 		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to get request")
+		return
+	}
+
+	// Denying destroys somebody else's pending request. Owner only.
+	if !h.requireRequestOwner(w, r, pendingReq.KeyPubkey, "request not found or expired") {
 		return
 	}
 
