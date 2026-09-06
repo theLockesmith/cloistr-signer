@@ -1773,12 +1773,7 @@ func (h *Handler) handleRequestByID(w http.ResponseWriter, r *http.Request) {
 				h.handleApproveRequest(w, r, requestID)
 				return
 			}
-		case "deny", "reject":
-			// "reject" is what the shipped UI actually calls
-			// (ui/src/api/client.ts rejectRequest). It was never routed, so
-			// it fell through to 405 and Deny did nothing. The UI source is
-			// corrected in the same commit; this alias is what makes the
-			// already-built, already-embedded bundle work.
+		case "deny":
 			if r.Method == http.MethodPost {
 				h.handleDenyRequest(w, r, requestID)
 				return
