@@ -364,7 +364,9 @@ class ApiClient {
   }
 
   async rejectRequest(id: string): Promise<void> {
-    return this.fetch(`/requests/${id}/reject`, { method: 'POST' });
+    // The backend route is /deny. It also accepts /reject as an alias for the
+    // sake of already-built bundles, but /deny is the real one.
+    return this.fetch(`/requests/${id}/deny`, { method: 'POST' });
   }
 
   // App endpoints
