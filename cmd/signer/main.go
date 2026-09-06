@@ -284,15 +284,24 @@ func main() {
 	adminHandler := admin.New(cfg, store, relayClient, relayPrefsClient, nip46Signer, nip46Signer)
 
 	// Set the admin communication key using signer identity
+	// One service identity, shared by everything the service itself authors.
+	// nip46Signer needs it for the pending-authorization notification, which
+	// used to be signed with the requesting USER's custody key (audit #31).
 	if cfg.RelayAuthKey != "" {
 		pubkey, err := gonostr.GetPublicKey(cfg.RelayAuthKey)
 		if err == nil {
 			adminHandler.SetSignerKey(pubkey, cfg.RelayAuthKey)
+			nip46Signer.SetServiceKey(pubkey, cfg.RelayAuthKey)
 			slog.Info("admin handler using explicit relay auth key", "pubkey", pubkey[:16]+"...")
 		}
 	} else if signerPrivkey != "" {
 		adminHandler.SetSignerKey(signerPubkey, signerPrivkey)
+		nip46Signer.SetServiceKey(signerPubkey, signerPrivkey)
 		slog.Info("admin handler using signer identity", "pubkey", signerPubkey[:16]+"...")
+	} else {
+		// Not fatal: admin notifications are optional. But say so, because the
+		// alternative used to be silently signing as the user.
+		slog.Warn("no service identity available; admin notifications disabled")
 	}
 
 	// Start admin DM listener
