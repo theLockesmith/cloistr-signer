@@ -88,6 +88,8 @@ type Signer struct {
 	frostCoordinator       *frost.Coordinator                // FROST threshold signing coordinator (Phase 13)
 	frostUserSigner        *frost.UserSignerCoordinator      // FROST 2-of-N user-cosigner coordinator (P4)
 	cosignListenerRegistry sync.Map                          // user_id (string) → cosign listener ephemeral pubkey (string), P4e
+	servicePubkey          string                            // the SERVICE's own identity, for messages the service authors
+	servicePriv            string                            // never a user's custody key -- see SetServiceKey
 	keys                   map[string]string                 // pubkey -> private key (hex)
 	keysLock               sync.RWMutex                      // Protects keys map for concurrent access
 	keyRelays              map[string][]string               // pubkey -> configured relays (from storage)
@@ -820,7 +822,7 @@ func (s *Signer) handlePendingApproval(ctx context.Context, targetPubkey, privat
 
 	// Notify admins if enabled
 	if s.config.Auth.NotifyAdmins && len(s.config.Auth.AdminPubkeys) > 0 {
-		s.notifyAdminsOfPendingRequest(ctx, targetPubkey, privateKey, clientPubkey, request)
+		s.notifyAdminsOfPendingRequest(ctx, targetPubkey, clientPubkey, request)
 	}
 
 	// Wait for authorization
@@ -2300,8 +2302,85 @@ func (s *Signer) GetStatus() map[string]interface{} {
 	}
 }
 
-// notifyAdminsOfPendingRequest sends a DM to all admins about a pending authorization request
-func (s *Signer) notifyAdminsOfPendingRequest(ctx context.Context, targetPubkey, privateKey, clientPubkey string, request *NIP46Request) {
+// SetServiceKey sets the signer's OWN identity, used for messages the service
+// itself authors. It is deliberately separate from the custody keys in s.keys:
+// those belong to users and exist only to be remote-signed with under NIP-46.
+//
+// Mirrors admin.Handler.SetSignerKey, and is wired from the same source in
+// cmd/signer/main.go with the same precedence (RelayAuthKey, else the stored
+// signer identity), so there is one service identity and not two.
+func (s *Signer) SetServiceKey(pubkey, privateKey string) {
+	s.servicePubkey = pubkey
+	s.servicePriv = privateKey
+}
+
+// buildAdminNotification encrypts `message` to `adminPubkey` and returns the
+// signed kind:4 event carrying it.
+//
+// Split out of notifyAdminsOfPendingRequest so that the property audit finding
+// #31 turned on -- WHOSE KEY SIGNS THIS -- is assertable in a test without a
+// live relay. The relay client is a concrete type, so the publish path itself
+// cannot be mocked without an interface change to a live identity service; the
+// authorship decision, which is the part that was wrong, is entirely here.
+func (s *Signer) buildAdminNotification(adminPubkey, message string) (*nostr.Event, error) {
+	if s.servicePubkey == "" || s.servicePriv == "" {
+		return nil, fmt.Errorf("no service key configured")
+	}
+
+	sharedSecret, err := nip04.ComputeSharedSecret(adminPubkey, s.servicePriv)
+	if err != nil {
+		return nil, fmt.Errorf("compute shared secret: %w", err)
+	}
+
+	encrypted, err := nip04.Encrypt(message, sharedSecret)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt: %w", err)
+	}
+
+	// Authored by the SERVICE. The user's pubkey still appears inside the
+	// encrypted body, because that is what the admin needs in order to act on
+	// the request; it must not appear as the author.
+	event := &nostr.Event{
+		Kind:      4, // Encrypted Direct Message
+		Content:   encrypted,
+		CreatedAt: nostr.Timestamp(time.Now().Unix()),
+		Tags:      nostr.Tags{{"p", adminPubkey}},
+		PubKey:    s.servicePubkey,
+	}
+	if err := event.Sign(s.servicePriv); err != nil {
+		return nil, fmt.Errorf("sign: %w", err)
+	}
+	return event, nil
+}
+
+// notifyAdminsOfPendingRequest sends a DM to all admins about a pending authorization request.
+//
+// IT IS SIGNED WITH THE SERVICE'S OWN KEY, NEVER THE USER'S. Audit finding #31,
+// 2026-09-06: this function used to set PubKey to the user's pubkey and sign
+// with the user's custody key -- the key the bunker holds only in order to
+// remote-sign what the user's client asks for. The result was that the service
+// composed an activity log of a user's signing session, authored AS that user,
+// and published it. The user's client never requested that event and never saw
+// it, which is the exact inverse of "client-side publishing always".
+//
+// The disclosure was not only to the admin. kind:4 encrypts the body and not
+// the envelope, so any reader of the relay saw a message from that user's
+// identity to an operator admin key, timestamped -- and delivery follows the
+// ADMIN's declared relay preferences, which are not necessarily ours.
+//
+// Nothing about the notification itself needed the user's key: the recipient is
+// an admin and the author should be the service. admin.Handler.sendDM was
+// already doing it correctly with the same key this now uses.
+func (s *Signer) notifyAdminsOfPendingRequest(ctx context.Context, targetPubkey, clientPubkey string, request *NIP46Request) {
+	// FAIL CLOSED. With no service identity there is no key this message may
+	// legitimately be signed with, and the one thing that must never happen is
+	// falling back to the user's. Mirrors admin.Handler.broadcastToAdmins.
+	if s.servicePubkey == "" || s.servicePriv == "" {
+		slog.Warn("cannot notify admins of pending request: no service key configured; " +
+			"notification skipped rather than signed with the user's key")
+		return
+	}
+
 	// Build notification message
 	var eventKindInfo string
 	if request.Method == "sign_event" && len(request.Params) > 0 {
@@ -2336,42 +2415,16 @@ POST /api/v1/requests/{id}/deny`,
 			continue
 		}
 
-		// Compute shared secret for NIP-04 encryption
-		sharedSecret, err := nip04.ComputeSharedSecret(adminPubkey, privateKey)
+		// Compute shared secret for NIP-04 encryption, service key <-> admin
+		built, err := s.buildAdminNotification(adminPubkey, message)
 		if err != nil {
-			slog.Error("failed to compute shared secret for admin notification",
+			slog.Error("failed to build admin notification",
 				"admin", adminPubkey[:16]+"...",
 				"error", err,
 			)
 			continue
 		}
-
-		// Encrypt the message
-		encrypted, err := nip04.Encrypt(message, sharedSecret)
-		if err != nil {
-			slog.Error("failed to encrypt admin notification",
-				"admin", adminPubkey[:16]+"...",
-				"error", err,
-			)
-			continue
-		}
-
-		// Create DM event (kind:4)
-		event := nostr.Event{
-			Kind:      4, // Encrypted Direct Message
-			Content:   encrypted,
-			CreatedAt: nostr.Timestamp(time.Now().Unix()),
-			Tags:      nostr.Tags{{"p", adminPubkey}},
-			PubKey:    targetPubkey,
-		}
-
-		if err := event.Sign(privateKey); err != nil {
-			slog.Error("failed to sign admin notification",
-				"admin", adminPubkey[:16]+"...",
-				"error", err,
-			)
-			continue
-		}
+		event := *built
 
 		// Get admin's relay preferences for DM delivery
 		var relaysToPublish []string
