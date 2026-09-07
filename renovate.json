@@ -2,5 +2,19 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>coldforge/ci-templates//renovate/base"
+  ],
+  "packageRules": [
+    {
+      "description": "HOLD bytemare/ecc + bytemare/secret-sharing (and their matching transitive bytemare/hash, bytemare/hash2curve, bytemare/secp256k1) at their current pins. github.com/bytemare/frost is pinned to an untagged 2024 commit — no upstream tags/releases exist, so Renovate cannot track or bump frost itself — and that pinned frost commit does not build against ecc v0.10.0 (internal/hashing.go, internal/lambda.go: signature/return-value mismatches). Confirmed in a322214 (2026-09-03) and reconfirmed independently the same day when Renovate re-proposed the identical bump in MR!119 and hit the same build/lint/test:unit failures. The only newer frost commit that compiles against ecc v0.10.0 (316cadd, 2026-06-16) is a large breaking rewrite of frost's public API and also requires secret-sharing >= v0.8.1-pre, whose keys.KeyShare/PublicKeyShare API went from exported fields to unexported/method-based — that would mean rewriting internal/frost/{coordinator,dkg,remote_signer}.go (our threshold-signing/DKG wrapper) as its own reviewed piece of work, not inside a dependency-bump MR. Adopting it also forces go.mod's `go` directive above the standing floor (see ci-templates' gomod/go enabled:false rule), which is a separate hard no. REMOVE THIS RULE once frost is tagged with a release that supports ecc v0.10.0 without the secret-sharing breaking rewrite, or once the coordinator/dkg/remote_signer migration has been done and reviewed on its own branch.",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": [
+        "github.com/bytemare/ecc",
+        "github.com/bytemare/secret-sharing",
+        "github.com/bytemare/hash",
+        "github.com/bytemare/hash2curve",
+        "github.com/bytemare/secp256k1"
+      ],
+      "enabled": false
+    }
   ]
 }
