@@ -1,6 +1,7 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
 import { Header, Footer, LoginModal, ThemeToggle } from '@cloistr/ui/components';
 import { useSignerAuth } from '../hooks/useSignerAuth';
+import { useNostrProfile } from '../hooks/useNostrProfile';
 import { useFrostCosignListener } from '../hooks/useFrostCosignListener';
 import { FrostCosignApprovalModal } from './FrostCosignApprovalModal';
 import { useQuery } from '@tanstack/react-query';
@@ -34,6 +35,14 @@ export function Layout() {
     queryFn: () => apiClient.listKeys(),
     enabled: isAuthenticated,
   });
+  // Look up the user's kind:0 profile so the Header can show their real
+  // NIP-05 (e.g. fraiyr@cloistr.xyz) instead of the signer-internal address.
+  const primaryKey = (keys ?? []).find((k) => k.is_primary);
+  const profileRelays = primaryKey?.relays?.length
+    ? primaryKey.relays
+    : ['wss://relay.damus.io', 'wss://nos.lol'];
+  const profile = useNostrProfile(user?.pubkey, profileRelays);
+
   const frostRelays = Array.from(
     new Set(
       (keys ?? [])
@@ -60,6 +69,7 @@ export function Layout() {
         auth={{
           authenticated: isAuthenticated,
           pubkey: user?.pubkey,
+          nip05: profile?.nip05,
           onLogout: logout,
           onSignIn: showLoginModal,
         }}
