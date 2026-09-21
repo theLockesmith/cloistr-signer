@@ -745,6 +745,28 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 		return
 	}
 
+	// AN EXPIRED GRANT IS A REFUSAL, NEVER A FALL-THROUGH, and the difference
+	// is not cosmetic.
+	//
+	// Everything below this point reads "no permission" as "a client we have
+	// not met yet". On a key that does not require approval -- which is the
+	// SHIPPED DEFAULT, config.Auth.RequireApproval is false for simpler UX --
+	// that path mints a temporary permission with Methods ["*"] and no
+	// AllowedKinds restriction and serves the request. So letting an expiry
+	// land here does not merely fail to revoke the grant: it UPGRADES it, by
+	// replacing a scoped, kind-limited permission with an unscoped one at the
+	// exact moment it was supposed to stop working.
+	//
+	// The storage layer has always enforced the expiry; what it could not do
+	// was say WHICH refusal this was, because every backend returned a bare
+	// ErrNotAuthorized for "expired" and for "never existed" alike.
+	// ErrPermissionExpired wraps ErrNotAuthorized, so nothing else changes.
+	if errors.Is(permErr, storage.ErrPermissionExpired) {
+		slog.Warn("grant expired", "client", clientPubkey[:16]+"...", "method", request.Method)
+		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, "grant expired", useNIP44)
+		return
+	}
+
 	// No permission - check for bunker secret on connect requests
 	// NIP-46 connect params: [pubkey, secret?]
 	if request.Method == "connect" && len(request.Params) >= 2 {

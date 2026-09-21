@@ -809,7 +809,7 @@ func (ss *SQLiteStorage) GetPermission(ctx context.Context, keyID, userPubkey st
 		// the IsZero guard keeps an unreadable timestamp from silently
 		// revoking a permission that was never given one.
 		if !t.IsZero() && time.Now().After(t) {
-			return nil, ErrNotAuthorized
+			return nil, ErrPermissionExpired
 		}
 	}
 	if policyID.Valid {
