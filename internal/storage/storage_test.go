@@ -289,18 +289,22 @@ func TestMemoryStorage_ListPermissions(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryStorage()
 
-	key := &Key{ID: "key1", Pubkey: "keypub123"}
-	s.CreateKey(ctx, key)
+	key1 := &Key{ID: "key1", Pubkey: "keypub123"}
+	key2 := &Key{ID: "key2", Pubkey: "keypub456"}
+	s.CreateKey(ctx, key1)
+	s.CreateKey(ctx, key2)
 
+	// One grant per key (the one-active-grant invariant means a second
+	// client on the same key displaces the first).
 	s.SetPermission(ctx, &Permission{KeyID: "keypub123", UserPubkey: "user1", Methods: []string{"ping"}})
-	s.SetPermission(ctx, &Permission{KeyID: "keypub123", UserPubkey: "user2", Methods: []string{"sign_event"}})
+	s.SetPermission(ctx, &Permission{KeyID: "keypub456", UserPubkey: "user2", Methods: []string{"sign_event"}})
 
 	perms, err := s.ListPermissions(ctx, "keypub123")
 	if err != nil {
 		t.Fatalf("ListPermissions() error = %v", err)
 	}
-	if len(perms) != 2 {
-		t.Errorf("ListPermissions() = %d, want 2", len(perms))
+	if len(perms) != 1 {
+		t.Errorf("ListPermissions() = %d, want 1", len(perms))
 	}
 }
 

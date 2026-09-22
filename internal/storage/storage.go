@@ -109,6 +109,14 @@ type Permission struct {
 	CustomName string     `json:"custom_name,omitempty"` // User-defined label (overrides AppName in display)
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+
+	// Takeover audit: when a new grant is issued for the same role key, the
+	// previous grant is displaced (not deleted) so the audit trail is
+	// preserved. A natural expiry has RevokedAt nil and ExpiresAt in the
+	// past. A displacement has RevokedAt set to the moment the new grant
+	// arrived, and RevokedBy set to the client pubkey that displaced it.
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	RevokedBy string     `json:"revoked_by,omitempty"`
 }
 
 // Session represents an active NIP-46 session
@@ -851,6 +859,18 @@ func (m *MemoryStorage) SetPermission(ctx context.Context, perm *Permission) err
 	if m.permissions[perm.KeyID] == nil {
 		m.permissions[perm.KeyID] = make(map[string]*Permission)
 	}
+
+	// Displace all other active grants on this key. The displacement and
+	// the new grant happen atomically (under the same lock) so there is
+	// never a window with two live grants or zero.
+	now := time.Now()
+	for pubkey, existing := range m.permissions[perm.KeyID] {
+		if pubkey != perm.UserPubkey && existing.RevokedAt == nil {
+			existing.RevokedAt = &now
+			existing.RevokedBy = perm.UserPubkey
+		}
+	}
+
 	m.permissions[perm.KeyID][perm.UserPubkey] = perm
 	return nil
 }
@@ -867,6 +887,10 @@ func (m *MemoryStorage) GetPermission(ctx context.Context, keyID, userPubkey str
 	perm, exists := perms[userPubkey]
 	if !exists {
 		return nil, ErrNotAuthorized
+	}
+
+	if perm.RevokedAt != nil {
+		return nil, ErrPermissionExpired
 	}
 
 	if perm.ExpiresAt != nil && time.Now().After(*perm.ExpiresAt) {
@@ -887,7 +911,9 @@ func (m *MemoryStorage) ListPermissions(ctx context.Context, keyID string) ([]*P
 
 	result := make([]*Permission, 0, len(perms))
 	for _, perm := range perms {
-		result = append(result, perm)
+		if perm.RevokedAt == nil {
+			result = append(result, perm)
+		}
 	}
 	return result, nil
 }
