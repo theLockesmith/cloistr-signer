@@ -770,7 +770,7 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 	if expiresAt.Valid {
 		perm.ExpiresAt = &expiresAt.Time
 		if time.Now().After(*perm.ExpiresAt) {
-			return nil, ErrNotAuthorized
+			return nil, ErrPermissionExpired
 		}
 	}
 	if policyID.Valid {

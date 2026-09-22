@@ -280,8 +280,8 @@ func TestMemoryStorage_GetPermissionExpired(t *testing.T) {
 	s.SetPermission(ctx, perm)
 
 	_, err := s.GetPermission(ctx, "keypub123", "userpub456")
-	if err != ErrNotAuthorized {
-		t.Errorf("GetPermission() expired error = %v, want %v", err, ErrNotAuthorized)
+	if err != ErrPermissionExpired {
+		t.Errorf("GetPermission() expired error = %v, want %v", err, ErrPermissionExpired)
 	}
 }
 

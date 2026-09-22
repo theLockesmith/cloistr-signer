@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -17,7 +18,7 @@ func TestSQLiteStorage_GetPermission_ExpiryIsEnforced(t *testing.T) {
 		expiresAt *time.Time
 		wantErr   error
 	}{
-		{"expired an hour ago", ptrTime(time.Now().Add(-time.Hour)), ErrNotAuthorized},
+		{"expired an hour ago", ptrTime(time.Now().Add(-time.Hour)), ErrPermissionExpired},
 		{"expires in an hour", ptrTime(time.Now().Add(time.Hour)), nil},
 		{"no expiry at all", nil, nil},
 	}
@@ -45,7 +46,7 @@ func TestSQLiteStorage_GetPermission_ExpiryIsEnforced(t *testing.T) {
 			}
 
 			perm, err := s.GetPermission(ctx, "keypub123", "userpub456")
-			if err != tc.wantErr {
+			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("GetPermission() error = %v, want %v (perm %+v)", err, tc.wantErr, perm)
 			}
 			if tc.wantErr == nil && perm == nil {

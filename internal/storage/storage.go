@@ -17,6 +17,17 @@ var (
 	ErrKeyNotFound          = errors.New("key not found")
 	ErrKeyExists            = errors.New("key already exists")
 	ErrNotAuthorized        = errors.New("not authorized")
+	// ErrPermissionExpired is returned when a permission row EXISTS and its
+	// own expiry has passed. It wraps ErrNotAuthorized, so every caller that
+	// tests errors.Is(err, ErrNotAuthorized) keeps working unchanged.
+	//
+	// The distinction is load-bearing and is not cosmetic logging. The NIP-46
+	// request path treats a bare ErrNotAuthorized as "a client we have not
+	// met", and on a key that does not require approval it answers that by
+	// minting a temporary permission with Methods ["*"] and no kind limit. So
+	// a grant whose expiry passes must not be allowed to look like a stranger:
+	// it would be UPGRADED rather than revoked.
+	ErrPermissionExpired    = fmt.Errorf("permission expired: %w", ErrNotAuthorized)
 	ErrSessionNotFound      = errors.New("session not found")
 	ErrPolicyNotFound       = errors.New("policy not found")
 	ErrTokenNotFound        = errors.New("token not found")
@@ -859,7 +870,7 @@ func (m *MemoryStorage) GetPermission(ctx context.Context, keyID, userPubkey str
 	}
 
 	if perm.ExpiresAt != nil && time.Now().After(*perm.ExpiresAt) {
-		return nil, ErrNotAuthorized
+		return nil, ErrPermissionExpired
 	}
 
 	return perm, nil
