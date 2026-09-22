@@ -143,9 +143,14 @@ func (ss *SQLiteStorage) initSchema() error {
 		custom_name TEXT,
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		last_used_at TEXT,
+		revoked_at TEXT,
+		revoked_by TEXT,
 		PRIMARY KEY (key_id, user_pubkey),
 		FOREIGN KEY (key_id) REFERENCES signer_keys(pubkey) ON DELETE CASCADE
 	);
+
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_grant_per_key
+		ON signer_permissions(key_id) WHERE revoked_at IS NULL;
 
 	-- Pending requests
 	CREATE TABLE IF NOT EXISTS signer_pending_requests (
@@ -751,9 +756,30 @@ func (ss *SQLiteStorage) SetPermission(ctx context.Context, perm *Permission) er
 	if perm.CreatedAt.IsZero() {
 		perm.CreatedAt = time.Now()
 	}
-	_, err := ss.db.ExecContext(ctx, `
-		INSERT INTO signer_permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+	// The displacement and the new grant happen in one transaction so there
+	// is never a window with two live grants or zero.
+	tx, err := ss.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Displace all other active grants on this key.
+	_, err = tx.ExecContext(ctx, `
+		UPDATE signer_permissions
+		SET revoked_at = datetime('now'), revoked_by = ?
+		WHERE key_id = ? AND user_pubkey != ? AND revoked_at IS NULL`,
+		perm.UserPubkey, perm.KeyID, perm.UserPubkey)
+	if err != nil {
+		return err
+	}
+
+	// Upsert the new (or returning) client's grant. A revoked row for
+	// this same client is cleared back to active.
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO signer_permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, revoked_at, revoked_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
 		ON CONFLICT (key_id, user_pubkey) DO UPDATE SET
 			methods = excluded.methods,
 			allowed_kinds = excluded.allowed_kinds,
@@ -763,12 +789,18 @@ func (ss *SQLiteStorage) SetPermission(ctx context.Context, perm *Permission) er
 			app_name = COALESCE(excluded.app_name, signer_permissions.app_name),
 			app_url = COALESCE(excluded.app_url, signer_permissions.app_url),
 			app_image = COALESCE(excluded.app_image, signer_permissions.app_image),
-			custom_name = COALESCE(excluded.custom_name, signer_permissions.custom_name)`,
+			custom_name = COALESCE(excluded.custom_name, signer_permissions.custom_name),
+			revoked_at = NULL,
+			revoked_by = NULL`,
 		perm.KeyID, perm.UserPubkey, stringsToJSONArray(perm.Methods), intsToJSONArray(perm.AllowedKinds),
 		nullTimeStr(perm.ExpiresAt), nullStr(perm.PolicyID), boolPtrToInt(perm.RequireApproval),
 		nullStr(perm.AppName), nullStr(perm.AppURL), nullStr(perm.AppImage), nullStr(perm.CustomName),
 		formatTime(perm.CreatedAt), nullTimeStr(perm.LastUsedAt))
-	return err
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (ss *SQLiteStorage) GetPermission(ctx context.Context, keyID, userPubkey string) (*Permission, error) {
@@ -778,7 +810,7 @@ func (ss *SQLiteStorage) GetPermission(ctx context.Context, keyID, userPubkey st
 
 	err := ss.db.QueryRowContext(ctx, `
 		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at
-		FROM signer_permissions WHERE key_id = ? AND user_pubkey = ?`, keyID, userPubkey).
+		FROM signer_permissions WHERE key_id = ? AND user_pubkey = ? AND revoked_at IS NULL`, keyID, userPubkey).
 		Scan(&perm.KeyID, &perm.UserPubkey, &methods, &allowedKinds, &expiresAt, &policyID, &requireApproval,
 			&appName, &appURL, &appImage, &customName, &createdAt, &lastUsedAt)
 	if err == sql.ErrNoRows {
@@ -842,7 +874,7 @@ func (ss *SQLiteStorage) GetPermission(ctx context.Context, keyID, userPubkey st
 func (ss *SQLiteStorage) ListPermissions(ctx context.Context, keyID string) ([]*Permission, error) {
 	rows, err := ss.db.QueryContext(ctx, `
 		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at
-		FROM signer_permissions WHERE key_id = ?`, keyID)
+		FROM signer_permissions WHERE key_id = ? AND revoked_at IS NULL`, keyID)
 	if err != nil {
 		return nil, err
 	}

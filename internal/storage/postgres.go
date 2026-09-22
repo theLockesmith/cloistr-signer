@@ -156,7 +156,33 @@ func (ps *PostgresStorage) migrate() error {
 	-- Add delegate_pubkey column for tracking original requester in proxy chains (Phase 12)
 	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS delegate_pubkey TEXT;
 
+	-- Grant takeover audit: when a new client connects to a role key, the old
+	-- grant is displaced (not deleted). revoked_at records the moment, revoked_by
+	-- records who displaced it. A natural expiry has revoked_at NULL and
+	-- expires_at in the past; a displacement has both filled.
+	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS revoked_by TEXT;
+
 	CREATE INDEX IF NOT EXISTS idx_signer_permissions_key_id ON signer_permissions(key_id);
+
+	-- Before creating the one-active-grant constraint, revoke all but the
+	-- most recently used grant per key (migration for existing data).
+	WITH ranked AS (
+		SELECT key_id, user_pubkey,
+		       ROW_NUMBER() OVER (PARTITION BY key_id ORDER BY COALESCE(last_used_at, created_at) DESC) as rn
+		FROM signer_permissions WHERE revoked_at IS NULL
+	)
+	UPDATE signer_permissions SET revoked_at = NOW(), revoked_by = 'schema-migration'
+	FROM ranked
+	WHERE signer_permissions.key_id = ranked.key_id
+	  AND signer_permissions.user_pubkey = ranked.user_pubkey
+	  AND ranked.rn > 1;
+
+	-- One active grant per role key, enforced at the database level. The
+	-- partial index covers only non-revoked rows, so displaced grants
+	-- (revoked_at IS NOT NULL) do not count.
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_grant_per_key
+		ON signer_permissions(key_id) WHERE revoked_at IS NULL;
 
 	CREATE TABLE IF NOT EXISTS signer_sessions (
 		id TEXT PRIMARY KEY,
@@ -729,9 +755,30 @@ func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) 
 	if perm.CreatedAt.IsZero() {
 		perm.CreatedAt = time.Now()
 	}
-	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO signer_permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+
+	// The displacement and the new grant happen in one transaction so there
+	// is never a window with two live grants or zero.
+	tx, err := ps.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Displace all other active grants on this key.
+	_, err = tx.ExecContext(ctx, `
+		UPDATE signer_permissions
+		SET revoked_at = NOW(), revoked_by = $2
+		WHERE key_id = $1 AND user_pubkey != $2 AND revoked_at IS NULL`,
+		perm.KeyID, perm.UserPubkey)
+	if err != nil {
+		return err
+	}
+
+	// Upsert the new (or returning) client's grant. A revoked row for
+	// this same client is cleared back to active.
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO signer_permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, revoked_at, revoked_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL)
 		ON CONFLICT (key_id, user_pubkey) DO UPDATE SET
 			methods = EXCLUDED.methods,
 			allowed_kinds = EXCLUDED.allowed_kinds,
@@ -741,10 +788,16 @@ func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) 
 			app_name = COALESCE(EXCLUDED.app_name, signer_permissions.app_name),
 			app_url = COALESCE(EXCLUDED.app_url, signer_permissions.app_url),
 			app_image = COALESCE(EXCLUDED.app_image, signer_permissions.app_image),
-			custom_name = COALESCE(EXCLUDED.custom_name, signer_permissions.custom_name)`,
+			custom_name = COALESCE(EXCLUDED.custom_name, signer_permissions.custom_name),
+			revoked_at = NULL,
+			revoked_by = NULL`,
 		perm.KeyID, perm.UserPubkey, pq.Array(perm.Methods), intArrayToInt64(perm.AllowedKinds), perm.ExpiresAt, perm.PolicyID, perm.RequireApproval,
 		nullString(perm.AppName), nullString(perm.AppURL), nullString(perm.AppImage), nullString(perm.CustomName), perm.CreatedAt, perm.LastUsedAt)
-	return err
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey string) (*Permission, error) {
@@ -756,7 +809,7 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval,
 		       app_name, app_url, app_image, custom_name, created_at, last_used_at
-		FROM signer_permissions WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey).
+		FROM signer_permissions WHERE key_id = $1 AND user_pubkey = $2 AND revoked_at IS NULL`, keyID, userPubkey).
 		Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval,
 			&appName, &appURL, &appImage, &customName, &perm.CreatedAt, &lastUsedAt)
 	if err == sql.ErrNoRows {
@@ -801,7 +854,7 @@ func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([
 	rows, err := ps.db.QueryContext(ctx, `
 		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval,
 		       app_name, app_url, app_image, custom_name, created_at, last_used_at
-		FROM signer_permissions WHERE key_id = $1`, keyID)
+		FROM signer_permissions WHERE key_id = $1 AND revoked_at IS NULL`, keyID)
 	if err != nil {
 		return nil, err
 	}
