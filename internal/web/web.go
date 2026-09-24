@@ -381,8 +381,8 @@ func (h *Handler) registerSPARoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/web/api/login", h.handleAPILogin)
 	mux.HandleFunc("/web/api/login/nip07", h.handleAPINIP07Login)
 	mux.HandleFunc("/web/api/register", h.handleAPIRegister)
-	mux.HandleFunc("/web/api/approve", h.handleAPIApprove)
-	mux.HandleFunc("/web/api/deny", h.handleAPIDeny)
+	mux.HandleFunc("/web/api/approve", h.requireAuth(h.handleAPIApprove))
+	mux.HandleFunc("/web/api/deny", h.requireAuth(h.handleAPIDeny))
 	mux.HandleFunc("/web/api/settings/pubkey", h.requireAuth(h.handleAPISettingsPubkey))
 	mux.HandleFunc("/web/api/relay/check", h.requireAuth(h.handleAPIRelayCheck))
 
@@ -428,8 +428,8 @@ func (h *Handler) registerTemplateRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/web/api/login", h.handleAPILogin)
 	mux.HandleFunc("/web/api/login/nip07", h.handleAPINIP07Login)
 	mux.HandleFunc("/web/api/register", h.handleAPIRegister)
-	mux.HandleFunc("/web/api/approve", h.handleAPIApprove)
-	mux.HandleFunc("/web/api/deny", h.handleAPIDeny)
+	mux.HandleFunc("/web/api/approve", h.requireAuth(h.handleAPIApprove))
+	mux.HandleFunc("/web/api/deny", h.requireAuth(h.handleAPIDeny))
 	mux.HandleFunc("/web/api/settings/pubkey", h.requireAuth(h.handleAPISettingsPubkey))
 	mux.HandleFunc("/web/api/relay/check", h.requireAuth(h.handleAPIRelayCheck))
 }
