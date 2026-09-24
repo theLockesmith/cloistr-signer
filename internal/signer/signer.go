@@ -806,23 +806,12 @@ func (s *Signer) processRequest(ctx context.Context, targetPubkey, privateKey, c
 		}
 	}
 
-	// No permission - check if we should auto-approve or wait for authorization
-	// Use hybrid approval check: permission (nil here) -> key -> global config
+	// No permission and no valid bunker secret: refuse. The old path minted a
+	// temporary Methods:["*"] permission when RequireApproval was false, letting
+	// any relay peer sign with any held key.
 	if !s.shouldRequireApproval(ctx, targetPubkey, nil) {
-		// Auto-approve: create a temporary permission with full access
-		slog.Info("auto-approving request (approval not required)", "client", clientPubkey[:16]+"...", "method", request.Method)
-		tempPerm := &storage.Permission{
-			KeyID:      targetPubkey,
-			UserPubkey: clientPubkey,
-			Methods:    []string{"*"}, // Allow all methods
-		}
-		result, err := s.handleRequest(ctx, targetPubkey, privateKey, clientPubkey, request, tempPerm)
-		if err != nil {
-			slog.Error("request handling failed", "method", request.Method, "error", err)
-			s.sendError(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, err.Error(), useNIP44)
-			return
-		}
-		s.sendResult(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, result, useNIP44)
+		slog.Warn("unknown client refused (no grant exists)", "client", clientPubkey[:16]+"...", "method", request.Method)
+		s.sendError(ctx, targetPubkey, privateKey, clientPubkey, sourceRelay, request.ID, "unauthorized", useNIP44)
 		return
 	}
 

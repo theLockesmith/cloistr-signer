@@ -4748,19 +4748,12 @@ func (h *Handler) handleExportFrostShare(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if h.frostKeyGen == nil {
-		h.errorResponse(w, http.StatusServiceUnavailable, "FROST not enabled")
-		return
-	}
-
-	// Parse share index
-	shareIndex, err := strconv.Atoi(shareIndexStr)
+	claims, err := h.validateAuthHeader(r)
 	if err != nil {
-		h.errorResponse(w, http.StatusBadRequest, "invalid share index")
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
 		return
 	}
 
-	// Get the FROST key
 	key, err := h.storage.GetFrostKey(r.Context(), keyID)
 	if err != nil {
 		if err == storage.ErrFrostKeyNotFound {
@@ -4771,7 +4764,22 @@ func (h *Handler) handleExportFrostShare(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Get the specific share
+	if key.OwnerID != "" && key.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusNotFound, "FROST key not found")
+		return
+	}
+
+	if h.frostKeyGen == nil {
+		h.errorResponse(w, http.StatusServiceUnavailable, "FROST not enabled")
+		return
+	}
+
+	shareIndex, err := strconv.Atoi(shareIndexStr)
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid share index")
+		return
+	}
+
 	share, err := h.storage.GetFrostShareByKeyAndIndex(r.Context(), keyID, shareIndex)
 	if err != nil {
 		if err == storage.ErrFrostShareNotFound {
@@ -4790,7 +4798,7 @@ func (h *Handler) handleExportFrostShare(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	slog.Info("exported FROST share", "key_id", keyID, "share_index", shareIndex)
+	slog.Info("exported FROST share", "key_id", keyID, "share_index", shareIndex, "user_id", claims.UserID)
 	h.jsonResponse(w, http.StatusOK, bundle)
 }
 
@@ -4806,6 +4814,26 @@ type FrostSignResponse struct {
 func (h *Handler) handleFrostSign(w http.ResponseWriter, r *http.Request, keyID string) {
 	if r.Method != http.MethodPost {
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	frostKey, err := h.storage.GetFrostKey(r.Context(), keyID)
+	if err != nil {
+		if err == storage.ErrFrostKeyNotFound {
+			h.errorResponse(w, http.StatusNotFound, "FROST key not found")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to load key")
+		return
+	}
+	if frostKey.OwnerID != "" && frostKey.OwnerID != claims.UserID {
+		h.errorResponse(w, http.StatusNotFound, "FROST key not found")
 		return
 	}
 
