@@ -4926,6 +4926,23 @@ func (h *Handler) handleFrostShares(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleImportFrostShare(w http.ResponseWriter, r *http.Request) {
+	// Authentication runs BEFORE the FROST-enabled check, matching
+	// handleExportFrostShare, so an unauthenticated caller cannot learn whether
+	// this instance has FROST at all.
+	//
+	// This handler previously took no identity whatsoever. Two consequences, both
+	// measured: it created FROST keys with an EMPTY OwnerID, and the ownership
+	// guards on signing and export read `OwnerID != "" && OwnerID != claims.UserID`,
+	// so an empty owner skips the check entirely. Anyone could mint a key that any
+	// authenticated account could then sign with or export. And when the key already
+	// existed it wrote a share into it with no ownership test at all, which is an
+	// unauthenticated write into somebody else's threshold key.
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
 	if h.frostKeyGen == nil {
 		h.errorResponse(w, http.StatusServiceUnavailable, "FROST not enabled")
 		return
@@ -4991,7 +5008,13 @@ func (h *Handler) handleImportFrostShare(w http.ResponseWriter, r *http.Request)
 	var frostKeyID string
 
 	if err == nil && existingKey != nil {
-		// Key exists - use its ID
+		// Key exists - it must be the caller's before anything is written into it.
+		// Not-found rather than forbidden, so a stranger cannot confirm a key exists
+		// by probing pubkeys.
+		if existingKey.OwnerID != claims.UserID {
+			h.errorResponse(w, http.StatusNotFound, "FROST key not found")
+			return
+		}
 		frostKeyID = existingKey.ID
 
 		// Check if share already exists
@@ -5013,6 +5036,10 @@ func (h *Handler) handleImportFrostShare(w http.ResponseWriter, r *http.Request)
 			VerificationShares: verificationShares,
 			CreatedAt:          time.Now(),
 			CreatedBy:          "import",
+			// OwnerID is the whole point of this change. Without it the key is
+			// ownerless, and an ownerless key is exempt from the guards on signing
+			// and export.
+			OwnerID: claims.UserID,
 		}
 
 		if err := h.storage.CreateFrostKey(r.Context(), newKey); err != nil {
