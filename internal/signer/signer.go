@@ -945,7 +945,7 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 		metrics.RecordSigningRequest(req.Method, err == nil)
 		// Record latency for methods that do actual work
 		switch req.Method {
-		case "sign_event", "batch_sign", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt":
+		case "sign_event", "batch_sign", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt", "cloistr_ecdh_tag":
 			metrics.RecordSigningLatency(req.Method, time.Since(start))
 		}
 	}()
@@ -1036,6 +1036,8 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 		return s.handleNIP44Encrypt(privateKey, req.Params)
 	case "nip44_decrypt":
 		return s.handleNIP44Decrypt(privateKey, req.Params)
+	case "cloistr_ecdh_tag":
+		return s.handleECDHTag(privateKey, req.Params)
 	default:
 		return "", fmt.Errorf("unknown method: %s", req.Method)
 	}
@@ -1044,7 +1046,7 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 // shouldAuditMethod returns true if the method should be audit logged
 func (s *Signer) shouldAuditMethod(method string) bool {
 	switch method {
-	case "sign_event", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt":
+	case "sign_event", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt", "cloistr_ecdh_tag":
 		return true
 	default:
 		return false
@@ -1236,7 +1238,7 @@ func (s *Signer) handleInternalProxy(ctx context.Context, upstreamPubkey, upstre
 	perm := &storage.Permission{
 		KeyID:          upstreamPubkey,
 		UserPubkey:     proxyPubkey,
-		Methods:        []string{"sign_event", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt", "get_public_key"},
+		Methods:        []string{"sign_event", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt", "cloistr_ecdh_tag", "get_public_key"},
 		DelegatePubkey: originalClient, // Track original requester for audit
 	}
 
