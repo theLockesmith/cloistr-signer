@@ -1,54 +1,57 @@
 package signer
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"testing"
 
 	"github.com/nbd-wtf/go-nostr"
-	"github.com/nbd-wtf/go-nostr/nip44"
 )
 
-// TestHandleECDHTag verifies that cloistr_ecdh_tag computes the same bucket
-// tag that Space's bucketCrypto.ts computeHandoffBucket produces:
-//
-//	tag = hex(SHA-256(ECDH_shared || "handoff" || BE32(window_id))[0])
-func TestHandleECDHTag(t *testing.T) {
-	sk := nostr.GeneratePrivateKey()
-	peerSk := nostr.GeneratePrivateKey()
-	peerPk, _ := nostr.GetPublicKey(peerSk)
+// Known-answer vectors from the kit's own code (thread_wrap.py _ecdh_hex + handoff_bucket).
+// sk1 = 1111...1111, pk1 = 4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa
+// sk2 = 2222...2222, pk2 = 466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27
+func TestHandleECDHTag_KnownVectors(t *testing.T) {
+	sk1 := "1111111111111111111111111111111111111111111111111111111111111111"
+	pk2 := "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
 
-	windowID := "20000" // arbitrary window id
-
-	result, err := testECDHTag(sk, peerPk, windowID)
-	if err != nil {
-		t.Fatalf("handleECDHTag: %v", err)
+	tests := []struct {
+		window   string
+		expected string
+	}{
+		{"20000", "38"},
+		{"20357", "9f"},
 	}
 
-	if len(result) != 2 {
-		t.Fatalf("expected 2-char hex tag, got %q", result)
+	for _, tt := range tests {
+		result, err := testECDHTag(sk1, pk2, tt.window)
+		if err != nil {
+			t.Fatalf("window %s: %v", tt.window, err)
+		}
+		if result != tt.expected {
+			t.Errorf("window %s: got %q, want %q", tt.window, result, tt.expected)
+		}
+	}
+}
+
+func TestHandleECDHTag_KnownVectors_Reverse(t *testing.T) {
+	sk2 := "2222222222222222222222222222222222222222222222222222222222222222"
+	pk1 := "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
+
+	tests := []struct {
+		window   string
+		expected string
+	}{
+		{"20000", "38"},
+		{"20357", "9f"},
 	}
 
-	// Cross-validate: compute the expected bucket the same way Space does
-	convKey, err := nip44.GenerateConversationKey(peerPk, sk)
-	if err != nil {
-		t.Fatalf("GenerateConversationKey: %v", err)
-	}
-
-	wid := uint32(20000)
-	wBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(wBytes, wid)
-	label := []byte("handoff")
-	input := make([]byte, 0, 32+len(label)+4)
-	input = append(input, convKey[:]...)
-	input = append(input, label...)
-	input = append(input, wBytes...)
-	expected := sha256.Sum256(input)
-	expectedHex := hex.EncodeToString(expected[:1])
-
-	if result != expectedHex {
-		t.Errorf("tag mismatch: got %q, want %q", result, expectedHex)
+	for _, tt := range tests {
+		result, err := testECDHTag(sk2, pk1, tt.window)
+		if err != nil {
+			t.Fatalf("window %s: %v", tt.window, err)
+		}
+		if result != tt.expected {
+			t.Errorf("window %s (reverse): got %q, want %q", tt.window, result, tt.expected)
+		}
 	}
 }
 
@@ -90,8 +93,6 @@ func TestHandleECDHTag_DifferentWindowsDifferentTags(t *testing.T) {
 		t.Fatalf("window 20001: %v", err)
 	}
 
-	// Tags CAN collide (1/256 chance), but should almost never for different windows
-	// This is a smoke test, not a statistical guarantee
 	if tag1 == tag2 {
 		t.Logf("tags collided (possible but unlikely): %s", tag1)
 	}
@@ -116,7 +117,6 @@ func TestHandleECDHTag_BadPubkey(t *testing.T) {
 	}
 }
 
-// testECDHTag calls handleECDHTag with the given private key and params.
 func testECDHTag(privateKey string, params ...string) (string, error) {
 	s := &Signer{}
 	return s.handleECDHTag(privateKey, params)
