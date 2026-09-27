@@ -2,13 +2,13 @@ package signer
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
 
-	"github.com/nbd-wtf/go-nostr/nip44"
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
 // handleECDHTag computes a handoff bucket tag for the blind-mailbox thread
@@ -16,15 +16,17 @@ import (
 //
 // Params: [peer_pubkey, window_id]
 //
-//	peer_pubkey: hex-encoded secp256k1 pubkey of the other party
+//	peer_pubkey: hex-encoded secp256k1 x-only pubkey of the other party
 //	window_id:   decimal string of the epoch-day window number
 //
-// Returns: 2-char hex string, the first byte of
+// Returns: 2-char lowercase hex string (the first byte of the bucket hash).
 //
-//	SHA-256(ECDH_shared || "handoff" || BE32(window_id))
+// Algorithm (must match the kit's handoff_bucket / _ecdh_hex):
 //
-// where ECDH_shared is the NIP-44 conversation key between privateKey and
-// peer_pubkey. Both sides of the pair compute the same tag; nobody else can.
+//	ecdh_x      = secp256k1_scalar_mult(sk, lift_x(peer_pubkey)).x   (32 bytes BE)
+//	ecdh_hex    = lowercase_hex( SHA-256(ecdh_x) )                    (64-char string)
+//	bucket_hash = SHA-256( UTF-8( ecdh_hex + "handoff" + decimal(window_id) ) )
+//	tag         = hex( bucket_hash[0] )
 func (s *Signer) handleECDHTag(privateKey string, params []string) (string, error) {
 	if len(params) < 2 {
 		return "", errors.New("missing parameters (need peer_pubkey and window_id)")
@@ -33,25 +35,37 @@ func (s *Signer) handleECDHTag(privateKey string, params []string) (string, erro
 	peerPubkey := normalizePubkey(params[0])
 	windowIDStr := params[1]
 
-	windowID, err := strconv.ParseUint(windowIDStr, 10, 32)
-	if err != nil {
+	if _, err := strconv.ParseUint(windowIDStr, 10, 64); err != nil {
 		return "", fmt.Errorf("invalid window_id: %w", err)
 	}
 
-	convKey, err := nip44.GenerateConversationKey(peerPubkey, privateKey)
+	privKeyBytes, err := hex.DecodeString(privateKey)
 	if err != nil {
-		return "", fmt.Errorf("failed to compute ECDH shared key: %w", err)
+		return "", fmt.Errorf("invalid private key: %w", err)
+	}
+	privKey, _ := btcec.PrivKeyFromBytes(privKeyBytes)
+
+	pubKeyBytes, err := hex.DecodeString("02" + peerPubkey)
+	if err != nil {
+		return "", fmt.Errorf("invalid peer pubkey: %w", err)
+	}
+	pubKey, err := btcec.ParsePubKey(pubKeyBytes)
+	if err != nil {
+		return "", fmt.Errorf("invalid peer pubkey: %w", err)
 	}
 
-	wBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(wBytes, uint32(windowID))
+	var point, result secp256k1.JacobianPoint
+	pubKey.AsJacobian(&point)
+	secp256k1.ScalarMultNonConst(&privKey.Key, &point, &result)
+	result.ToAffine()
 
-	label := []byte("handoff")
-	input := make([]byte, 0, 32+len(label)+4)
-	input = append(input, convKey[:]...)
-	input = append(input, label...)
-	input = append(input, wBytes...)
+	var xBytes [32]byte
+	result.X.PutBytesUnchecked(xBytes[:])
 
-	hash := sha256.Sum256(input)
-	return hex.EncodeToString(hash[:1]), nil
+	ecdhHash := sha256.Sum256(xBytes[:])
+	ecdhHex := hex.EncodeToString(ecdhHash[:])
+
+	input := ecdhHex + "handoff" + windowIDStr
+	hash := sha256.Sum256([]byte(input))
+	return fmt.Sprintf("%02x", hash[0]), nil
 }
