@@ -913,6 +913,23 @@ func (ps *PostgresStorage) UpdatePermissionLastUsed(ctx context.Context, keyID, 
 	return err
 }
 
+// RenewPermission: the live/revoked/has-expiry checks are in the WHERE clause so
+// the rule is enforced atomically by the database, not by a read-then-write.
+func (ps *PostgresStorage) RenewPermission(ctx context.Context, keyID, userPubkey string, expiresAt time.Time) error {
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE signer_permissions SET expires_at = $3
+		WHERE key_id = $1 AND user_pubkey = $2
+		  AND revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at > NOW()`,
+		keyID, userPubkey, expiresAt)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return ErrPermissionExpired
+	}
+	return nil
+}
+
 func (ps *PostgresStorage) UpdatePermissionName(ctx context.Context, keyID, userPubkey, customName string) error {
 	result, err := ps.db.ExecContext(ctx, `
 		UPDATE signer_permissions SET custom_name = $3 WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey, nullString(customName))
