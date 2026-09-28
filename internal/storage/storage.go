@@ -438,6 +438,11 @@ type Storage interface {
 	DeletePermission(ctx context.Context, keyID, userPubkey string) error
 	UpdatePermissionLastUsed(ctx context.Context, keyID, userPubkey string) error
 	UpdatePermissionName(ctx context.Context, keyID, userPubkey, customName string) error
+	// RenewPermission moves a LIVE grant's expiry to expiresAt. It changes nothing
+	// else: methods and allowed kinds stay exactly as approved. A grant that is
+	// revoked, already expired, or has no expiry is refused with ErrPermissionExpired
+	// (a lapsed grant needs a fresh approval, not a revival).
+	RenewPermission(ctx context.Context, keyID, userPubkey string, expiresAt time.Time) error
 
 	// Session management
 	CreateSession(ctx context.Context, session *Session) error
@@ -947,6 +952,18 @@ func (m *MemoryStorage) UpdatePermissionLastUsed(ctx context.Context, keyID, use
 
 	now := time.Now()
 	perm.LastUsedAt = &now
+	return nil
+}
+
+func (m *MemoryStorage) RenewPermission(ctx context.Context, keyID, userPubkey string, expiresAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	perm, ok := m.permissions[keyID][userPubkey]
+	if !ok || perm.RevokedAt != nil || perm.ExpiresAt == nil || !time.Now().Before(*perm.ExpiresAt) {
+		return ErrPermissionExpired
+	}
+	t := expiresAt
+	perm.ExpiresAt = &t
 	return nil
 }
 

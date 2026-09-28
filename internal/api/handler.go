@@ -573,6 +573,16 @@ func (h *Handler) handleKeyByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		if len(parts) == 4 && parts[3] == "renew" {
+			// /api/v1/keys/{id}/permissions/{pubkey}/renew
+			if r.Method != http.MethodPost {
+				h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			h.handleRenewPermission(w, r, keyID, parts[2])
+			return
+		}
+
 		if len(parts) == 3 {
 			// /api/v1/keys/{id}/permissions/{pubkey}
 			pubkey := parts[2]
@@ -1229,6 +1239,91 @@ func (h *Handler) handleDeletePermission(w http.ResponseWriter, r *http.Request,
 
 	slog.Info("deleted permission", "key", keyID, "user", pubkey[:16]+"...")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// maxGrantRenewal caps how far one renewal can push a grant's expiry, measured
+// from NOW. A caller renewing on a schedule keeps a grant alive indefinitely only
+// while it keeps a live session; stop renewing and the grant lapses within this.
+const maxGrantRenewal = 30 * 24 * time.Hour
+
+type RenewPermissionRequest struct {
+	// Days to extend from now. Omitted or 0 means the maximum (30).
+	Days int `json:"days,omitempty"`
+}
+
+// handleRenewPermission lets a key's OWNER extend a live grant on that key.
+//
+// It exists so that long-running clients (the fleet's role keys) do not need a
+// person to re-approve every grant on a timer. It grants the owner nothing they
+// could not already do: the owner can approve a fresh grant on their own key at
+// any time. What it deliberately cannot do:
+//   - widen a grant: methods and allowed kinds are untouched;
+//   - revive a grant that was revoked, displaced, or has already lapsed;
+//   - work without a live owner session: validateAuthHeader rejects a revoked or
+//     expired session, so ending the owner's session, or changing their
+//     password, stops every renewal at once;
+//   - extend beyond maxGrantRenewal from now, or shorten a grant.
+func (h *Handler) handleRenewPermission(w http.ResponseWriter, r *http.Request, keyID, pubkey string) {
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+
+	var req RenewPermissionRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req) // empty body = maximum
+	}
+	if req.Days < 0 {
+		h.errorResponse(w, http.StatusBadRequest, "days must not be negative")
+		return
+	}
+	extend := maxGrantRenewal
+	if req.Days > 0 && time.Duration(req.Days)*24*time.Hour < maxGrantRenewal {
+		extend = time.Duration(req.Days) * 24 * time.Hour
+	}
+
+	key, err := h.storage.GetKey(r.Context(), keyID)
+	if err != nil || key == nil || key.OwnerID != claims.UserID {
+		// Same answer for "no such key" and "not yours": do not confirm existence.
+		h.errorResponse(w, http.StatusNotFound, "key not found")
+		return
+	}
+
+	perm, err := h.storage.GetPermission(r.Context(), key.Pubkey, pubkey)
+	if err != nil || perm == nil {
+		h.errorResponse(w, http.StatusConflict, "grant is expired, revoked or missing; approve a new one")
+		return
+	}
+	if perm.ExpiresAt == nil {
+		h.errorResponse(w, http.StatusBadRequest, "grant does not expire; nothing to renew")
+		return
+	}
+
+	newExpiry := time.Now().Add(extend).UTC().Truncate(time.Second)
+	if !newExpiry.After(*perm.ExpiresAt) {
+		// Never shorten. Already later than a renewal would set: report it as is.
+		h.jsonResponse(w, http.StatusOK, map[string]interface{}{"expires_at": perm.ExpiresAt.UTC(), "renewed": false})
+		return
+	}
+
+	if err := h.storage.RenewPermission(r.Context(), key.Pubkey, pubkey, newExpiry); err != nil {
+		if errors.Is(err, storage.ErrPermissionExpired) {
+			h.errorResponse(w, http.StatusConflict, "grant is expired, revoked or missing; approve a new one")
+			return
+		}
+		h.errorResponse(w, http.StatusInternalServerError, "failed to renew grant")
+		return
+	}
+
+	slog.Info("grant renewed by key owner",
+		"key", key.Pubkey[:16]+"...",
+		"client", pubkey[:min(16, len(pubkey))]+"...",
+		"owner", claims.UserID,
+		"old_expires_at", perm.ExpiresAt.UTC(),
+		"new_expires_at", newExpiry,
+	)
+	h.jsonResponse(w, http.StatusOK, map[string]interface{}{"expires_at": newExpiry, "renewed": true})
 }
 
 type UpdatePermissionNameRequest struct {

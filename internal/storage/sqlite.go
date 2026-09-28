@@ -942,6 +942,18 @@ func (ss *SQLiteStorage) UpdatePermissionLastUsed(ctx context.Context, keyID, us
 	return err
 }
 
+func (ss *SQLiteStorage) RenewPermission(ctx context.Context, keyID, userPubkey string, expiresAt time.Time) error {
+	perm, err := ss.GetPermission(ctx, keyID, userPubkey)
+	if err != nil || perm == nil || perm.ExpiresAt == nil || !time.Now().Before(*perm.ExpiresAt) {
+		return ErrPermissionExpired
+	}
+	t := expiresAt
+	_, err = ss.db.ExecContext(ctx, `
+		UPDATE signer_permissions SET expires_at = ? WHERE key_id = ? AND user_pubkey = ? AND revoked_at IS NULL`,
+		nullTimeStr(&t), keyID, userPubkey)
+	return err
+}
+
 func (ss *SQLiteStorage) UpdatePermissionName(ctx context.Context, keyID, userPubkey, customName string) error {
 	_, err := ss.db.ExecContext(ctx, `
 		UPDATE signer_permissions SET custom_name = ? WHERE key_id = ? AND user_pubkey = ?`,
