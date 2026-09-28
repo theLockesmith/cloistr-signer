@@ -244,6 +244,21 @@ func TestHandleNostrConnectSession_FirstTimeApproval(t *testing.T) {
 	if perm == nil {
 		t.Fatal("permission not set after approval")
 	}
+	// Sealed threads: an app a user approves must be able to locate that
+	// user's key hand-offs, or the user can never receive a thread key.
+	// Until 2026-09-28 the method existed but no approval ever granted it, so
+	// every signer user got "method not allowed".
+	for _, m := range []string{"nip44_decrypt", "cloistr_ecdh_tag"} {
+		found := false
+		for _, g := range perm.Methods {
+			if g == m {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("approved app lacks %q; granted methods = %v", m, perm.Methods)
+		}
+	}
 }
 
 // TestHandleNostrConnectSession_SilentReauth verifies that a subsequent

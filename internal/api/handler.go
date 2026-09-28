@@ -3913,7 +3913,7 @@ func (h *Handler) approveNostrConnect(ctx context.Context, key *storage.Key, cli
 	perm := &storage.Permission{
 		KeyID:      key.Pubkey,
 		UserPubkey: clientPubkey,
-		Methods:    []string{"connect", "sign_event", "get_public_key", "nip44_encrypt", "nip44_decrypt"},
+		Methods:    []string{"connect", "sign_event", "get_public_key", "nip44_encrypt", "nip44_decrypt", "cloistr_ecdh_tag"},
 		AppName:    appName,
 		AppURL:     appURL,
 		AppImage:   appImage,
