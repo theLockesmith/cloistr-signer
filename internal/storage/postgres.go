@@ -181,8 +181,12 @@ func (ps *PostgresStorage) migrate() error {
 	-- One active grant per role key, enforced at the database level. The
 	-- partial index covers only non-revoked rows, so displaced grants
 	-- (revoked_at IS NOT NULL) do not count.
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_grant_per_key
-		ON signer_permissions(key_id) WHERE revoked_at IS NULL;
+	-- Slotted grants: one active grant per (key_id, slot). Existing rows
+	-- default to 'default'. The old per-key index is replaced.
+	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS slot TEXT NOT NULL DEFAULT 'default';
+	DROP INDEX IF EXISTS idx_one_active_grant_per_key;
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_grant_per_key_slot
+		ON signer_permissions(key_id, slot) WHERE revoked_at IS NULL;
 
 	CREATE TABLE IF NOT EXISTS signer_sessions (
 		id TEXT PRIMARY KEY,
@@ -751,6 +755,13 @@ func (ps *PostgresStorage) SetPrimaryKey(ctx context.Context, ownerID, keyID str
 // Permission management
 
 func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) error {
+	if perm.Slot == "" {
+		perm.Slot = SlotDefault
+	}
+	if err := ValidateSlot(perm.Slot); err != nil {
+		return err
+	}
+
 	// Set created_at if not set
 	if perm.CreatedAt.IsZero() {
 		perm.CreatedAt = time.Now()
@@ -764,12 +775,12 @@ func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) 
 	}
 	defer tx.Rollback()
 
-	// Displace all other active grants on this key.
+	// Displace all other active grants on this key in the SAME slot.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE signer_permissions
 		SET revoked_at = NOW(), revoked_by = $2
-		WHERE key_id = $1 AND user_pubkey != $2 AND revoked_at IS NULL`,
-		perm.KeyID, perm.UserPubkey)
+		WHERE key_id = $1 AND user_pubkey != $2 AND slot = $3 AND revoked_at IS NULL`,
+		perm.KeyID, perm.UserPubkey, perm.Slot)
 	if err != nil {
 		return err
 	}
@@ -777,9 +788,10 @@ func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) 
 	// Upsert the new (or returning) client's grant. A revoked row for
 	// this same client is cleared back to active.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO signer_permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, revoked_at, revoked_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL)
+		INSERT INTO signer_permissions (key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, revoked_at, revoked_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, NULL)
 		ON CONFLICT (key_id, user_pubkey) DO UPDATE SET
+			slot = EXCLUDED.slot,
 			methods = EXCLUDED.methods,
 			allowed_kinds = EXCLUDED.allowed_kinds,
 			expires_at = EXCLUDED.expires_at,
@@ -791,7 +803,7 @@ func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) 
 			custom_name = COALESCE(EXCLUDED.custom_name, signer_permissions.custom_name),
 			revoked_at = NULL,
 			revoked_by = NULL`,
-		perm.KeyID, perm.UserPubkey, pq.Array(perm.Methods), intArrayToInt64(perm.AllowedKinds), perm.ExpiresAt, perm.PolicyID, perm.RequireApproval,
+		perm.KeyID, perm.UserPubkey, perm.Slot, pq.Array(perm.Methods), intArrayToInt64(perm.AllowedKinds), perm.ExpiresAt, perm.PolicyID, perm.RequireApproval,
 		nullString(perm.AppName), nullString(perm.AppURL), nullString(perm.AppImage), nullString(perm.CustomName), perm.CreatedAt, perm.LastUsedAt)
 	if err != nil {
 		return err
@@ -807,10 +819,10 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 	var allowedKinds pq.Int64Array
 	var requireApproval sql.NullBool
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval,
+		SELECT key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval,
 		       app_name, app_url, app_image, custom_name, created_at, last_used_at
 		FROM signer_permissions WHERE key_id = $1 AND user_pubkey = $2 AND revoked_at IS NULL`, keyID, userPubkey).
-		Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval,
+		Scan(&perm.KeyID, &perm.UserPubkey, &perm.Slot, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval,
 			&appName, &appURL, &appImage, &customName, &perm.CreatedAt, &lastUsedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotAuthorized
@@ -852,7 +864,7 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 
 func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([]*Permission, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval,
+		SELECT key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval,
 		       app_name, app_url, app_image, custom_name, created_at, last_used_at
 		FROM signer_permissions WHERE key_id = $1 AND revoked_at IS NULL`, keyID)
 	if err != nil {
@@ -867,7 +879,7 @@ func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([
 		var policyID, appName, appURL, appImage, customName sql.NullString
 		var allowedKinds pq.Int64Array
 		var requireApproval sql.NullBool
-		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval,
+		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, &perm.Slot, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval,
 			&appName, &appURL, &appImage, &customName, &perm.CreatedAt, &lastUsedAt); err != nil {
 			return nil, err
 		}

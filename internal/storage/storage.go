@@ -92,10 +92,25 @@ func (k *Key) IsProxy() bool {
 	return k.KeyType == KeyTypeProxy
 }
 
+const (
+	SlotDefault   = "default"
+	SlotPublisher = "publisher"
+)
+
+var ErrInvalidSlot = fmt.Errorf("invalid slot: must be %q or %q", SlotDefault, SlotPublisher)
+
+func ValidateSlot(slot string) error {
+	if slot != SlotDefault && slot != SlotPublisher {
+		return ErrInvalidSlot
+	}
+	return nil
+}
+
 // Permission defines what a user can do with a key
 type Permission struct {
 	KeyID           string     `json:"key_id"`
 	UserPubkey      string     `json:"user_pubkey"`
+	Slot            string     `json:"slot"`
 	Methods         []string   `json:"methods"`                 // "sign_event", "encrypt", "decrypt", "ping", etc.
 	AllowedKinds    []int      `json:"allowed_kinds,omitempty"` // Empty = all kinds
 	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
@@ -851,6 +866,13 @@ func (m *MemoryStorage) SetPermission(ctx context.Context, perm *Permission) err
 		return ErrKeyNotFound
 	}
 
+	if perm.Slot == "" {
+		perm.Slot = SlotDefault
+	}
+	if err := ValidateSlot(perm.Slot); err != nil {
+		return err
+	}
+
 	// Set CreatedAt if not already set
 	if perm.CreatedAt.IsZero() {
 		perm.CreatedAt = time.Now()
@@ -860,12 +882,10 @@ func (m *MemoryStorage) SetPermission(ctx context.Context, perm *Permission) err
 		m.permissions[perm.KeyID] = make(map[string]*Permission)
 	}
 
-	// Displace all other active grants on this key. The displacement and
-	// the new grant happen atomically (under the same lock) so there is
-	// never a window with two live grants or zero.
+	// Displace all other active grants on this key in the SAME slot.
 	now := time.Now()
 	for pubkey, existing := range m.permissions[perm.KeyID] {
-		if pubkey != perm.UserPubkey && existing.RevokedAt == nil {
+		if pubkey != perm.UserPubkey && existing.RevokedAt == nil && existing.Slot == perm.Slot {
 			existing.RevokedAt = &now
 			existing.RevokedBy = perm.UserPubkey
 		}
