@@ -132,6 +132,7 @@ func (ss *SQLiteStorage) initSchema() error {
 	CREATE TABLE IF NOT EXISTS signer_permissions (
 		key_id TEXT NOT NULL,
 		user_pubkey TEXT NOT NULL,
+		slot TEXT NOT NULL DEFAULT 'default',
 		methods TEXT,  -- JSON array
 		allowed_kinds TEXT,  -- JSON array
 		expires_at TEXT,
@@ -149,8 +150,8 @@ func (ss *SQLiteStorage) initSchema() error {
 		FOREIGN KEY (key_id) REFERENCES signer_keys(pubkey) ON DELETE CASCADE
 	);
 
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_grant_per_key
-		ON signer_permissions(key_id) WHERE revoked_at IS NULL;
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_grant_per_key_slot
+		ON signer_permissions(key_id, slot) WHERE revoked_at IS NULL;
 
 	-- Pending requests
 	CREATE TABLE IF NOT EXISTS signer_pending_requests (
@@ -753,6 +754,13 @@ func intToBoolPtr(i int) *bool {
 // Permission management
 
 func (ss *SQLiteStorage) SetPermission(ctx context.Context, perm *Permission) error {
+	if perm.Slot == "" {
+		perm.Slot = SlotDefault
+	}
+	if err := ValidateSlot(perm.Slot); err != nil {
+		return err
+	}
+
 	if perm.CreatedAt.IsZero() {
 		perm.CreatedAt = time.Now()
 	}
@@ -765,12 +773,12 @@ func (ss *SQLiteStorage) SetPermission(ctx context.Context, perm *Permission) er
 	}
 	defer tx.Rollback()
 
-	// Displace all other active grants on this key.
+	// Displace all other active grants on this key in the SAME slot.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE signer_permissions
 		SET revoked_at = datetime('now'), revoked_by = ?
-		WHERE key_id = ? AND user_pubkey != ? AND revoked_at IS NULL`,
-		perm.UserPubkey, perm.KeyID, perm.UserPubkey)
+		WHERE key_id = ? AND user_pubkey != ? AND slot = ? AND revoked_at IS NULL`,
+		perm.UserPubkey, perm.KeyID, perm.UserPubkey, perm.Slot)
 	if err != nil {
 		return err
 	}
@@ -778,9 +786,10 @@ func (ss *SQLiteStorage) SetPermission(ctx context.Context, perm *Permission) er
 	// Upsert the new (or returning) client's grant. A revoked row for
 	// this same client is cleared back to active.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO signer_permissions (key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, revoked_at, revoked_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+		INSERT INTO signer_permissions (key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, revoked_at, revoked_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
 		ON CONFLICT (key_id, user_pubkey) DO UPDATE SET
+			slot = excluded.slot,
 			methods = excluded.methods,
 			allowed_kinds = excluded.allowed_kinds,
 			expires_at = excluded.expires_at,
@@ -792,7 +801,7 @@ func (ss *SQLiteStorage) SetPermission(ctx context.Context, perm *Permission) er
 			custom_name = COALESCE(excluded.custom_name, signer_permissions.custom_name),
 			revoked_at = NULL,
 			revoked_by = NULL`,
-		perm.KeyID, perm.UserPubkey, stringsToJSONArray(perm.Methods), intsToJSONArray(perm.AllowedKinds),
+		perm.KeyID, perm.UserPubkey, perm.Slot, stringsToJSONArray(perm.Methods), intsToJSONArray(perm.AllowedKinds),
 		nullTimeStr(perm.ExpiresAt), nullStr(perm.PolicyID), boolPtrToInt(perm.RequireApproval),
 		nullStr(perm.AppName), nullStr(perm.AppURL), nullStr(perm.AppImage), nullStr(perm.CustomName),
 		formatTime(perm.CreatedAt), nullTimeStr(perm.LastUsedAt))
@@ -809,9 +818,9 @@ func (ss *SQLiteStorage) GetPermission(ctx context.Context, keyID, userPubkey st
 	var requireApproval int
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at
+		SELECT key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at
 		FROM signer_permissions WHERE key_id = ? AND user_pubkey = ? AND revoked_at IS NULL`, keyID, userPubkey).
-		Scan(&perm.KeyID, &perm.UserPubkey, &methods, &allowedKinds, &expiresAt, &policyID, &requireApproval,
+		Scan(&perm.KeyID, &perm.UserPubkey, &perm.Slot, &methods, &allowedKinds, &expiresAt, &policyID, &requireApproval,
 			&appName, &appURL, &appImage, &customName, &createdAt, &lastUsedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotAuthorized
@@ -873,7 +882,7 @@ func (ss *SQLiteStorage) GetPermission(ctx context.Context, keyID, userPubkey st
 
 func (ss *SQLiteStorage) ListPermissions(ctx context.Context, keyID string) ([]*Permission, error) {
 	rows, err := ss.db.QueryContext(ctx, `
-		SELECT key_id, user_pubkey, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at
+		SELECT key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at
 		FROM signer_permissions WHERE key_id = ? AND revoked_at IS NULL`, keyID)
 	if err != nil {
 		return nil, err
@@ -886,7 +895,7 @@ func (ss *SQLiteStorage) ListPermissions(ctx context.Context, keyID string) ([]*
 		var expiresAt, lastUsedAt, policyID, appName, appURL, appImage, customName, methods, allowedKinds, createdAt sql.NullString
 		var requireApproval int
 
-		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, &methods, &allowedKinds, &expiresAt, &policyID, &requireApproval,
+		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, &perm.Slot, &methods, &allowedKinds, &expiresAt, &policyID, &requireApproval,
 			&appName, &appURL, &appImage, &customName, &createdAt, &lastUsedAt); err != nil {
 			return nil, err
 		}

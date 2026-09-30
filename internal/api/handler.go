@@ -2019,6 +2019,7 @@ type ApproveRequestInput struct {
 	AllowedKinds []int      `json:"allowed_kinds,omitempty"` // Kinds to allow for sign_event
 	Remember     bool       `json:"remember"`                // Create persistent permission
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`    // Permission expiration (if remember=true)
+	Slot         string     `json:"slot,omitempty"`          // Grant slot: "default" or "publisher"
 }
 
 func (h *Handler) handleApproveRequest(w http.ResponseWriter, r *http.Request, requestID string) {
@@ -2063,9 +2064,19 @@ func (h *Handler) handleApproveRequest(w http.ResponseWriter, r *http.Request, r
 			methods = append(methods, "connect")
 		}
 
+		slot := input.Slot
+		if slot == "" {
+			slot = storage.SlotDefault
+		}
+		if err := storage.ValidateSlot(slot); err != nil {
+			h.errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		perm := &storage.Permission{
 			KeyID:        pendingReq.KeyPubkey,
 			UserPubkey:   pendingReq.ClientPubkey,
+			Slot:         slot,
 			Methods:      methods,
 			AllowedKinds: input.AllowedKinds,
 			ExpiresAt:    input.ExpiresAt,
