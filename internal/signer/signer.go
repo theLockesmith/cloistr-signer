@@ -2599,13 +2599,31 @@ func (s *Signer) waitForAuthorization(ctx context.Context, reqCtx *pendingReques
 		"timeout", timeout,
 	)
 
-	// Wait for result or timeout
-	select {
-	case result := <-reqCtx.resultChan:
-		return result.approved, result.perm, nil
-	case <-time.After(timeout):
-		return false, nil, fmt.Errorf("authorization timeout")
-	case <-ctx.Done():
-		return false, nil, ctx.Err()
+	// Poll the database as a fallback for cross-replica approvals. When the
+	// approve API lands on a different replica, the in-memory channel never
+	// fires, but the permission IS saved to the database. A 2s poll catches
+	// this without hammering the DB.
+	pollTicker := time.NewTicker(2 * time.Second)
+	defer pollTicker.Stop()
+	deadline := time.After(timeout)
+
+	for {
+		select {
+		case result := <-reqCtx.resultChan:
+			return result.approved, result.perm, nil
+		case <-pollTicker.C:
+			perm, err := s.storage.GetPermission(ctx, reqCtx.targetPubkey, reqCtx.clientPubkey)
+			if err == nil {
+				slog.Info("cross-replica approval detected via DB poll",
+					"request_id", requestID,
+					"client", reqCtx.clientPubkey[:16]+"...",
+				)
+				return true, perm, nil
+			}
+		case <-deadline:
+			return false, nil, fmt.Errorf("authorization timeout")
+		case <-ctx.Done():
+			return false, nil, ctx.Err()
+		}
 	}
 }
