@@ -16,7 +16,7 @@
   "dependencies": {
     "@cloistr/auth": "^1.1.0",
     "@cloistr/collab-common": "^0.3.0",
-    "@cloistr/ui": "^0.42.2",
+    "@cloistr/ui": "^0.43.0",
     "@tanstack/react-query": "^5.104.1",
     "nostr-tools": "^2.25.2",
     "react": "^18.3.1",
