@@ -240,25 +240,12 @@ func Load() (*Config, error) {
 			MaxFailedLogins:          5,
 			LockoutMinutes:           15,
 		},
+		// RPID and RPOrigins deliberately have no default: they are
+		// environment-specific, and a production default let any new
+		// environment silently register passkeys against production.
+		// Validate() refuses to start without them.
 		WebAuthn: WebAuthnConfig{
-			RPID:          "cloistr.xyz",
 			RPDisplayName: "Cloistr",
-			RPOrigins: []string{
-				"https://signer.cloistr.xyz",
-				"https://me.cloistr.xyz",
-				"https://discover.cloistr.xyz",
-				"https://docs.cloistr.xyz",
-				"https://sheets.cloistr.xyz",
-				"https://slides.cloistr.xyz",
-				"https://whiteboard.cloistr.xyz",
-				"https://space.cloistr.xyz",
-				"https://stash.cloistr.xyz",
-				"https://photos.cloistr.xyz",
-				"https://mail.cloistr.xyz",
-				"https://tasks.cloistr.xyz",
-				"https://workspace.cloistr.xyz",
-				"https://cloistr.xyz",
-			},
 		},
 		Vault: VaultConfig{
 			Enabled:   false,
@@ -432,7 +419,7 @@ func Load() (*Config, error) {
 		cfg.Auth.AllowedOrigins = strings.Split(allowedOrigins, ",")
 	}
 
-	// WebAuthn configuration (overrides built-in defaults; useful for staging / dev)
+	// WebAuthn configuration (RPID and origins are required; see Validate)
 	if rpid := os.Getenv("WEBAUTHN_RPID"); rpid != "" {
 		cfg.WebAuthn.RPID = rpid
 	}
@@ -577,6 +564,23 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Validate checks settings the signer server cannot run without. It is
+// separate from Load so tools that share the config but not these features
+// (cmd/migrate) are not forced to set them.
+func (c *Config) Validate() error {
+	var missing []string
+	if c.WebAuthn.RPID == "" {
+		missing = append(missing, "WEBAUTHN_RPID (yaml webauthn.rpid)")
+	}
+	if len(c.WebAuthn.RPOrigins) == 0 {
+		missing = append(missing, "WEBAUTHN_ORIGINS (yaml webauthn.rp_origins)")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("required configuration unset, refusing to start: %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func getEnv(key, defaultValue string) string {
