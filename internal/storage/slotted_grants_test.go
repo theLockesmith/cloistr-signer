@@ -244,3 +244,41 @@ func createTestKey(t *testing.T, s Storage, pubkey string) {
 		t.Fatalf("createTestKey(%s): %v", pubkey, err)
 	}
 }
+
+// migrate() runs on every startup. Its legacy cleanup must keep one grant per
+// (key, slot), not one per key: partitioning by key alone revoked the second
+// slot's grant on every signer restart.
+func TestSlottedGrants_PostgresSurviveRestart(t *testing.T) {
+	ctx := context.Background()
+	ps := getTestPostgresStorage(t)
+	defer ps.Close()
+
+	pubkey := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	createTestKey(t, ps, pubkey)
+
+	if err := ps.SetPermission(ctx, &Permission{
+		KeyID: pubkey, UserPubkey: "client_default", Slot: SlotDefault,
+		Methods: []string{"sign_event", "connect"},
+	}); err != nil {
+		t.Fatalf("set default: %v", err)
+	}
+	if err := ps.SetPermission(ctx, &Permission{
+		KeyID: pubkey, UserPubkey: "client_publisher", Slot: SlotPublisher,
+		Methods: []string{"sign_event", "nip44_encrypt", "connect"},
+	}); err != nil {
+		t.Fatalf("set publisher: %v", err)
+	}
+
+	// Simulate a restart.
+	if err := ps.migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	perms, err := ps.ListPermissions(ctx, pubkey)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(perms) != 2 {
+		t.Fatalf("expected 2 active grants after restart, got %d", len(perms))
+	}
+}

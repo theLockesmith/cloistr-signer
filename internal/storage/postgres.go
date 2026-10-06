@@ -58,6 +58,30 @@ func NewPostgresStorage(dsn string) (*PostgresStorage, error) {
 // Table names are prefixed with 'signer_' to avoid conflicts with the cloistr platform schema
 func (ps *PostgresStorage) migrate() error {
 	schema := `
+	-- Created first: signer_keys.owner_id references it.
+	CREATE TABLE IF NOT EXISTS signer_web_accounts (
+		id TEXT PRIMARY KEY,
+		username TEXT UNIQUE NOT NULL,
+		email TEXT UNIQUE,
+		pubkey TEXT,
+		role TEXT NOT NULL DEFAULT 'user',
+		password_hash TEXT NOT NULL,
+		mfa_secret TEXT,
+		mfa_enabled BOOLEAN DEFAULT FALSE,
+		backup_codes TEXT[] DEFAULT '{}',
+		backup_codes_used INTEGER DEFAULT 0,
+		failed_login_attempts INTEGER DEFAULT 0,
+		locked_until TIMESTAMPTZ,
+		last_login_at TIMESTAMPTZ,
+		last_login_ip TEXT,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_signer_web_accounts_username ON signer_web_accounts(username);
+	CREATE INDEX IF NOT EXISTS idx_signer_web_accounts_email ON signer_web_accounts(email);
+	CREATE INDEX IF NOT EXISTS idx_signer_web_accounts_pubkey ON signer_web_accounts(pubkey);
+
 	CREATE TABLE IF NOT EXISTS signer_keys (
 		id TEXT PRIMARY KEY,
 		name TEXT,
@@ -165,11 +189,18 @@ func (ps *PostgresStorage) migrate() error {
 
 	CREATE INDEX IF NOT EXISTS idx_signer_permissions_key_id ON signer_permissions(key_id);
 
+	-- Slotted grants: one active grant per (key_id, slot). Existing rows
+	-- default to 'default'. Added before the cleanup below so the cleanup
+	-- can partition on it.
+	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS slot TEXT NOT NULL DEFAULT 'default';
+
 	-- Before creating the one-active-grant constraint, revoke all but the
-	-- most recently used grant per key (migration for existing data).
+	-- most recently used grant per (key, slot) (migration for existing data).
+	-- This runs on every startup, so it MUST partition by slot: partitioning
+	-- by key alone revoked the second slot's grant on every restart.
 	WITH ranked AS (
 		SELECT key_id, user_pubkey,
-		       ROW_NUMBER() OVER (PARTITION BY key_id ORDER BY COALESCE(last_used_at, created_at) DESC) as rn
+		       ROW_NUMBER() OVER (PARTITION BY key_id, slot ORDER BY COALESCE(last_used_at, created_at) DESC) as rn
 		FROM signer_permissions WHERE revoked_at IS NULL
 	)
 	UPDATE signer_permissions SET revoked_at = NOW(), revoked_by = 'schema-migration'
@@ -178,12 +209,9 @@ func (ps *PostgresStorage) migrate() error {
 	  AND signer_permissions.user_pubkey = ranked.user_pubkey
 	  AND ranked.rn > 1;
 
-	-- One active grant per role key, enforced at the database level. The
-	-- partial index covers only non-revoked rows, so displaced grants
-	-- (revoked_at IS NOT NULL) do not count.
-	-- Slotted grants: one active grant per (key_id, slot). Existing rows
-	-- default to 'default'. The old per-key index is replaced.
-	ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS slot TEXT NOT NULL DEFAULT 'default';
+	-- One active grant per (key_id, slot), enforced at the database level.
+	-- The partial index covers only non-revoked rows, so displaced grants
+	-- (revoked_at IS NOT NULL) do not count. The old per-key index is replaced.
 	DROP INDEX IF EXISTS idx_one_active_grant_per_key;
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_grant_per_key_slot
 		ON signer_permissions(key_id, slot) WHERE revoked_at IS NULL;
@@ -248,29 +276,6 @@ func (ps *PostgresStorage) migrate() error {
 
 	CREATE INDEX IF NOT EXISTS idx_signer_pending_requests_key ON signer_pending_requests(key_pubkey);
 	CREATE INDEX IF NOT EXISTS idx_signer_pending_requests_expires ON signer_pending_requests(expires_at);
-
-	CREATE TABLE IF NOT EXISTS signer_web_accounts (
-		id TEXT PRIMARY KEY,
-		username TEXT UNIQUE NOT NULL,
-		email TEXT UNIQUE,
-		pubkey TEXT,
-		role TEXT NOT NULL DEFAULT 'user',
-		password_hash TEXT NOT NULL,
-		mfa_secret TEXT,
-		mfa_enabled BOOLEAN DEFAULT FALSE,
-		backup_codes TEXT[] DEFAULT '{}',
-		backup_codes_used INTEGER DEFAULT 0,
-		failed_login_attempts INTEGER DEFAULT 0,
-		locked_until TIMESTAMPTZ,
-		last_login_at TIMESTAMPTZ,
-		last_login_ip TEXT,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_signer_web_accounts_username ON signer_web_accounts(username);
-	CREATE INDEX IF NOT EXISTS idx_signer_web_accounts_email ON signer_web_accounts(email);
-	CREATE INDEX IF NOT EXISTS idx_signer_web_accounts_pubkey ON signer_web_accounts(pubkey);
 
 	CREATE TABLE IF NOT EXISTS signer_web_sessions (
 		id TEXT PRIMARY KEY,

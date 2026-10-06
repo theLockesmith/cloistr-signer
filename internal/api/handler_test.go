@@ -552,6 +552,48 @@ func TestHandleListPermissions(t *testing.T) {
 	}
 }
 
+// The list response must carry each grant's slot, so callers auditing a role
+// key can tell the everyday grant from the publisher grant.
+func TestHandleListPermissions_IncludesSlot(t *testing.T) {
+	h, store := testHandler(t)
+	ctx := context.Background()
+
+	pubkey := "2323232323232323232323232323232323232323232323232323232323232323"
+	store.CreateKey(ctx, &storage.Key{
+		ID:        "slotlist12345678",
+		Name:      "slot-list",
+		Pubkey:    pubkey,
+		OwnerID:   testUserID,
+		CreatedAt: time.Now(),
+	})
+	store.SetPermission(ctx, &storage.Permission{
+		KeyID:      pubkey,
+		UserPubkey: "3434343434343434343434343434343434343434343434343434343434343434",
+		Slot:       storage.SlotPublisher,
+		Methods:    []string{"sign_event"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/keys/slotlist12345678/permissions", nil)
+	addAuthHeader(t, h, req)
+	rr := httptest.NewRecorder()
+
+	h.handleListPermissions(rr, req, "slotlist12345678")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handleListPermissions() status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	var perms []map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&perms); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(perms) != 1 {
+		t.Fatalf("expected 1 permission, got %d", len(perms))
+	}
+	if got := perms[0]["slot"]; got != storage.SlotPublisher {
+		t.Errorf("slot = %v, want %q", got, storage.SlotPublisher)
+	}
+}
+
 func TestHandleSetPermission(t *testing.T) {
 	h, store := testHandler(t)
 	ctx := context.Background()

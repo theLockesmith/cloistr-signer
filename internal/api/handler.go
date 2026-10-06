@@ -1096,6 +1096,7 @@ type PermissionResponse struct {
 	Methods      []string `json:"methods"`
 	AllowedKinds []int    `json:"allowed_kinds,omitempty"`
 	PolicyID     string   `json:"policy_id,omitempty"`
+	Slot         string   `json:"slot"`
 }
 
 func (h *Handler) handleListPermissions(w http.ResponseWriter, r *http.Request, keyID string) {
@@ -1137,6 +1138,7 @@ func (h *Handler) handleListPermissions(w http.ResponseWriter, r *http.Request, 
 			Methods:      perm.Methods,
 			AllowedKinds: perm.AllowedKinds,
 			PolicyID:     perm.PolicyID,
+			Slot:         perm.Slot,
 		}
 	}
 
