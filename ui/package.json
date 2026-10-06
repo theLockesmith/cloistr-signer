@@ -14,9 +14,9 @@
     "prebuild": "npm run build:wasm"
   },
   "dependencies": {
-    "@cloistr/auth": "^1.3.0",
+    "@cloistr/auth": "^1.4.0",
     "@cloistr/collab-common": "^0.4.0",
-    "@cloistr/ui": "^0.43.0",
+    "@cloistr/ui": "^0.44.0",
     "@tanstack/react-query": "^5.104.1",
     "nostr-tools": "^2.25.2",
     "react": "^18.3.1",
