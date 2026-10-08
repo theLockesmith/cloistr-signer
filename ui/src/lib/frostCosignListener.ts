@@ -19,6 +19,7 @@ import init, {
   compute_user_partial_signature,
 } from '../../frost-wasm/pkg/cloistr_frost_wasm.js';
 import wasmUrl from '../../frost-wasm/pkg/cloistr_frost_wasm_bg.wasm?url';
+import { publishToRelays } from './relayPublish';
 
 let wasmReady: Promise<void> | null = null;
 async function ensureWasm(): Promise<void> {
@@ -263,13 +264,8 @@ export class FrostCosignListener {
       },
       responseSK,
     );
-    // Publish to all configured relays.
-    await Promise.allSettled(
-      this.config.relays.map(async (url) => {
-        const relay = await this.pool.ensureRelay(url);
-        await relay.publish(event);
-      }),
-    );
+    // Publish to all configured relays, every relay step time-bounded.
+    await publishToRelays(this.pool, this.config.relays, event);
   }
 }
 

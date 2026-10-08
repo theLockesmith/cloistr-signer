@@ -48,6 +48,7 @@ import init, {
   compute_user_partial_signature,
 } from '../../frost-wasm/pkg/cloistr_frost_wasm.js';
 import wasmUrl from '../../frost-wasm/pkg/cloistr_frost_wasm_bg.wasm?url';
+import { publishToRelays } from './relayPublish';
 
 // Lazy single-flight init. Multiple createFrostKey() calls share the same
 // WASM module instance; we don't pay the load cost more than once per
@@ -538,21 +539,13 @@ export async function publishFrostRotationProfile(
     },
   );
 
-  // Publish via nostr-tools SimplePool.
+  // Publish via nostr-tools SimplePool, every relay step time-bounded.
   const { SimplePool } = await import('nostr-tools');
   const pool = new SimplePool();
-  const published: string[] = [];
-  await Promise.allSettled(
-    relays.map(async (url) => {
-      try {
-        const relay = await pool.ensureRelay(url);
-        await relay.publish(signed);
-        published.push(url);
-      } catch (e) {
-        console.warn(`[frost rotation] publish to ${url} failed:`, e);
-      }
-    }),
-  );
+  const { published, failed } = await publishToRelays(pool, relays, signed);
+  for (const f of failed) {
+    console.warn(`[frost rotation] publish to ${f.relay} failed:`, f.reason);
+  }
 
   return { signedEvent: signed, publishedTo: published };
 }
