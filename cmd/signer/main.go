@@ -137,7 +137,11 @@ func main() {
 
 	// Initialize relay preferences client for user relay discovery
 	// Used to deliver DMs to admins' preferred relays
-	relayPrefsClient := relayprefs.NewClientFromEnv()
+	relayPrefsClient, err := newRelayPrefsClient()
+	if err != nil {
+		slog.Error("invalid relay preferences configuration", "error", err)
+		os.Exit(1)
+	}
 	if err := relayPrefsClient.Validate(); err != nil {
 		slog.Warn("relay preferences client has no sources configured, using defaults", "error", err)
 	}
@@ -494,4 +498,13 @@ func (a *frostEncryptorAdapter) Encrypt(plaintext []byte) ([]byte, error) {
 
 func (a *frostEncryptorAdapter) Decrypt(ciphertext []byte) ([]byte, error) {
 	return a.enc.DecryptBytes(ciphertext)
+}
+
+// newRelayPrefsClient builds the relay preferences client from the
+// environment. cloistr-common v0.4.0 has no built-in Cloistr URLs, so a missing
+// USE_CLOISTR_FALLBACK, or a missing RELAYPREFS_CLOISTR_DISCOVERY /
+// RELAYPREFS_CLOISTR_RELAY with the fallback on, is an error naming the
+// variable, and the signer refuses to start.
+func newRelayPrefsClient() (*relayprefs.Client, error) {
+	return relayprefs.NewClientFromEnv()
 }
