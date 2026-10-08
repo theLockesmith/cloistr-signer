@@ -56,15 +56,15 @@ test:ui:
       - ui/node_modules/
     policy: pull-push
 
-# Builds the frost WASM from source on every pipeline, and fails if the module
-# committed in internal/web/dist is not byte-identical to that build. Without
-# this job nothing compiled ui/frost-wasm in CI: every Renovate cargo bump from
-# 2026-08-11 on merged green while the crate no longer built, and the shipped
-# module silently stopped matching its manifest.
+# Builds and tests the frost WASM crate on every pipeline. Without this job
+# nothing compiled ui/frost-wasm in CI: every Renovate cargo bump from
+# 2026-08-11 on merged green while the crate no longer built. The image build
+# (Dockerfile wasm stage) builds the shipped module the same way, so a bump
+# that breaks the crate now fails here first.
 #
-# Toolchain is pinned (rustc 1.96.0, wasm-pack 0.15.0) because wasm output is
-# only reproducible for a fixed compiler and wasm-opt; build.sh remaps absolute
-# paths so the builder's directories do not end up in the binary.
+# Toolchain is pinned (rustc 1.96.0, wasm-pack 0.15.0), and build.sh remaps
+# absolute paths, so the output is reproducible: the module printed below is
+# byte-identical to the one the image embeds.
 test:frost-wasm:
   stage: test
   extends: .cloistr-rules
@@ -79,15 +79,7 @@ test:frost-wasm:
     - cd ui/frost-wasm
     - cargo test --release --locked
     - ./build.sh
-    - built=$(sha256sum pkg/cloistr_frost_wasm_bg.wasm | cut -d' ' -f1)
-    - shipped=$(sha256sum ../../internal/web/dist/assets/cloistr_frost_wasm_bg-*.wasm | cut -d' ' -f1)
-    - echo "built=${built} shipped=${shipped}"
-    - |
-      if [ "${built}" != "${shipped}" ]; then
-        echo "FAIL: the frost WASM committed in internal/web/dist was not built from this source + Cargo.lock."
-        echo "Rebuild: cd ui && npm run build:wasm && npm run build, then commit internal/web/dist."
-        exit 1
-      fi
+    - sha256sum pkg/cloistr_frost_wasm_bg.wasm
   cache:
     key:
       files:

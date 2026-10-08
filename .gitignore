@@ -33,3 +33,7 @@ CLAUDE.md
 # Local incident/security note; references session IDs and must not be shared
 # via the repo.
 /PRIVACY-DELETION-REQUEST.md
+
+# UI build output: built in the Docker image, never committed.
+/internal/web/dist/*
+!/internal/web/dist/PLACEHOLDER.md
