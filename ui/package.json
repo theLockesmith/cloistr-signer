@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build:wasm": "cd frost-wasm && wasm-pack build --target web --release",
+    "build:wasm": "./frost-wasm/build.sh",
     "prebuild": "npm run build:wasm"
   },
   "dependencies": {

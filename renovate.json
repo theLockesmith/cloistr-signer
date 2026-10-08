@@ -27,6 +27,25 @@
         "@cloistr/ui"
       ],
       "allowedVersions": "!/^0\\.44\\.[01]$/"
+    },
+    {
+      "description": "frost-wasm crypto crates move TOGETHER or not at all. k256/elliptic-curve/sha2/hkdf share the RustCrypto digest/traits generation, and getrandom/rand_core/rand_chacha share the rand_core generation; bumping any one alone does not compile (e.g. sha2 0.11 vs hkdf 0.12, rand_core 0.10 has no OsRng). Grouped into one MR so the test:frost-wasm job judges the whole set. Moving to rand_core 0.10 / getrandom 0.4 / k256 0.14 is a source change (OsRng is gone), not a version bump.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchFileNames": [
+        "ui/frost-wasm/Cargo.toml"
+      ],
+      "matchPackageNames": [
+        "k256",
+        "elliptic-curve",
+        "sha2",
+        "hkdf",
+        "getrandom",
+        "rand_core",
+        "rand_chacha"
+      ],
+      "groupName": "frost-wasm crypto crates"
     }
   ]
 }
