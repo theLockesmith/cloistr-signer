@@ -1,7 +1,7 @@
 # frost WASM stage: the browser-side FROST module, built from source with the
 # same pinned toolchain and path remapping as CI (ui/frost-wasm/build.sh), so
 # the module in the image is byte-identical to test:frost-wasm's build.
-FROM rust:1.96.0-slim-bookworm AS wasm
+FROM rust:1.99.0-slim-bookworm AS wasm
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl >/dev/null \
  && rustup target add wasm32-unknown-unknown \
  && curl -sSfL https://github.com/rustwasm/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-x86_64-unknown-linux-musl.tar.gz \
