@@ -68,7 +68,7 @@ test:ui:
 test:frost-wasm:
   stage: test
   extends: .cloistr-rules
-  image: rust:1.96.0-slim-bookworm
+  image: rust:1.99.0-slim-bookworm
   variables:
     CARGO_HOME: ${CI_PROJECT_DIR}/.cargo-home
   before_script:
