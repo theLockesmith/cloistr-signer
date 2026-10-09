@@ -18,6 +18,7 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/discovery"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/frost"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/keyloc"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/metrics"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/ratelimit"
@@ -413,6 +414,36 @@ func main() {
 		}
 	}()
 
+	// Cross-replica forwarding: a session request that lands on a replica not
+	// holding the user's key is forwarded to the one that does.
+	var forwardServer *http.Server
+	if cfg.ForwardSecret != "" && cfg.CacheURL != "" {
+		self, err := keyloc.SelfAddr(cfg.PodIP, cfg.ForwardPort)
+		if err != nil {
+			slog.Error("cross-replica forwarding disabled: cannot determine pod address", "error", err)
+		} else if reg, err := keyloc.NewFromURL(cfg.CacheURL, self); err != nil {
+			slog.Error("cross-replica forwarding disabled: key-location registry unavailable", "error", err)
+		} else if err := apiHandler.SetForwarding([]byte(cfg.ForwardSecret), reg); err != nil {
+			slog.Error("cross-replica forwarding disabled", "error", err)
+		} else {
+			go reg.Run(ctx, nip46Signer.LoadedKeyPubkeys)
+			forwardServer = &http.Server{
+				Addr:         ":" + cfg.ForwardPort,
+				Handler:      apiHandler.ForwardHandler(),
+				ReadTimeout:  10 * time.Second,
+				WriteTimeout: 15 * time.Second,
+			}
+			go func() {
+				slog.Info("cross-replica forwarding enabled", "self", self)
+				if err := forwardServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					slog.Error("forward listener error", "error", err)
+				}
+			}()
+		}
+	} else {
+		slog.Info("cross-replica forwarding disabled (needs SIGNER_FORWARD_SECRET and CACHE_URL)")
+	}
+
 	// Wait for shutdown signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -428,6 +459,9 @@ func main() {
 	nip46Signer.Stop()
 
 	// Shutdown HTTP server
+	if forwardServer != nil {
+		_ = forwardServer.Shutdown(shutdownCtx)
+	}
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("server shutdown error", "error", err)
 	}

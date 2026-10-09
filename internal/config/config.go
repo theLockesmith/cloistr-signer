@@ -29,7 +29,14 @@ type Config struct {
 	Lightning              LightningConfig   `yaml:"lightning"`                 // LNURL-auth (LUD-04)
 	CacheURL               string            `yaml:"cache_url"`                 // Dragonfly/Redis URL for cross-replica request-claim coordination (empty = disabled)
 	RequestClaimTTLSeconds int               `yaml:"request_claim_ttl_seconds"` // TTL for a request claim (default 60)
-	Recovery               RecoveryConfig    `yaml:"recovery"`                  // Gating for the unauthenticated account-recovery endpoints
+	// Cross-replica forwarding of nostrconnect session requests to the replica
+	// holding the user's unlocked key (see internal/api/forward.go). Disabled
+	// unless ForwardSecret is set (>= 32 bytes, same on every replica) and
+	// CacheURL is set (the key-location registry lives in Dragonfly).
+	ForwardSecret string         `yaml:"-"`            // SIGNER_FORWARD_SECRET
+	ForwardPort   string         `yaml:"forward_port"` // SIGNER_FORWARD_PORT, pod-to-pod listener (default 7778)
+	PodIP         string         `yaml:"-"`            // POD_IP (downward API); auto-detected when empty
+	Recovery      RecoveryConfig `yaml:"recovery"`     // Gating for the unauthenticated account-recovery endpoints
 }
 
 // RecoveryConfig gates /api/v1/recovery/challenge, which is unauthenticated by
@@ -339,6 +346,9 @@ func Load() (*Config, error) {
 	if cacheURL := os.Getenv("CACHE_URL"); cacheURL != "" {
 		cfg.CacheURL = cacheURL
 	}
+	cfg.ForwardSecret = os.Getenv("SIGNER_FORWARD_SECRET")
+	cfg.ForwardPort = getEnv("SIGNER_FORWARD_PORT", "7778")
+	cfg.PodIP = os.Getenv("POD_IP")
 	if ttlStr := os.Getenv("REQUEST_CLAIM_TTL_SECONDS"); ttlStr != "" {
 		ttl, err := strconv.Atoi(ttlStr)
 		if err != nil {

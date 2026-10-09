@@ -527,6 +527,18 @@ func (s *Signer) IsKeyLoaded(pubkey string) bool {
 	return ok
 }
 
+// LoadedKeyPubkeys lists the pubkeys whose private material is in the runtime
+// map (pubkeys only; used to publish key locations for cross-replica routing).
+func (s *Signer) LoadedKeyPubkeys() []string {
+	s.keysLock.RLock()
+	defer s.keysLock.RUnlock()
+	out := make([]string, 0, len(s.keys))
+	for pk := range s.keys {
+		out = append(out, pk)
+	}
+	return out
+}
+
 // RegisterFrostKey registers a FROST threshold signing key (runtime, not persisted).
 // Also refreshes the relay subscription to include the new key.
 func (s *Signer) RegisterFrostKey(pubkey, frostKeyID string) {
