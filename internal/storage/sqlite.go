@@ -298,6 +298,15 @@ func (ss *SQLiteStorage) initSchema() error {
 
 	-- App consent records for cross-subdomain SSO (unified-auth-design §5).
 	-- app_id is the nostrconnect client pubkey from the nostrconnect:// URI.
+	CREATE TABLE IF NOT EXISTS signer_account_deletion_retained (
+		user_id         TEXT NOT NULL,
+		object          TEXT NOT NULL,
+		reason          TEXT NOT NULL DEFAULT '',
+		first_failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		last_attempt_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (user_id, object)
+	);
+
 	CREATE TABLE IF NOT EXISTS signer_app_consents (
 		user_id     TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
 		app_id      TEXT NOT NULL,
@@ -2619,4 +2628,37 @@ func (ss *SQLiteStorage) UpdateLightningKeyLastUsed(ctx context.Context, id stri
 
 func (ss *SQLiteStorage) DeleteLightningKey(ctx context.Context, id string) error {
 	return fmt.Errorf("lightning key storage requires postgres storage")
+}
+
+func (ss *SQLiteStorage) RecordRetainedDeletion(ctx context.Context, userID, object, reason string) error {
+	_, err := ss.db.ExecContext(ctx, `
+		INSERT INTO signer_account_deletion_retained (user_id, object, reason)
+		VALUES (?, ?, ?)
+		ON CONFLICT (user_id, object) DO UPDATE SET reason = excluded.reason, last_attempt_at = CURRENT_TIMESTAMP`,
+		userID, object, reason)
+	return err
+}
+
+func (ss *SQLiteStorage) ListRetainedDeletions(ctx context.Context) ([]*RetainedDeletion, error) {
+	rows, err := ss.db.QueryContext(ctx, `
+		SELECT user_id, object, reason, first_failed_at, last_attempt_at
+		FROM signer_account_deletion_retained ORDER BY first_failed_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*RetainedDeletion
+	for rows.Next() {
+		r := &RetainedDeletion{}
+		if err := rows.Scan(&r.UserID, &r.Object, &r.Reason, &r.FirstFailedAt, &r.LastAttemptAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (ss *SQLiteStorage) ClearRetainedDeletion(ctx context.Context, userID, object string) error {
+	_, err := ss.db.ExecContext(ctx, `DELETE FROM signer_account_deletion_retained WHERE user_id = ? AND object = ?`, userID, object)
+	return err
 }

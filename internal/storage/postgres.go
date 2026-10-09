@@ -384,6 +384,17 @@ func (ps *PostgresStorage) migrate() error {
 	-- App consent records for cross-subdomain SSO (unified-auth-design §5).
 	-- app_id is the nostrconnect client pubkey from the nostrconnect:// URI.
 	-- First-time connections require user consent; subsequent ones auto-approve.
+	-- Account-deletion objects not yet deleted (e.g. a Vault transit key the
+	-- signer may not delete yet). No FK: the account row is already gone.
+	CREATE TABLE IF NOT EXISTS signer_account_deletion_retained (
+		user_id         TEXT NOT NULL,
+		object          TEXT NOT NULL,
+		reason          TEXT NOT NULL DEFAULT '',
+		first_failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		last_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY (user_id, object)
+	);
+
 	CREATE TABLE IF NOT EXISTS signer_app_consents (
 		user_id     TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
 		app_id      TEXT NOT NULL,
@@ -2933,4 +2944,37 @@ func (ps *PostgresStorage) DeleteLightningKey(ctx context.Context, id string) er
 		return fmt.Errorf("delete lightning key: %w", err)
 	}
 	return nil
+}
+
+func (ps *PostgresStorage) RecordRetainedDeletion(ctx context.Context, userID, object, reason string) error {
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO signer_account_deletion_retained (user_id, object, reason)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (user_id, object) DO UPDATE SET reason = EXCLUDED.reason, last_attempt_at = NOW()`,
+		userID, object, reason)
+	return err
+}
+
+func (ps *PostgresStorage) ListRetainedDeletions(ctx context.Context) ([]*RetainedDeletion, error) {
+	rows, err := ps.db.QueryContext(ctx, `
+		SELECT user_id, object, reason, first_failed_at, last_attempt_at
+		FROM signer_account_deletion_retained ORDER BY first_failed_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*RetainedDeletion
+	for rows.Next() {
+		r := &RetainedDeletion{}
+		if err := rows.Scan(&r.UserID, &r.Object, &r.Reason, &r.FirstFailedAt, &r.LastAttemptAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (ps *PostgresStorage) ClearRetainedDeletion(ctx context.Context, userID, object string) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_account_deletion_retained WHERE user_id = $1 AND object = $2`, userID, object)
+	return err
 }

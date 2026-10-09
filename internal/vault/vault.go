@@ -1258,3 +1258,70 @@ func (c *Client) StartTokenRenewal(ctx context.Context) {
 		slog.Debug("vault token renewed", "lease_seconds", lease)
 	}
 }
+
+// deleteAt issues DELETE on path; 200, 204 and 404 (already gone) all count as
+// deleted, so account deletion can be retried safely.
+func (c *Client) deleteAt(ctx context.Context, op, path string) error {
+	start := time.Now()
+	defer func() {
+		metrics.RecordVaultLatency(op, time.Since(start))
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, "DELETE", c.address+"/v1/"+path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", c.token)
+
+	resp, err := c.do(req)
+	if err != nil {
+		return fmt.Errorf("vault %s: %w", op, err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
+		return nil
+	default:
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("vault %s (status %d): %s", op, resp.StatusCode, string(bodyBytes))
+	}
+}
+
+// DeleteUserpassAccount removes a user's Vault login (credential + login path).
+func (c *Client) DeleteUserpassAccount(ctx context.Context, username string) error {
+	return c.deleteAt(ctx, "delete_userpass", fmt.Sprintf("auth/userpass/users/%s", username))
+}
+
+// DeletePolicy removes an ACL policy.
+func (c *Client) DeletePolicy(ctx context.Context, name string) error {
+	return c.deleteAt(ctx, "delete_policy", fmt.Sprintf("sys/policies/acl/%s", name))
+}
+
+// DeleteTransitKey deletes a transit key. Transit refuses deletion unless
+// deletion_allowed is set on the key, so that is set first. A key that no
+// longer exists counts as deleted.
+func (c *Client) DeleteTransitKey(ctx context.Context, name string) error {
+	start := time.Now()
+	body := strings.NewReader(`{"deletion_allowed":true}`)
+	req, err := http.NewRequestWithContext(ctx, "POST", c.address+"/v1/transit/keys/"+name+"/config", body)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("X-Vault-Token", c.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.do(req)
+	metrics.RecordVaultLatency("transit_allow_delete", time.Since(start))
+	if err != nil {
+		return fmt.Errorf("vault transit_allow_delete: %w", err)
+	}
+	resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusNoContent:
+	case http.StatusNotFound:
+		return nil
+	default:
+		return fmt.Errorf("vault transit_allow_delete (status %d)", resp.StatusCode)
+	}
+	return c.deleteAt(ctx, "delete_transit_key", "transit/keys/"+name)
+}

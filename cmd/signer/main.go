@@ -265,6 +265,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Retry account-deletion objects that could not be deleted yet (e.g. a
+	// Vault transit key before the signer policy allows deleting it).
+	go apiHandler.RunRetainedDeletionSweep(ctx)
+
 	// Keep the signer's Vault token alive for the life of the process. Vault
 	// service tokens have a finite lease; without renewal the token expires
 	// (default 768h) and every transit-key op 403s, silently breaking per-user

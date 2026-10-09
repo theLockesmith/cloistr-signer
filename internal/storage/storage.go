@@ -218,6 +218,16 @@ type User struct {
 }
 
 // IsAdmin returns true if the user has admin role
+// RetainedDeletion is an object left behind by an account deletion because it
+// could not be deleted at the time; see Storage.RecordRetainedDeletion.
+type RetainedDeletion struct {
+	UserID        string    `json:"user_id"`
+	Object        string    `json:"object"`
+	Reason        string    `json:"reason"`
+	FirstFailedAt time.Time `json:"first_failed_at"`
+	LastAttemptAt time.Time `json:"last_attempt_at"`
+}
+
 func (u *User) IsAdmin() bool {
 	return u.Role == "admin"
 }
@@ -536,6 +546,13 @@ type Storage interface {
 	RecordAppConsent(ctx context.Context, userID, appID, appName string) error
 	HasAppConsent(ctx context.Context, userID, appID string) (bool, error)
 	ListAppConsents(ctx context.Context, userID string) ([]*AppConsent, error)
+
+	// Account-deletion objects that could not be deleted yet (e.g. a Vault
+	// transit key the signer's policy may not delete). Recorded by user ID so
+	// a periodic sweep can finish them; cleared once deleted.
+	RecordRetainedDeletion(ctx context.Context, userID, object, reason string) error
+	ListRetainedDeletions(ctx context.Context) ([]*RetainedDeletion, error)
+	ClearRetainedDeletion(ctx context.Context, userID, object string) error
 	RevokeAppConsent(ctx context.Context, userID, appID string) error
 	RevokeAllAppConsents(ctx context.Context, userID string) error
 
@@ -645,6 +662,7 @@ type MemoryStorage struct {
 	pendingRequests    map[string]*PendingRequest
 	users              map[string]*User
 	usersByUsername    map[string]*User
+	retainedDeletions  map[string]*RetainedDeletion // key: userID + "|" + object
 	usersByEmail       map[string]*User
 	userSessions       map[string]*UserSession
 	userSessionsByUser map[string]map[string]*UserSession // userID -> sessionID -> UserSession
@@ -2338,5 +2356,39 @@ func credKey(b []byte) string {
 }
 
 func (m *MemoryStorage) Close() error {
+	return nil
+}
+
+func (m *MemoryStorage) RecordRetainedDeletion(ctx context.Context, userID, object, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.retainedDeletions == nil {
+		m.retainedDeletions = make(map[string]*RetainedDeletion)
+	}
+	now := time.Now()
+	k := userID + "|" + object
+	if r, ok := m.retainedDeletions[k]; ok {
+		r.Reason, r.LastAttemptAt = reason, now
+		return nil
+	}
+	m.retainedDeletions[k] = &RetainedDeletion{UserID: userID, Object: object, Reason: reason, FirstFailedAt: now, LastAttemptAt: now}
+	return nil
+}
+
+func (m *MemoryStorage) ListRetainedDeletions(ctx context.Context) ([]*RetainedDeletion, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*RetainedDeletion, 0, len(m.retainedDeletions))
+	for _, r := range m.retainedDeletions {
+		c := *r
+		out = append(out, &c)
+	}
+	return out, nil
+}
+
+func (m *MemoryStorage) ClearRetainedDeletion(ctx context.Context, userID, object string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.retainedDeletions, userID+"|"+object)
 	return nil
 }

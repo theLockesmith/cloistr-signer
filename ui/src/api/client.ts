@@ -95,6 +95,16 @@ class ApiClient {
     return this.fetch('/users/me');
   }
 
+  // Permanently delete the signed-in account (keys, grants, Vault objects).
+  // Requires the password, the MFA code if MFA is enabled, and the username
+  // typed exactly as confirmation.
+  async deleteAccount(password: string, confirm: string, mfaCode?: string): Promise<{ deleted: boolean; retained?: string[] }> {
+    return this.fetch('/users/me', {
+      method: 'DELETE',
+      body: JSON.stringify({ password, confirm, ...(mfaCode ? { mfa_code: mfaCode } : {}) }),
+    });
+  }
+
   async changePassword(currentPassword: string, newPassword: string): Promise<void> {
     return this.fetch('/users/password', {
       method: 'PUT',
