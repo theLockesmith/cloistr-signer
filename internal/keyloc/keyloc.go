@@ -115,7 +115,9 @@ func (r *Registry) ForgetAll(ctx context.Context, pubkeys ...string) error {
 	defer cancel()
 	pipe := r.rdb.Pipeline()
 	for _, pk := range pubkeys {
-		forgetScript.Run(ctx, pipe, []string{keyPrefix + pk}, r.self)
+		// Eval, not Run: Run sends EVALSHA, and a pipeline cannot fall back to
+		// EVAL when the server has not seen the script (NOSCRIPT).
+		forgetScript.Eval(ctx, pipe, []string{keyPrefix + pk}, r.self)
 	}
 	_, err := pipe.Exec(ctx)
 	return err
