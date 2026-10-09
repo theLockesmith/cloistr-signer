@@ -403,3 +403,75 @@ func TestHandleNostrConnectSession_RefusesLockedKey(t *testing.T) {
 		t.Error("error message empty; the user must be told what to do")
 	}
 }
+
+// Login answers before the passphrase-wrapped key is unlocked: unlocking
+// (PBKDF2, 600k iterations) runs in the background and takes ~1s. An app that
+// POSTs the session right after login used to get 409 key_locked from the very
+// replica that was halfway through unlocking (measured 2026-10-09: login
+// 14:34:15.84, refused 14:34:16.38, unlocked 14:34:16.76). The handler must wait
+// for an unlock already in flight for this user on this replica.
+func sessionPOST(t *testing.T, h *Handler) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(map[string]interface{}{
+		"uri":    validNostrConnectURI(testClientPubkey, "wss://relay.cloistr.xyz", "TestApp"),
+		"key_id": "key-sso-001",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/nostrconnect/session", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+makeSessionToken(t, h, testUserIDSess))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.handleNostrConnectSession(rr, req)
+	return rr
+}
+
+func TestHandleNostrConnectSession_WaitsForInFlightUnlock(t *testing.T) {
+	h, store := testHandler(t)
+	key := seedUserAndKey(t, store)
+
+	done := h.keyLoads.begin(testUserIDSess)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		unlockKey(h, key)
+		done()
+	}()
+
+	rr := sessionPOST(t, h)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 once the in-flight unlock finishes\nbody: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleNostrConnectSession_NoUnlockInFlightRefusesFast(t *testing.T) {
+	h, store := testHandler(t)
+	seedUserAndKey(t, store)
+
+	start := time.Now()
+	rr := sessionPOST(t, h)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rr.Code)
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Errorf("refusal took %v; with no unlock in flight it must not wait", d)
+	}
+}
+
+func TestHandleNostrConnectSession_UnlockFinishesWithoutKeyRefuses(t *testing.T) {
+	h, store := testHandler(t)
+	seedUserAndKey(t, store)
+
+	// e.g. the passphrase no longer decrypts the key
+	done := h.keyLoads.begin(testUserIDSess)
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		done()
+	}()
+
+	start := time.Now()
+	rr := sessionPOST(t, h)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 when the unlock produced no key", rr.Code)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("refusal took %v; it should follow the finished unlock, not the full wait limit", d)
+	}
+}

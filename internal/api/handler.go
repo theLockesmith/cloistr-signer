@@ -45,6 +45,7 @@ type Handler struct {
 	webauthn         *webauthn.WebAuthn  // nil when WebAuthn config is incomplete (e.g. no RPID)
 	limiter          ratelimit.Limiter   // rate limiter for unauthenticated endpoints (nil = no limiting)
 	ipHasher         *ratelimit.IPHasher // rotating HMAC hasher for per-IP keys (nil = IP limiting disabled)
+	keyLoads         keyLoadTracker      // key unlocks in flight on this replica (see key_load_tracker.go)
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -2576,7 +2577,11 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// set. Order matters: re-wrapping turns an "enc:" key into a "pbk:" one, and
 	// the re-wrap hands it to the runtime itself, so the load pass that follows
 	// simply finds nothing left to do for it.
+	// Registered before the goroutine starts, so a session request that arrives
+	// right after this login response sees the unlock as in flight and waits.
+	unlockDone := h.keyLoads.begin(user.ID)
 	go func(userID, passphrase string) {
+		defer unlockDone()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if n := h.rewrapLegacyLocalKeys(ctx, userID, passphrase); n > 0 {
@@ -4232,6 +4237,11 @@ func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Reque
 		// A 409 with a machine-readable code lets the client do the honest
 		// thing immediately: ask for the passphrase that unlocks the key,
 		// rather than blaming the network after half a minute.
+		if !h.signer.IsKeyLoaded(key.Pubkey) {
+			// Login answers before the key is unlocked; if that unlock is still
+			// running on this replica, wait for it instead of refusing.
+			h.keyLoads.wait(r.Context(), claims.UserID, keyUnlockWait)
+		}
 		if !h.signer.IsKeyLoaded(key.Pubkey) {
 			slog.Warn("nostrconnect refused: key not unlocked on this replica",
 				"client", clientPubkey[:16]+"...", "key", req.KeyID, "user", claims.UserID)
