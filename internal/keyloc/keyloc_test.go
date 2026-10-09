@@ -77,3 +77,28 @@ func TestLookupRejectsNonPodAddresses(t *testing.T) {
 		}
 	}
 }
+
+// On graceful shutdown a replica drops all of its own records at once, so the
+// next request does not try a pod that is gone (measured 2026-10-09: a dead
+// holder's record caused one 'forward failed' before falling back). Another
+// replica's records must survive. Runs against a fresh server that has never
+// seen the delete script, as a freshly started Dragonfly would be.
+func TestForgetAllRemovesOnlyOwnRecords(t *testing.T) {
+	mr := miniredis.RunT(t)
+	a := newTestRegistry(t, mr, "10.128.4.104:7778")
+	b := newTestRegistry(t, mr, "10.129.3.250:7778")
+	ctx := context.Background()
+	other := "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	_ = a.Publish(ctx, pk)
+	_ = b.Publish(ctx, other)
+
+	if err := a.ForgetAll(ctx, pk, other); err != nil {
+		t.Fatalf("ForgetAll: %v", err)
+	}
+	if _, ok := b.Lookup(ctx, pk); ok {
+		t.Error("A's record survived ForgetAll")
+	}
+	if addr, ok := a.Lookup(ctx, other); !ok || addr != "10.129.3.250:7778" {
+		t.Errorf("ForgetAll on A removed B's record: %q,%v", addr, ok)
+	}
+}
