@@ -48,7 +48,6 @@ import init, {
   compute_user_partial_signature,
 } from '../../frost-wasm/pkg/cloistr_frost_wasm.js';
 import wasmUrl from '../../frost-wasm/pkg/cloistr_frost_wasm_bg.wasm?url';
-import { publishToRelays } from './relayPublish';
 
 // Lazy single-flight init. Multiple createFrostKey() calls share the same
 // WASM module instance; we don't pay the load cost more than once per
@@ -500,54 +499,6 @@ export async function signEventWithFrostKey(
     id: eventIdHex,
     sig: r2.signature_hex,
   };
-}
-
-/**
- * P7 Path C rotation: build a kind:0 profile event using a fresh FROST
- * key, sign it via direct-sign, publish to given relays. Optional
- * `rotatedFromPubkey` embeds a rotated-from field so followers of the
- * old identity have a machine-readable pointer.
- */
-export async function publishFrostRotationProfile(
-  frostKeyId: string,
-  newPubkeyXOnly: string,
-  finalShareHex: string,
-  profile: {
-    name?: string;
-    about?: string;
-    picture?: string;
-    nip05?: string;
-    lud16?: string;
-  },
-  rotatedFromPubkey: string | null,
-  relays: string[],
-): Promise<{ signedEvent: { id: string; sig: string; pubkey: string; kind: number; tags: string[][]; content: string; created_at: number }; publishedTo: string[] }> {
-  const content = {
-    ...profile,
-    ...(rotatedFromPubkey ? { rotated_from: rotatedFromPubkey } : {}),
-  };
-  const signed = await signEventWithFrostKey(
-    frostKeyId,
-    newPubkeyXOnly,
-    finalShareHex,
-    {
-      pubkey: newPubkeyXOnly,
-      created_at: Math.floor(Date.now() / 1000),
-      kind: 0,
-      tags: [],
-      content: JSON.stringify(content),
-    },
-  );
-
-  // Publish via nostr-tools SimplePool, every relay step time-bounded.
-  const { SimplePool } = await import('nostr-tools');
-  const pool = new SimplePool();
-  const { published, failed } = await publishToRelays(pool, relays, signed);
-  for (const f of failed) {
-    console.warn(`[frost rotation] publish to ${f.relay} failed:`, f.reason);
-  }
-
-  return { signedEvent: signed, publishedTo: published };
 }
 
 // -----------------------------------------------------------------------------
