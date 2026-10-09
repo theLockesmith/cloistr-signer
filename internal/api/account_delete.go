@@ -30,9 +30,9 @@ import (
 // may not delete transit keys) does not fail the deletion: the key is recorded
 // as retained by user ID and the sweep finishes it later.
 //
-// Limitation: another replica may still hold the user's key in memory. It is
-// unreachable once the account, sessions and grants are gone, and is evicted
-// when that replica restarts.
+// Another replica may hold the user's key in memory: the delete path asks it
+// to drop the key (sealed pod-to-pod request, best effort), and a replica that
+// misses that evicts the key on its next use (Signer.evictIfKeyDeleted).
 
 // accountVault is the subset of the Vault client account deletion needs.
 type accountVault interface {
@@ -75,6 +75,15 @@ func (h *Handler) deleteAccount(ctx context.Context, userID string) (accountDele
 		}
 		h.signer.UnregisterKey(k.Pubkey)
 		h.forgetKeyLocation(ctx, k.Pubkey)
+	}
+	if h.forward != nil && len(keys) > 0 {
+		// Best effort: the replica holding a key in memory drops it now;
+		// if this misses, it evicts on next use or restart.
+		pks := make([]string, 0, len(keys))
+		for _, k := range keys {
+			pks = append(pks, k.Pubkey)
+		}
+		h.forward.evictRemote(ctx, pks)
 	}
 	consents, err := h.storage.ListAppConsents(ctx, userID)
 	if err != nil {

@@ -515,6 +515,22 @@ func (s *Signer) UnregisterKey(pubkey string) {
 	s.refreshSubscription()
 }
 
+// evictIfKeyDeleted drops a key from memory when it no longer exists in
+// storage: its account was deleted, possibly on another replica, while this
+// replica still held it. Checked only when a request finds no grant, so the
+// normal path pays nothing extra. Returns true if it evicted.
+func (s *Signer) evictIfKeyDeleted(ctx context.Context, pubkey string) bool {
+	if !s.IsKeyLoaded(pubkey) {
+		return false
+	}
+	if _, err := s.storage.GetKeyByPubkey(ctx, pubkey); !errors.Is(err, storage.ErrKeyNotFound) {
+		return false
+	}
+	s.UnregisterKey(pubkey)
+	slog.Info("evicted a key whose account no longer exists", "pubkey", pubkey[:16]+"...")
+	return true
+}
+
 // IsKeyLoaded reports whether the given signing key's private material is
 // currently in the runtime map. Vault-encrypted keys are NOT loaded at startup
 // and are wiped on pod restart, so a cookie-SSO nostrconnect (no fresh password
@@ -705,6 +721,11 @@ func (s *Signer) decryptAndDispatch(event *nostr.Event, targetPubkey, privateKey
 	// Check permissions
 	ctx := context.Background()
 	perm, err := s.storage.GetPermission(ctx, targetPubkey, clientPubkey)
+	if perm == nil && s.evictIfKeyDeleted(ctx, targetPubkey) {
+		// The account was deleted (on this or another replica): its grants
+		// are gone and so is the key. Nothing to answer.
+		return
+	}
 
 	// Handle request in a goroutine to avoid blocking the event loop
 	// This is especially important for authorization callbacks which may take time
