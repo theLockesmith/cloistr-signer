@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -46,6 +47,7 @@ type Handler struct {
 	limiter          ratelimit.Limiter   // rate limiter for unauthenticated endpoints (nil = no limiting)
 	ipHasher         *ratelimit.IPHasher // rotating HMAC hasher for per-IP keys (nil = IP limiting disabled)
 	keyLoads         keyLoadTracker      // key unlocks in flight on this replica (see key_load_tracker.go)
+	forward          *forwarder          // cross-replica session forwarding (nil = disabled, see forward.go)
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -2588,6 +2590,7 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 			slog.Info("migrated legacy server-held keys at login", "user_id", userID, "count", n)
 		}
 		h.loadUserPassphraseKeys(ctx, userID, passphrase)
+		h.publishLoadedKeys(ctx)
 	}(user.ID, req.Password)
 
 	// Update last login. LastLoginIP intentionally not set (see above). Like the
@@ -3754,6 +3757,7 @@ func (h *Handler) unloadUserVaultKeys(ctx context.Context, userID string) {
 		}
 
 		h.signer.UnregisterKey(key.Pubkey)
+		h.forgetKeyLocation(ctx, key.Pubkey)
 		unloadedCount++
 	}
 
@@ -4079,8 +4083,15 @@ func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Kept as bytes: if another replica holds the key, this exact body is
+	// forwarded to it (see forward.go).
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, maxForwardBody))
+	if err != nil {
+		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
 	var req NostrConnectSessionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(rawBody, &req); err != nil {
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -4241,6 +4252,26 @@ func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Reque
 			// Login answers before the key is unlocked; if that unlock is still
 			// running on this replica, wait for it instead of refusing.
 			h.keyLoads.wait(r.Context(), claims.UserID, keyUnlockWait)
+		}
+		if !h.signer.IsKeyLoaded(key.Pubkey) && h.forward != nil && !isForwarded(r.Context()) {
+			// Another replica may hold the key (the user's login ran there).
+			fr := forwardedRequest{Authorization: r.Header.Get("Authorization"), Body: rawBody}
+			if c, cerr := r.Cookie("auth_token"); cerr == nil {
+				fr.AuthCookie = c.Value
+			}
+			status, body, ferr := h.forward.forwardSession(r.Context(), key.Pubkey, fr)
+			if ferr == nil {
+				slog.Info("nostrconnect forwarded to the replica holding the key",
+					"client", clientPubkey[:16]+"...", "key", req.KeyID, "status", status)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write(body)
+				return
+			}
+			if !errors.Is(ferr, errNoHolder) {
+				slog.Warn("nostrconnect forward failed; answering key_locked",
+					"key", req.KeyID, "error", ferr)
+			}
 		}
 		if !h.signer.IsKeyLoaded(key.Pubkey) {
 			slog.Warn("nostrconnect refused: key not unlocked on this replica",
