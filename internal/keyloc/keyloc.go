@@ -104,6 +104,23 @@ func (r *Registry) Forget(ctx context.Context, pubkey string) error {
 	return forgetScript.Run(ctx, r.rdb, []string{keyPrefix + pubkey}, r.self).Err()
 }
 
+// ForgetAll removes this replica's records for every given key (other
+// replicas' records are left alone). Called on graceful shutdown, so a request
+// arriving after this pod is gone does not try to forward to it.
+func (r *Registry) ForgetAll(ctx context.Context, pubkeys ...string) error {
+	if r == nil || len(pubkeys) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, opTimeout)
+	defer cancel()
+	pipe := r.rdb.Pipeline()
+	for _, pk := range pubkeys {
+		forgetScript.Run(ctx, pipe, []string{keyPrefix + pk}, r.self)
+	}
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
 // Lookup returns the forward address of another replica that holds pubkey.
 // It returns false when no replica is recorded, when the record names this
 // replica, or when the record is not a private IP:port (a planted record must

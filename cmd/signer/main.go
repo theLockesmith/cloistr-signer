@@ -417,6 +417,8 @@ func main() {
 	// Cross-replica forwarding: a session request that lands on a replica not
 	// holding the user's key is forwarded to the one that does.
 	var forwardServer *http.Server
+	var keyLocations *keyloc.Registry
+	stopKeyLocationRefresh := func() {}
 	if cfg.ForwardSecret != "" && cfg.CacheURL != "" {
 		self, err := keyloc.SelfAddr(cfg.PodIP, cfg.ForwardPort)
 		if err != nil {
@@ -426,7 +428,10 @@ func main() {
 		} else if err := apiHandler.SetForwarding([]byte(cfg.ForwardSecret), reg); err != nil {
 			slog.Error("cross-replica forwarding disabled", "error", err)
 		} else {
-			go reg.Run(ctx, nip46Signer.LoadedKeyPubkeys)
+			keyLocations = reg
+			refreshCtx, stopRefresh := context.WithCancel(ctx)
+			stopKeyLocationRefresh = stopRefresh
+			go reg.Run(refreshCtx, nip46Signer.LoadedKeyPubkeys)
 			forwardServer = &http.Server{
 				Addr:         ":" + cfg.ForwardPort,
 				Handler:      apiHandler.ForwardHandler(),
@@ -459,6 +464,17 @@ func main() {
 	nip46Signer.Stop()
 
 	// Shutdown HTTP server
+	// Drop this pod's key-location records before it goes away, so another
+	// replica does not try to forward to a pod that no longer exists. Stop the
+	// refresher first so it cannot re-publish them.
+	stopKeyLocationRefresh()
+	if keyLocations != nil {
+		if err := keyLocations.ForgetAll(shutdownCtx, nip46Signer.LoadedKeyPubkeys()...); err != nil {
+			slog.Warn("failed to drop key-location records on shutdown", "error", err)
+		} else {
+			slog.Info("dropped key-location records on shutdown")
+		}
+	}
 	if forwardServer != nil {
 		_ = forwardServer.Shutdown(shutdownCtx)
 	}
