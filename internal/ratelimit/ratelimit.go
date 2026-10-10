@@ -40,6 +40,9 @@ type Limiter interface {
 	// never takes a counter below zero and never creates one: a key that has
 	// already expired stays gone.
 	Release(ctx context.Context, key string) error
+
+	// Count reads a counter without changing it (0 if absent or expired).
+	Count(ctx context.Context, key string) (int, error)
 }
 
 // --- Redis-backed ---
@@ -62,15 +65,36 @@ func NewRedis(url, prefix string) (Limiter, error) {
 // standard fixed-window counter. The window boundary is set by whoever arrives
 // first; that is intentional, and the imprecision at the edge is irrelevant next
 // to the ceilings involved here.
+// allowScript counts an attempt and sets the window's expiry only when the
+// counter is created (or somehow has none), so the window is fixed from the
+// first attempt. Re-applying the expiry on every call would let a client that
+// keeps retrying while blocked, and everyone behind its NAT address, stay
+// blocked forever.
+var allowScript = redis.NewScript(`
+local c = redis.call('INCR', KEYS[1])
+if c == 1 or redis.call('PTTL', KEYS[1]) < 0 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+end
+return c
+`)
+
 func (r *redisLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
-	full := r.prefix + key
-	pipe := r.client.TxPipeline()
-	incr := pipe.Incr(ctx, full)
-	pipe.Expire(ctx, full, window)
-	if _, err := pipe.Exec(ctx); err != nil {
+	c, err := allowScript.Run(ctx, r.client, []string{r.prefix + key}, window.Milliseconds()).Int64()
+	if err != nil {
 		return true, fmt.Errorf("ratelimit backend: %w", err)
 	}
-	return incr.Val() <= int64(limit), nil
+	return c <= int64(limit), nil
+}
+
+func (r *redisLimiter) Count(ctx context.Context, key string) (int, error) {
+	n, err := r.client.Get(ctx, r.prefix+key).Int()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("ratelimit backend: %w", err)
+	}
+	return n, nil
 }
 
 // releaseScript decrements only an existing, positive counter, so a release
@@ -133,6 +157,15 @@ func (m *memoryLimiter) Allow(ctx context.Context, key string, limit int, window
 	return w.count <= limit, nil
 }
 
+func (m *memoryLimiter) Count(ctx context.Context, key string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w, ok := m.windows[key]; ok && time.Now().Before(w.expiresAt) {
+		return w.count, nil
+	}
+	return 0, nil
+}
+
 func (m *memoryLimiter) Release(ctx context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -154,11 +187,52 @@ func (m *memoryLimiter) Release(ctx context.Context, key string) error {
 // This observes the address transiently, which every network service does; the
 // privacy commitment is about retention, not about being unable to see the
 // packet you are answering.
+//
+// Two modes. NewSharedIPHasher derives each epoch's secret from a secret every
+// replica shares, so one address is one bucket across pods; NewIPHasher keeps
+// a random per-process secret (each replica then counts separately) for
+// deployments without a shared secret.
 type IPHasher struct {
 	mu       sync.RWMutex
 	secret   []byte
 	rotateAt time.Time
 	period   time.Duration
+
+	base []byte           // shared mode: per-epoch secrets derive from this
+	now  func() time.Time // shared mode clock
+}
+
+// NewSharedIPHasher derives the secret for epoch e (= unix time / period) as
+// HMAC(base, "cloistr-ip-bucket|e"), so every replica built from the same base
+// agrees on an address's key, and keys still rotate every period. base should
+// be a replica-shared secret of at least 32 bytes; it never leaves memory.
+func NewSharedIPHasher(base []byte, period time.Duration, now func() time.Time) *IPHasher {
+	if period <= 0 {
+		period = time.Hour
+	}
+	if now == nil {
+		now = time.Now
+	}
+	return &IPHasher{base: append([]byte(nil), base...), period: period, now: now}
+}
+
+func (h *IPHasher) epochKey(epoch int64, ip string) string {
+	sec := hmac.New(sha256.New, h.base)
+	fmt.Fprintf(sec, "cloistr-ip-bucket|%d", epoch)
+	mac := hmac.New(sha256.New, sec.Sum(nil))
+	mac.Write([]byte(ip))
+	return hex.EncodeToString(mac.Sum(nil)[:16])
+}
+
+// Keys returns the address's bucket key for the current epoch and, in shared
+// mode, for the previous one (empty otherwise), so a caller can keep counting
+// the previous epoch's attempts until they expire instead of resetting.
+func (h *IPHasher) Keys(ip string) (current, previous string) {
+	if h.base == nil {
+		return h.Key(ip), ""
+	}
+	e := h.now().Unix() / int64(h.period.Seconds())
+	return h.epochKey(e, ip), h.epochKey(e-1, ip)
 }
 
 // NewIPHasher creates a hasher rotating its secret every period.
@@ -185,6 +259,10 @@ func (h *IPHasher) rotate() error {
 
 // Key returns the current bucket key for an address, rotating the secret if due.
 func (h *IPHasher) Key(ip string) string {
+	if h.base != nil {
+		cur, _ := h.Keys(ip)
+		return cur
+	}
 	h.mu.RLock()
 	if time.Now().Before(h.rotateAt) {
 		mac := hmac.New(sha256.New, h.secret)
@@ -208,6 +286,32 @@ func (h *IPHasher) Key(ip string) string {
 	out := hex.EncodeToString(mac.Sum(nil)[:16])
 	h.mu.Unlock()
 	return out
+}
+
+// AllowIP reserves one attempt against an address's budget. The previous
+// epoch's count still counts, so key rotation never hands out a fresh budget
+// mid-window; old-epoch counters simply expire. Returns the reserved key (for
+// Release) when allowed; on refusal nothing stays reserved.
+func AllowIP(ctx context.Context, lim Limiter, h *IPHasher, prefix, ip string, limit int, window time.Duration) (bool, string, error) {
+	cur, prev := h.Keys(ip)
+	used := 0
+	if prev != "" {
+		n, err := lim.Count(ctx, prefix+prev)
+		if err != nil {
+			return true, "", err // fail open like Allow
+		}
+		used = n
+	}
+	if used >= limit {
+		return false, "", nil
+	}
+	key := prefix + cur
+	allowed, err := lim.Allow(ctx, key, limit-used, window)
+	if !allowed {
+		_ = lim.Release(ctx, key)
+		return false, "", err
+	}
+	return true, key, err
 }
 
 // HashKey derives an opaque bucket key from a non-secret identifier such as a

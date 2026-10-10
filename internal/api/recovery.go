@@ -221,8 +221,9 @@ func (h *Handler) handleRecoveryChallenge(w http.ResponseWriter, r *http.Request
 		if rawHeader != "" {
 			ip := strings.TrimSpace(strings.SplitN(rawHeader, ",", 2)[0])
 			if ip != "" {
-				allowed, err := lim.Allow(ctx,
-					h.ipHasher.Key(ip),
+				// AllowIP counts the previous key epoch too, so key rotation
+				// never grants a fresh budget mid-window.
+				allowed, _, err := ratelimit.AllowIP(ctx, lim, h.ipHasher, "", ip,
 					h.config.Recovery.PerIPLimit,
 					h.config.Recovery.PerIPWindow,
 				)
