@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import apiClient from '../api/client';
+import apiClient, { ApiRequestError } from '../api/client';
+import { useSignerAuth } from '../hooks/useSignerAuth';
 import type { App } from '../types/api';
 
 export function AppsPage() {
@@ -72,6 +73,7 @@ export function AppsPage() {
  */
 function ConnectAppForm() {
   const queryClient = useQueryClient();
+  const { logout } = useSignerAuth();
   const { data: keys } = useQuery({ queryKey: ['keys'], queryFn: () => apiClient.listKeys() });
   const [uri, setUri] = useState('');
   const [keyId, setKeyId] = useState('');
@@ -124,11 +126,20 @@ function ConnectAppForm() {
             </option>
           ))}
         </select>
-        {connectMutation.isError && (
-          <div style={{ color: 'var(--signer-danger, #c0392b)', fontSize: '13px' }}>
-            {(connectMutation.error as Error).message}
-          </div>
-        )}
+        {connectMutation.isError &&
+          (connectMutation.error instanceof ApiRequestError && connectMutation.error.code === 'key_locked' ? (
+            <div className="auth-error">
+              Your signing key is locked on this server, so the app could not be connected. Sign out and sign in
+              again with your password to unlock it, then retry.{' '}
+              <button type="button" className="btn btn-secondary" onClick={() => void logout()}>
+                Sign in again
+              </button>
+            </div>
+          ) : (
+            <div style={{ color: 'var(--signer-danger, #c0392b)', fontSize: '13px' }}>
+              {(connectMutation.error as Error).message}
+            </div>
+          ))}
         {result && <div className="badge badge-info">{result}</div>}
         <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
           {connectMutation.isPending ? 'Approving...' : 'Approve & Connect'}

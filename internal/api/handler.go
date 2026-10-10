@@ -4030,6 +4030,48 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 	// SendNostrConnectResponse can sign + publish the ack (else the client times out).
 	h.ensureNostrConnectKeyLoaded(r.Context(), claims.SessionID, claims.UserID, key)
 
+	// Never approve a session this replica cannot serve: without the key the
+	// ack is never sent and the app waits forever while we answered success.
+	// Same gate as /nostrconnect/session: wait for an unlock in flight, hand
+	// the request to the replica holding the key, else say key_locked.
+	if !h.signer.IsKeyLoaded(key.Pubkey) {
+		h.keyLoads.wait(r.Context(), claims.UserID, keyUnlockWait)
+	}
+	if !h.signer.IsKeyLoaded(key.Pubkey) && h.forward != nil && !isForwarded(r.Context()) {
+		// The user approved explicitly in this form, so the holder records
+		// consent rather than asking again.
+		fwdBody, _ := json.Marshal(map[string]any{"uri": req.URI, "key_id": req.KeyID, "consent": true})
+		fr := forwardedRequest{Authorization: r.Header.Get("Authorization"), Body: fwdBody}
+		if c, cerr := r.Cookie("auth_token"); cerr == nil {
+			fr.AuthCookie = c.Value
+		}
+		status, body, ferr := h.forward.forwardSession(r.Context(), key.Pubkey, fr)
+		if ferr == nil {
+			slog.Info("nostrconnect (connect form) forwarded to the replica holding the key",
+				"client", clientPubkey[:16]+"...", "key", req.KeyID, "status", status)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write(body)
+			return
+		}
+		if !errors.Is(ferr, errNoHolder) {
+			slog.Warn("nostrconnect (connect form) forward failed; answering key_locked", "key", req.KeyID, "error", ferr)
+		}
+	}
+	if !h.signer.IsKeyLoaded(key.Pubkey) {
+		h.errorResponseCode(w, http.StatusConflict, "key_locked",
+			"Your signing key is locked on this server. Sign in with your password to unlock it.")
+		return
+	}
+
+	// The user approved explicitly in this form: record consent exactly as the
+	// forwarded path (and /nostrconnect/session) does, so later silent
+	// re-approval does not depend on which replica took the form.
+	if err := h.storage.RecordAppConsent(r.Context(), claims.UserID, clientPubkey, appName); err != nil {
+		slog.Warn("failed to record app consent", "error", err)
+		// Non-fatal: approve anyway so the user is not blocked.
+	}
+
 	if err := h.approveNostrConnect(r.Context(), key, clientPubkey, relay, secret, appName, appURL, appImage); err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
 		return
