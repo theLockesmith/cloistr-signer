@@ -439,6 +439,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 			h.handleFrostMigratePathA(w, r)
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/export") {
+			h.handleKeyExport(w, r)
+			return
+		}
 		h.handleKeyByID(w, r)
 	})
 
@@ -2472,10 +2476,19 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	guard := h.authGuard()
+	attempt, ok := guard.Begin(r, req.Username)
+	if !ok {
+		h.errorResponse(w, http.StatusTooManyRequests, "too many attempts; try again later")
+		return
+	}
+	defer attempt.End(r.Context())
+
 	// Get user
 	user, err := h.storage.GetUserByUsername(r.Context(), req.Username)
 	if err != nil {
 		// Don't reveal whether user exists
+		attempt.Fail(r.Context(), nil, "unknown user")
 		h.errorResponse(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -2488,16 +2501,7 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Verify password
 	if !auth.VerifyPassword(req.Password, user.PasswordHash) {
-		// Increment failed login attempts
-		h.storage.IncrementFailedLogins(r.Context(), user.ID)
-
-		// Check if we should lock the account
-		if user.FailedLoginAttempts+1 >= h.authConfig.MaxFailedAttempts {
-			lockUntil := time.Now().Add(h.authConfig.LockoutDuration)
-			h.storage.LockUser(r.Context(), user.ID, lockUntil)
-			slog.Warn("account locked due to failed logins", "username", req.Username)
-		}
-
+		attempt.Fail(r.Context(), user, "password")
 		h.errorResponse(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -2510,18 +2514,11 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Validate MFA code
-		if !auth.ValidateMFACode(user.MFASecret, req.MFACode) {
-			// Check backup codes
-			if idx := auth.ValidateBackupCode(req.MFACode, user.BackupCodes); idx >= 0 {
-				// Mark backup code as used (remove from list)
-				user.BackupCodes = append(user.BackupCodes[:idx], user.BackupCodes[idx+1:]...)
-				user.BackupCodesUsed++
-				h.storage.UpdateUser(r.Context(), user)
-			} else {
-				h.errorResponse(w, http.StatusUnauthorized, "invalid MFA code")
-				return
-			}
+		// A valid TOTP code, or a backup code (consumed on use).
+		if !guard.CheckMFA(r.Context(), user, req.MFACode) {
+			attempt.Fail(r.Context(), user, "mfa")
+			h.errorResponse(w, http.StatusUnauthorized, "invalid MFA code")
+			return
 		}
 	}
 

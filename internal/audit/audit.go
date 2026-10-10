@@ -25,6 +25,7 @@ const (
 	EventSignDenied    EventType = "sign.denied"
 	EventSignCompleted EventType = "sign.completed"
 	EventSignFailed    EventType = "sign.failed"
+	EventKeyExported   EventType = "key.exported"
 
 	// Auth events
 	EventUserLogin       EventType = "user.login"

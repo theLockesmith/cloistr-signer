@@ -178,6 +178,12 @@ type AuthConfig struct {
 	MFAIssuer                string   `yaml:"mfa_issuer"`                 // Issuer name for TOTP (default: Cloistr)
 	MaxFailedLogins          int      `yaml:"max_failed_logins"`          // Max failed logins before lockout (default: 5)
 	LockoutMinutes           int      `yaml:"lockout_minutes"`            // Lockout duration in minutes (default: 15)
+	// Attempt limits shared by sign-in, self-delete and key export, counted
+	// per account (requested username) and per client IP (needs
+	// RECOVERY_TRUSTED_PROXY_HEADER, as for recovery). 0 disables a layer.
+	AttemptsPerAccount   int `yaml:"attempts_per_account"`   // AUTH_ATTEMPTS_PER_ACCOUNT (default 10)
+	AttemptsPerIP        int `yaml:"attempts_per_ip"`        // AUTH_ATTEMPTS_PER_IP (default 30)
+	AttemptWindowMinutes int `yaml:"attempt_window_minutes"` // AUTH_ATTEMPT_WINDOW_MINUTES (default 15)
 	// Cross-subdomain SSO (unified-auth-design §5)
 	CookieDomain   string   `yaml:"cookie_domain"`   // Parent-domain for auth cookie, e.g. ".cloistr.xyz". Empty = host-only (dev/localhost).
 	AllowedOrigins []string `yaml:"allowed_origins"` // Extra CORS origins beyond *.cloistr.xyz and localhost (escape hatch).
@@ -249,6 +255,9 @@ func Load() (*Config, error) {
 			MFAIssuer:                "Cloistr",
 			MaxFailedLogins:          5,
 			LockoutMinutes:           15,
+			AttemptsPerAccount:       10,
+			AttemptsPerIP:            30,
+			AttemptWindowMinutes:     15,
 		},
 		// RPID and RPOrigins deliberately have no default: they are
 		// environment-specific, and a production default let any new
@@ -416,6 +425,9 @@ func Load() (*Config, error) {
 	if lockout := os.Getenv("LOCKOUT_MINUTES"); lockout != "" {
 		cfg.Auth.LockoutMinutes = getEnvInt("LOCKOUT_MINUTES", 15)
 	}
+	cfg.Auth.AttemptsPerAccount = getEnvInt("AUTH_ATTEMPTS_PER_ACCOUNT", cfg.Auth.AttemptsPerAccount)
+	cfg.Auth.AttemptsPerIP = getEnvInt("AUTH_ATTEMPTS_PER_IP", cfg.Auth.AttemptsPerIP)
+	cfg.Auth.AttemptWindowMinutes = getEnvInt("AUTH_ATTEMPT_WINDOW_MINUTES", cfg.Auth.AttemptWindowMinutes)
 
 	if sessionInactivity := os.Getenv("SESSION_INACTIVITY_MINUTES"); sessionInactivity != "" {
 		cfg.Auth.SessionInactivityMinutes = getEnvInt("SESSION_INACTIVITY_MINUTES", 1440)

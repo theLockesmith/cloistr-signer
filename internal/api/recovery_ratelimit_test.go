@@ -35,6 +35,8 @@ type stubLimiter struct {
 	err     error
 }
 
+func (s *stubLimiter) Release(context.Context, string) error { return nil }
+
 func (s *stubLimiter) Allow(_ context.Context, _ string, _ int, _ time.Duration) (bool, error) {
 	return s.allowed, s.err
 }

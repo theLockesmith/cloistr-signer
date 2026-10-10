@@ -33,6 +33,13 @@ type Limiter interface {
 	// specifically, that would lock out exactly the users the flow exists to
 	// rescue. The error is returned alongside so callers can log it.
 	Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error)
+
+	// Release hands back one unit consumed by Allow, so a budget can count only
+	// the attempts that end badly: reserve with Allow up front (atomic, so a
+	// burst cannot overshoot), Release when the attempt turns out fine. It
+	// never takes a counter below zero and never creates one: a key that has
+	// already expired stays gone.
+	Release(ctx context.Context, key string) error
 }
 
 // --- Redis-backed ---
@@ -64,6 +71,23 @@ func (r *redisLimiter) Allow(ctx context.Context, key string, limit int, window 
 		return true, fmt.Errorf("ratelimit backend: %w", err)
 	}
 	return incr.Val() <= int64(limit), nil
+}
+
+// releaseScript decrements only an existing, positive counter, so a release
+// after the window expired cannot create a key without a TTL.
+var releaseScript = redis.NewScript(`
+local v = redis.call('GET', KEYS[1])
+if v and tonumber(v) > 0 then
+  return redis.call('DECR', KEYS[1])
+end
+return 0
+`)
+
+func (r *redisLimiter) Release(ctx context.Context, key string) error {
+	if err := releaseScript.Run(ctx, r.client, []string{r.prefix + key}).Err(); err != nil && err != redis.Nil {
+		return fmt.Errorf("ratelimit backend: %w", err)
+	}
+	return nil
 }
 
 // --- memory-backed ---
@@ -107,6 +131,15 @@ func (m *memoryLimiter) Allow(ctx context.Context, key string, limit int, window
 	}
 	w.count++
 	return w.count <= limit, nil
+}
+
+func (m *memoryLimiter) Release(ctx context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if w, ok := m.windows[key]; ok && time.Now().Before(w.expiresAt) && w.count > 0 {
+		w.count--
+	}
+	return nil
 }
 
 // --- key derivation ---

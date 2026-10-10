@@ -193,42 +193,8 @@ func (h *Handler) handleSelfDelete(w http.ResponseWriter, r *http.Request, claim
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	user, err := h.storage.GetUser(r.Context(), claims.UserID)
-	if err != nil {
-		h.errorResponse(w, http.StatusNotFound, "user not found")
-		return
-	}
-	if user.LockedUntil != nil && time.Now().Before(*user.LockedUntil) {
-		h.errorResponse(w, http.StatusForbidden, "account locked")
-		return
-	}
-	if !auth.VerifyPassword(req.Password, user.PasswordHash) {
-		h.storage.IncrementFailedLogins(r.Context(), user.ID)
-		if user.FailedLoginAttempts+1 >= h.authConfig.MaxFailedAttempts {
-			h.storage.LockUser(r.Context(), user.ID, time.Now().Add(h.authConfig.LockoutDuration))
-			slog.Warn("account locked due to failed password at account deletion", "user_id", user.ID)
-		}
-		h.errorResponse(w, http.StatusUnauthorized, "invalid credentials")
-		return
-	}
-	if user.MFAEnabled {
-		if req.MFACode == "" {
-			h.errorResponseCode(w, http.StatusUnauthorized, "mfa_required", "MFA code required")
-			return
-		}
-		if !auth.ValidateMFACode(user.MFASecret, req.MFACode) {
-			idx := auth.ValidateBackupCode(req.MFACode, user.BackupCodes)
-			if idx < 0 {
-				h.errorResponse(w, http.StatusUnauthorized, "invalid MFA code")
-				return
-			}
-			user.BackupCodes = append(user.BackupCodes[:idx], user.BackupCodes[idx+1:]...)
-			user.BackupCodesUsed++
-			_ = h.storage.UpdateUser(r.Context(), user)
-		}
-	}
-	if req.Confirm != user.Username {
-		h.errorResponse(w, http.StatusBadRequest, "type your username exactly to confirm deletion")
+	user, ok := h.reauthenticate(w, r, claims.UserID, req.Password, req.MFACode, req.Confirm, "type your username exactly to confirm deletion")
+	if !ok {
 		return
 	}
 
