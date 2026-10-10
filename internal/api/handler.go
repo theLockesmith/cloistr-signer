@@ -48,6 +48,7 @@ type Handler struct {
 	ipHasher         *ratelimit.IPHasher // rotating HMAC hasher for per-IP keys (nil = IP limiting disabled)
 	keyLoads         keyLoadTracker      // key unlocks in flight on this replica (see key_load_tracker.go)
 	forward          *forwarder          // cross-replica session forwarding (nil = disabled, see forward.go)
+	accountVault     accountVault        // Vault deletions for account deletion (nil = Vault disabled)
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -259,7 +260,7 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 		}
 	}
 
-	return &Handler{
+	h := &Handler{
 		config:  cfg,
 		signer:  signer,
 		storage: store,
@@ -279,6 +280,10 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 		userDKG:          frost.NewUserDKG(),
 		webauthn:         wa,
 	}
+	if vaultClient != nil {
+		h.accountVault = vaultClient
+	}
+	return h
 }
 
 // SetDistributedDKG sets the distributed DKG coordinator (called after nostr client is ready)
@@ -2738,7 +2743,7 @@ func (h *Handler) reconcilePlatformIdentity(ctx context.Context, user *storage.U
 }
 
 func (h *Handler) handleUserMe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -2746,6 +2751,10 @@ func (h *Handler) handleUserMe(w http.ResponseWriter, r *http.Request) {
 	claims, err := h.validateAuthHeader(r)
 	if err != nil {
 		h.errorResponse(w, http.StatusUnauthorized, "invalid or missing token")
+		return
+	}
+	if r.Method == http.MethodDelete {
+		h.handleSelfDelete(w, r, claims)
 		return
 	}
 
@@ -5316,6 +5325,11 @@ func (h *Handler) handleAdminUserByPubkey(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		// DELETE /api/v1/admin/users/{id}: the admin UI addresses users by ID.
+		h.handleAdminDeleteUser(w, r, parts[0])
+		return
+	}
 	pubkey := parts[0]
 
 	// GET /api/v1/admin/users/{pubkey} - get user details

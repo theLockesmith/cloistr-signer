@@ -80,7 +80,76 @@ export function SettingsPage() {
             Log Out
           </button>
         </div>
+
+        {/* Delete account */}
+        <DeleteAccountCard username={user?.username ?? ''} mfaEnabled={!!user?.mfa_enabled} onDeleted={logout} />
       </div>
+    </div>
+  );
+}
+
+function DeleteAccountCard({ username, mfaEnabled, onDeleted }: { username: string; mfaEnabled: boolean; onDeleted: () => void }) {
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [password, setPassword] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState('');
+
+  const deleteMutation = useMutation({
+    mutationFn: () => apiClient.deleteAccount(password, confirm, mfaEnabled ? mfaCode : undefined),
+    onSuccess: () => onDeleted(),
+    onError: (err: Error) => setError(err.message),
+  });
+
+  const canSubmit = acknowledged && password !== '' && confirm === username && (!mfaEnabled || mfaCode !== '');
+
+  return (
+    <div className="card" style={{ borderColor: 'var(--signer-danger)' }}>
+      <h2 className="card-title" style={{ color: 'var(--signer-danger)', marginBottom: '16px' }}>
+        Delete Account
+      </h2>
+      <p style={{ color: 'var(--signer-text-muted)', marginBottom: '12px' }}>
+        Before you delete your account, make sure you can still use your identity elsewhere: keep your own copy
+        of each key (its nsec or recovery phrase) or move it to another signer first. Deleting removes your
+        account, your keys, every app connection and your encrypted key storage from this signer. The signer
+        cannot recover a deleted key.
+      </p>
+      <label style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', marginBottom: '16px' }}>
+        <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />
+        <span>I have my own copy of my keys, or I no longer need them.</span>
+      </label>
+
+      {error && <div className="auth-error">{error}</div>}
+
+      {acknowledged && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            setError('');
+            deleteMutation.mutate();
+          }}
+        >
+          <div className="form-group">
+            <label className="form-label">Password</label>
+            <input type="password" className="form-input" value={password} onChange={(e) => setPassword(e.target.value)} required />
+          </div>
+          {mfaEnabled && (
+            <div className="form-group">
+              <label className="form-label">MFA code</label>
+              <input className="form-input" inputMode="numeric" autoComplete="one-time-code" value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} required />
+            </div>
+          )}
+          <div className="form-group">
+            <label className="form-label">
+              Type your username <strong>{username}</strong> to confirm
+            </label>
+            <input className="form-input" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="off" required />
+          </div>
+          <button type="submit" className="btn btn-danger" disabled={!canSubmit || deleteMutation.isPending}>
+            {deleteMutation.isPending ? 'Deleting...' : 'Permanently delete my account'}
+          </button>
+        </form>
+      )}
     </div>
   );
 }

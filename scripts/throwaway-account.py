@@ -7,7 +7,7 @@ a live test measures.
 
     scripts/throwaway-account.py create  CREDFILE           # register; creds -> CREDFILE (0600)
     scripts/throwaway-account.py login   CREDFILE TOKFILE   # session token -> TOKFILE (0600)
-    scripts/throwaway-account.py delete  CREDFILE           # delete account + keys, shred CREDFILE
+    scripts/throwaway-account.py delete  CREDFILE           # self-delete via the API, shred CREDFILE
 
 Nothing secret is ever printed: only the generated username. Usernames always
 start with "throwaway-", and delete refuses any other name.
@@ -18,14 +18,13 @@ can differ, so a live test that needs exactly ONE replica holding the key must
 account for both (check the pod logs for "created initial signing key" and
 "loaded passphrase-wrapped keys").
 
-delete runs one guarded DELETE against the signer database from a short-lived
-postgres pod in the cloistr namespace (kubectl access required). The account's
-Vault userpass entry, provisioned at registration, is not removed (that needs
-Vault admin rights).
+delete goes through the product's own account deletion (DELETE
+/api/v1/users/me with the password and the typed username), the same path a
+real user takes; anything the server could not delete yet (today the Vault
+transit key) is reported and retried by the server's sweep.
 
 SIGNER_BASE overrides the API base URL (default https://signer.cloistr.xyz).
 """
-import base64
 import json
 import os
 import re
@@ -87,36 +86,24 @@ def login(cred, tok):
     print(f"logged in {user}")
 
 
-def database_url():
-    raw = subprocess.run(
-        ["kubectl", "-n", "cloistr", "get", "secret", "signer-secret", "-o", "jsonpath={.data.database-url}"],
-        capture_output=True, text=True, check=True).stdout
-    return base64.b64decode(raw).decode()
-
-
 def delete(cred):
-    user, _ = read_creds(cred)
-    # Only names this script generates; nothing else can reach the SQL below.
+    """Delete the account through the product's own self-delete path
+    (DELETE /api/v1/users/me), which revokes sessions and grants, removes the
+    Vault login and policy, deletes the account and keys, and records any Vault
+    object it could not delete yet for the server's retry sweep."""
+    user, pw = read_creds(cred)
+    # Only names this script generates.
     if not NAME_RE.match(user):
         sys.exit(f"refusing to delete {user!r}: not a {PREFIX}* account made by this script")
-    sql = f"""\\set ON_ERROR_STOP on
-begin;
-delete from signer_permissions where key_id in (
-  select k.pubkey from signer_keys k join signer_web_accounts a on k.owner_id = a.id
-   where a.username = '{user}' and a.username like '{PREFIX}%');
-delete from signer_web_accounts where username = '{user}' and username like '{PREFIX}%';
-select 'remaining=' || count(*) from signer_web_accounts where username = '{user}';
-commit;
-"""
-    out = subprocess.run(
-        ["kubectl", "-n", "cloistr", "run", "throwaway-del-" + secrets.token_hex(3), "--rm", "-i",
-         "--restart=Never", "--quiet", "--image=postgres:16-alpine", "--env=DBURL=" + database_url(),
-         "--command", "--", "sh", "-c", 'psql "$DBURL" -X -t -A -f -'],
-        input=sql, capture_output=True, text=True)
-    if out.returncode != 0 or "remaining=0" not in out.stdout:
-        sys.exit(f"delete failed: {out.stderr.strip()[:200]}")
+    st, resp = call("POST", "/api/v1/users/login", {"username": user, "password": pw})
+    if st != 200 or not resp.get("token"):
+        sys.exit(f"login failed: HTTP {st} {resp.get('error', '')}")
+    st, resp = call("DELETE", "/api/v1/users/me", {"password": pw, "confirm": user}, resp["token"])
+    if st != 200 or not resp.get("deleted"):
+        sys.exit(f"delete failed: HTTP {st} {resp.get('error', '')} (creds kept for retry)")
     subprocess.run(["shred", "-u", cred], check=False)
-    print(f"deleted {user}")
+    retained = resp.get("retained") or []
+    print(f"deleted {user}" + (f" (retained for server sweep: {', '.join(retained)})" if retained else ""))
 
 
 if __name__ == "__main__":
