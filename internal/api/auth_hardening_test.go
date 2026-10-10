@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -197,5 +198,52 @@ func TestExport_NcryptsecPasswordMinimumLength(t *testing.T) {
 	b["export_password"] = "long1234" // 8 characters
 	if rr := f.export(t, f.key.ID, b); rr.Code != http.StatusOK {
 		t.Fatalf("8-char export password: status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Only failed attempts spend the budget: a user who signs in often never
+// sees 429.
+func TestLogin_SuccessfulSignInsDoNotSpendBudget(t *testing.T) {
+	f := newExportFixture(t, nil)
+	f.limitAttempts(t, 3, 3)
+	for i := 0; i < 6; i++ {
+		if rr := f.login(t, exportUsername, exportPassword, "", "198.51.100.1"); rr.Code != http.StatusOK {
+			t.Fatalf("successful sign-in %d: status = %d, want 200", i+1, rr.Code)
+		}
+	}
+}
+
+func TestExport_SuccessDoesNotSpendBudget(t *testing.T) {
+	f := newExportFixture(t, nil)
+	f.limitAttempts(t, 2, 1000)
+	for i := 0; i < 4; i++ {
+		if rr := f.export(t, f.key.ID, validExport("nsec")); rr.Code != http.StatusOK {
+			t.Fatalf("export %d: status = %d, want 200", i+1, rr.Code)
+		}
+	}
+}
+
+// The budget is reserved atomically before the password check, so a burst of
+// parallel guesses cannot all slip past it.
+func TestLogin_ParallelBurstCappedExactly(t *testing.T) {
+	f := newExportFixture(t, nil)
+	f.limitAttempts(t, 3, 1000)
+	var wg sync.WaitGroup
+	codes := make(chan int, 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes <- f.login(t, exportUsername, "wrong", "", "").Code
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	got := map[int]int{}
+	for c := range codes {
+		got[c]++
+	}
+	if got[http.StatusUnauthorized] != 3 || got[http.StatusTooManyRequests] != 17 {
+		t.Fatalf("burst outcome = %v, want exactly 3x401 and 17x429", got)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/authguard"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/ratelimit"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -28,8 +30,8 @@ type EventPreview struct {
 	KindName    string   `json:"kind_name"`
 	Content     string   `json:"content"`
 	ContentFull string   `json:"content_full"`
-	Tags        []string `json:"tags"`       // Human-readable tag summary
-	Mentions    []string `json:"mentions"`   // npubs mentioned
+	Tags        []string `json:"tags"`     // Human-readable tag summary
+	Mentions    []string `json:"mentions"` // npubs mentioned
 	CreatedAt   string   `json:"created_at"`
 	HasContent  bool     `json:"has_content"`
 }
@@ -220,6 +222,18 @@ type Handler struct {
 	status        StatusProvider
 	reqHandler    RequestHandler
 	discovery     DiscoveryClient
+	limiter       ratelimit.Limiter   // shared auth attempt limits (nil = none; lockout still applies)
+	ipHasher      *ratelimit.IPHasher // per-IP attempt limit (nil = off)
+}
+
+// SetAuthLimits gives the legacy web sign-in the same attempt limits as the
+// API sign-in; pass the API handler's limiter and IP hasher.
+func (h *Handler) SetAuthLimits(l ratelimit.Limiter, ih *ratelimit.IPHasher) {
+	h.limiter, h.ipHasher = l, ih
+}
+
+func (h *Handler) authGuard() *authguard.Guard {
+	return &authguard.Guard{Store: h.storage, Auth: h.authConfig, Cfg: h.config, Limiter: h.limiter, IPHasher: h.ipHasher}
 }
 
 // DiscoveryClient provides relay metadata lookup
@@ -924,9 +938,21 @@ func (h *Handler) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Same protections as /api/v1/users/login (shared in authguard): attempt
+	// limits, lockout on wrong passwords and wrong MFA codes, and single-use
+	// backup codes. This endpoint once had none of them.
+	guard := h.authGuard()
+	attempt, ok := guard.Begin(r, req.Username)
+	if !ok {
+		h.jsonError(w, http.StatusTooManyRequests, "Too many attempts; try again later")
+		return
+	}
+	defer attempt.End(r.Context())
+
 	// Get user
 	user, err := h.storage.GetUserByUsername(r.Context(), req.Username)
 	if err != nil {
+		attempt.Fail(r.Context(), nil, "unknown user")
 		h.jsonError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
@@ -939,7 +965,7 @@ func (h *Handler) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 
 	// Verify password
 	if !auth.VerifyPassword(req.Password, user.PasswordHash) {
-		h.storage.IncrementFailedLogins(r.Context(), user.ID)
+		attempt.Fail(r.Context(), user, "password")
 		h.jsonError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
@@ -952,12 +978,10 @@ func (h *Handler) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if !auth.ValidateMFACode(user.MFASecret, req.MFACode) {
-			// Check backup codes
-			if idx := auth.ValidateBackupCode(req.MFACode, user.BackupCodes); idx < 0 {
-				h.jsonError(w, http.StatusUnauthorized, "Invalid MFA code")
-				return
-			}
+		if !guard.CheckMFA(r.Context(), user, req.MFACode) {
+			attempt.Fail(r.Context(), user, "mfa")
+			h.jsonError(w, http.StatusUnauthorized, "Invalid MFA code")
+			return
 		}
 	}
 

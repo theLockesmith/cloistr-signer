@@ -19,15 +19,20 @@ func (h *Handler) reauthenticate(w http.ResponseWriter, r *http.Request, userID,
 		h.errorResponse(w, http.StatusNotFound, "user not found")
 		return nil, false
 	}
-	if !h.allowAuthAttempt(w, r, user.Username) {
+	guard := h.authGuard()
+	attempt, ok := guard.Begin(r, user.Username)
+	if !ok {
+		h.errorResponse(w, http.StatusTooManyRequests, "too many attempts; try again later")
 		return nil, false
 	}
+	defer attempt.End(r.Context())
+
 	if user.LockedUntil != nil && time.Now().Before(*user.LockedUntil) {
 		h.errorResponse(w, http.StatusForbidden, "account locked")
 		return nil, false
 	}
 	if !auth.VerifyPassword(password, user.PasswordHash) {
-		h.recordAuthFailure(r.Context(), user, "password")
+		attempt.Fail(r.Context(), user, "password")
 		h.errorResponse(w, http.StatusUnauthorized, "invalid credentials")
 		return nil, false
 	}
@@ -36,16 +41,10 @@ func (h *Handler) reauthenticate(w http.ResponseWriter, r *http.Request, userID,
 			h.errorResponseCode(w, http.StatusUnauthorized, "mfa_required", "MFA code required")
 			return nil, false
 		}
-		if !auth.ValidateMFACode(user.MFASecret, mfaCode) {
-			idx := auth.ValidateBackupCode(mfaCode, user.BackupCodes)
-			if idx < 0 {
-				h.recordAuthFailure(r.Context(), user, "mfa")
-				h.errorResponse(w, http.StatusUnauthorized, "invalid MFA code")
-				return nil, false
-			}
-			user.BackupCodes = append(user.BackupCodes[:idx], user.BackupCodes[idx+1:]...)
-			user.BackupCodesUsed++
-			_ = h.storage.UpdateUser(r.Context(), user)
+		if !guard.CheckMFA(r.Context(), user, mfaCode) {
+			attempt.Fail(r.Context(), user, "mfa")
+			h.errorResponse(w, http.StatusUnauthorized, "invalid MFA code")
+			return nil, false
 		}
 	}
 	if confirm != user.Username {

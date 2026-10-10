@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
 )
 
 // --- NewMemory window behaviour ---
@@ -147,5 +149,54 @@ func TestIPHasher_KeyChangesAfterRotation(t *testing.T) {
 	after := h.Key("192.0.2.1")
 	if before == after {
 		t.Error("key did not change after rotation period elapsed")
+	}
+}
+
+// Release hands back one reserved unit, never below zero and never creating
+// a counter that outlives its window.
+func TestMemoryRelease(t *testing.T) {
+	ctx := context.Background()
+	l := NewMemory()
+	for i := 0; i < 2; i++ {
+		_, _ = l.Allow(ctx, "k", 2, time.Minute)
+	}
+	if ok, _ := l.Allow(ctx, "k", 2, time.Minute); ok {
+		t.Fatal("third Allow within limit 2 should be refused")
+	}
+	_ = l.Release(ctx, "k")
+	_ = l.Release(ctx, "k")
+	if ok, _ := l.Allow(ctx, "k", 2, time.Minute); !ok {
+		t.Fatal("after releasing, an attempt should be allowed again")
+	}
+	_ = l.Release(ctx, "missing")
+	if ok, _ := l.Allow(ctx, "missing", 1, time.Minute); !ok {
+		t.Fatal("releasing a missing key must not leave a negative or blocking counter")
+	}
+	if ok, _ := l.Allow(ctx, "missing", 1, time.Minute); ok {
+		t.Fatal("releasing a missing key must not grant extra allowance")
+	}
+}
+
+func TestRedisRelease(t *testing.T) {
+	mr := miniredis.RunT(t)
+	l, err := NewRedis("redis://"+mr.Addr(), "t:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	_, _ = l.Allow(ctx, "k", 1, time.Minute)
+	if ok, _ := l.Allow(ctx, "k", 1, time.Minute); ok {
+		t.Fatal("second Allow within limit 1 should be refused")
+	}
+	_ = l.Release(ctx, "k")
+	_ = l.Release(ctx, "k")
+	if ok, _ := l.Allow(ctx, "k", 1, time.Minute); !ok {
+		t.Fatal("after releasing, an attempt should be allowed again")
+	}
+	if err := l.Release(ctx, "gone"); err != nil {
+		t.Fatal(err)
+	}
+	if mr.Exists("t:gone") {
+		t.Fatal("Release created a counter for a key that did not exist (it would have no TTL)")
 	}
 }

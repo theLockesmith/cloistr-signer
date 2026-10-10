@@ -225,10 +225,12 @@ func main() {
 
 	// IP hasher for per-IP rate limiting. Created unconditionally — it is cheap
 	// and the handler only consults it when TrustedProxyHeader is configured.
+	var authIPHasher *ratelimit.IPHasher
 	if ipHasher, ihErr := ratelimit.NewIPHasher(cfg.Recovery.IPSecretRotation); ihErr != nil {
 		slog.Warn("recovery rate limiter: failed to create IP hasher; per-IP limiting disabled", "error", ihErr)
 	} else {
 		apiHandler.SetIPHasher(ipHasher)
+		authIPHasher = ipHasher
 	}
 
 	// Initialize Web UI
@@ -237,6 +239,8 @@ func main() {
 		slog.Error("failed to initialize web handler", "error", err)
 		os.Exit(1)
 	}
+	// The legacy web sign-in shares the API sign-in's attempt limits.
+	webHandler.SetAuthLimits(recoveryLimiter, authIPHasher)
 
 	// Create HTTP server
 	mux := http.NewServeMux()
