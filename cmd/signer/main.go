@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -466,8 +467,9 @@ func main() {
 	apiHandler.StartDraining()
 	time.Sleep(drain)
 
-	// Graceful shutdown with timeout
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Graceful shutdown with timeout. Budget against the pod's 45s grace:
+	// preStop 5s + drain 10s + this 25s = 40s, leaving 5s before SIGKILL.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer shutdownCancel()
 
 	// Drop this pod's key-location records before it goes away, so another
@@ -483,13 +485,27 @@ func main() {
 	}
 
 	// Let in-flight HTTP and forwarded requests finish while the signer can
-	// still sign them; stop the signer (relay connections) last.
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		slog.Error("server shutdown error", "error", err)
-	}
+	// still sign them. Both servers close concurrently so forwarded requests
+	// get the full window rather than whatever the main server leaves; the
+	// signer (relay connections) stops last.
+	var closing sync.WaitGroup
+	closing.Add(1)
+	go func() {
+		defer closing.Done()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			slog.Error("server shutdown error", "error", err)
+		}
+	}()
 	if forwardServer != nil {
-		_ = forwardServer.Shutdown(shutdownCtx)
+		closing.Add(1)
+		go func() {
+			defer closing.Done()
+			if err := forwardServer.Shutdown(shutdownCtx); err != nil {
+				slog.Error("forward server shutdown error", "error", err)
+			}
+		}()
 	}
+	closing.Wait()
 	nip46Signer.Stop()
 
 	slog.Info("shutdown complete")
