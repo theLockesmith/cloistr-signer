@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/audit"
@@ -50,6 +51,7 @@ type Handler struct {
 	forward          *forwarder          // cross-replica session forwarding (nil = disabled, see forward.go)
 	accountVault     accountVault        // Vault deletions for account deletion (nil = Vault disabled)
 	vaultToken       vaultTokenStatuser  // the signer's own Vault token, for /health (nil = Vault disabled)
+	draining         atomic.Bool         // set on SIGTERM; fails readiness while in-flight work finishes
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -481,6 +483,13 @@ func (h *Handler) handleLive(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.draining.Load() {
+		h.jsonResponse(w, http.StatusServiceUnavailable, HealthResponse{
+			Status:    "not ready - shutting down",
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+		})
 		return
 	}
 	if vaultToken, ready := vaultTokenHealth(h.vaultToken); !ready {

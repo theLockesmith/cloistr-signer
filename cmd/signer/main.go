@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -458,16 +459,19 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	slog.Info("shutting down...")
+	// Drain: fail readiness so Kubernetes stops routing here, but keep serving
+	// what is already routed until the endpoint change has propagated. Closing
+	// at once turns that propagation lag into 502/503s at the edge.
+	drain := time.Duration(cfg.ShutdownDrainSeconds) * time.Second
+	slog.Info("shutting down: draining", "seconds", cfg.ShutdownDrainSeconds)
+	apiHandler.StartDraining()
+	time.Sleep(drain)
 
-	// Graceful shutdown with timeout
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Graceful shutdown with timeout. Budget against the pod's 45s grace:
+	// preStop 5s + drain 10s + this 25s = 40s, leaving 5s before SIGKILL.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer shutdownCancel()
 
-	// Stop signer (disconnect from relays)
-	nip46Signer.Stop()
-
-	// Shutdown HTTP server
 	// Drop this pod's key-location records before it goes away, so another
 	// replica does not try to forward to a pod that no longer exists. Stop the
 	// refresher first so it cannot re-publish them.
@@ -479,12 +483,30 @@ func main() {
 			slog.Info("dropped key-location records on shutdown")
 		}
 	}
+
+	// Let in-flight HTTP and forwarded requests finish while the signer can
+	// still sign them. Both servers close concurrently so forwarded requests
+	// get the full window rather than whatever the main server leaves; the
+	// signer (relay connections) stops last.
+	var closing sync.WaitGroup
+	closing.Add(1)
+	go func() {
+		defer closing.Done()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			slog.Error("server shutdown error", "error", err)
+		}
+	}()
 	if forwardServer != nil {
-		_ = forwardServer.Shutdown(shutdownCtx)
+		closing.Add(1)
+		go func() {
+			defer closing.Done()
+			if err := forwardServer.Shutdown(shutdownCtx); err != nil {
+				slog.Error("forward server shutdown error", "error", err)
+			}
+		}()
 	}
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		slog.Error("server shutdown error", "error", err)
-	}
+	closing.Wait()
+	nip46Signer.Stop()
 
 	slog.Info("shutdown complete")
 }
