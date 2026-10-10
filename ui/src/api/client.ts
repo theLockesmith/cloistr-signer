@@ -32,6 +32,22 @@ import type {
 
 const API_BASE = '/api/v1';
 
+/**
+ * An API failure that keeps the server's machine-readable code (e.g.
+ * "key_locked", "mfa_required") so pages can act on it, not just show text.
+ */
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
 class ApiClient {
   private token: string | null = null;
 
@@ -62,7 +78,7 @@ class ApiClient {
       const error: ApiError = await response.json().catch(() => ({
         error: `HTTP ${response.status}: ${response.statusText}`,
       }));
-      throw new Error(error.error);
+      throw new ApiRequestError(error.error, response.status, error.code);
     }
 
     // Handle empty responses
