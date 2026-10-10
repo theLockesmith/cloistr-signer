@@ -4067,6 +4067,14 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The user approved explicitly in this form: record consent exactly as the
+	// forwarded path (and /nostrconnect/session) does, so later silent
+	// re-approval does not depend on which replica took the form.
+	if err := h.storage.RecordAppConsent(r.Context(), claims.UserID, clientPubkey, appName); err != nil {
+		slog.Warn("failed to record app consent", "error", err)
+		// Non-fatal: approve anyway so the user is not blocked.
+	}
+
 	if err := h.approveNostrConnect(r.Context(), key, clientPubkey, relay, secret, appName, appURL, appImage); err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
 		return
