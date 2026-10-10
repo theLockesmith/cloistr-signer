@@ -3961,8 +3961,8 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientPubkey := parts[0]
-	if len(clientPubkey) != 64 {
-		h.errorResponse(w, http.StatusBadRequest, "invalid client pubkey")
+	if !validClientPubkey(clientPubkey) {
+		h.errorResponse(w, http.StatusBadRequest, "invalid client pubkey: must be a 64-char hex x-only secp256k1 public key")
 		return
 	}
 
@@ -4144,8 +4144,8 @@ func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	clientPubkey := parts[0]
-	if len(clientPubkey) != 64 {
-		h.errorResponse(w, http.StatusBadRequest, "invalid client pubkey")
+	if !validClientPubkey(clientPubkey) {
+		h.errorResponse(w, http.StatusBadRequest, "invalid client pubkey: must be a 64-char hex x-only secp256k1 public key")
 		return
 	}
 
