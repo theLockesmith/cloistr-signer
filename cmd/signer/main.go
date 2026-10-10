@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"log/slog"
 	"net/http"
 	"os"
@@ -226,12 +228,24 @@ func main() {
 
 	// IP hasher for per-IP rate limiting. Created unconditionally — it is cheap
 	// and the handler only consults it when TrustedProxyHeader is configured.
+	// IP hasher for the per-IP limits. With a replica-shared secret every pod
+	// maps an address to the same bucket (one budget, not one per pod). The
+	// base is derived from SIGNER_FORWARD_SECRET under its own label, so the
+	// forward secret itself is never used as an HMAC key for IPs.
 	var authIPHasher *ratelimit.IPHasher
-	if ipHasher, ihErr := ratelimit.NewIPHasher(cfg.Recovery.IPSecretRotation); ihErr != nil {
+	if len(cfg.ForwardSecret) >= 32 {
+		mac := hmac.New(sha256.New, []byte(cfg.ForwardSecret))
+		mac.Write([]byte("cloistr-signer ip-bucket base v1"))
+		authIPHasher = ratelimit.NewSharedIPHasher(mac.Sum(nil), cfg.Recovery.IPSecretRotation, nil)
+		slog.Info("per-IP limits: shared IP hash across replicas")
+	} else if ipHasher, ihErr := ratelimit.NewIPHasher(cfg.Recovery.IPSecretRotation); ihErr != nil {
 		slog.Warn("recovery rate limiter: failed to create IP hasher; per-IP limiting disabled", "error", ihErr)
 	} else {
-		apiHandler.SetIPHasher(ipHasher)
 		authIPHasher = ipHasher
+		slog.Warn("per-IP limits: no shared secret (SIGNER_FORWARD_SECRET); each replica counts separately")
+	}
+	if authIPHasher != nil {
+		apiHandler.SetIPHasher(authIPHasher)
 	}
 
 	// Initialize Web UI

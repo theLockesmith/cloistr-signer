@@ -200,3 +200,27 @@ func TestRedisRelease(t *testing.T) {
 		t.Fatal("Release created a counter for a key that did not exist (it would have no TTL)")
 	}
 }
+
+// The window is fixed from the first attempt: retries while blocked must not
+// push the expiry out, or a client that keeps retrying (and everyone sharing
+// its NAT address) stays blocked forever.
+func TestRedisAllow_WindowDoesNotSlide(t *testing.T) {
+	mr := miniredis.RunT(t)
+	l, err := NewRedis("redis://"+mr.Addr(), "t:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	window := 10 * time.Second
+	for i := 0; i < 2; i++ {
+		_, _ = l.Allow(ctx, "k", 2, window)
+	}
+	mr.FastForward(6 * time.Second)
+	if ok, _ := l.Allow(ctx, "k", 2, window); ok {
+		t.Fatal("third attempt within the window should be refused")
+	}
+	mr.FastForward(5 * time.Second) // 11s after the first attempt
+	if ok, _ := l.Allow(ctx, "k", 2, window); !ok {
+		t.Fatal("block outlived its window: retries extended the expiry")
+	}
+}

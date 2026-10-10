@@ -53,29 +53,34 @@ func (g *Guard) Begin(r *http.Request, username string) (*Attempt, bool) {
 	if window <= 0 {
 		window = 15 * time.Minute
 	}
-	type layer struct {
-		key   string
-		limit int
-	}
-	var layers []layer
 	if n := g.Cfg.Auth.AttemptsPerAccount; n > 0 {
-		layers = append(layers, layer{"auth:acct:" + ratelimit.HashKey(strings.ToLower(strings.TrimSpace(username))), n})
+		key := "auth:acct:" + ratelimit.HashKey(strings.ToLower(strings.TrimSpace(username)))
+		allowed, err := g.Limiter.Allow(ctx, key, n, window)
+		if err != nil {
+			slog.Warn("auth rate limiter error", "error", err)
+		}
+		a.keys = append(a.keys, key)
+		if !allowed {
+			a.release(ctx) // a refused attempt tests nothing; hand every unit back
+			return nil, false
+		}
 	}
 	if n := g.Cfg.Auth.AttemptsPerIP; n > 0 && g.IPHasher != nil && g.Cfg.Recovery.TrustedProxyHeader != "" {
 		raw := r.Header.Get(g.Cfg.Recovery.TrustedProxyHeader)
 		if ip := strings.TrimSpace(strings.SplitN(raw, ",", 2)[0]); ip != "" {
-			layers = append(layers, layer{"auth:ip:" + g.IPHasher.Key(ip), n})
-		}
-	}
-	for _, l := range layers {
-		allowed, err := g.Limiter.Allow(ctx, l.key, l.limit, window)
-		if err != nil {
-			slog.Warn("auth rate limiter error", "error", err)
-		}
-		a.keys = append(a.keys, l.key)
-		if !allowed {
-			a.release(ctx) // a refused attempt tests nothing; hand every unit back
-			return nil, false
+			// AllowIP keeps counting the previous key epoch, so rotation never
+			// grants a fresh budget mid-window.
+			allowed, key, err := ratelimit.AllowIP(ctx, g.Limiter, g.IPHasher, "auth:ip:", ip, n, window)
+			if err != nil {
+				slog.Warn("auth rate limiter error", "error", err)
+			}
+			if !allowed {
+				a.release(ctx)
+				return nil, false
+			}
+			if key != "" {
+				a.keys = append(a.keys, key)
+			}
 		}
 	}
 	return a, true
