@@ -437,6 +437,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 			h.handleFrostMigratePathA(w, r)
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/export") {
+			h.handleKeyExport(w, r)
+			return
+		}
 		h.handleKeyByID(w, r)
 	})
 

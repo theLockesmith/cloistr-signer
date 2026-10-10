@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { useSignerAuth } from '../hooks/useSignerAuth';
 import apiClient from '../api/client';
 import type { PasskeyRegistrationFinishRequest, LightningKey } from '../types/api';
@@ -81,9 +81,155 @@ export function SettingsPage() {
           </button>
         </div>
 
+        {/* Export a key */}
+        <ExportKeyCard username={user?.username ?? ''} mfaEnabled={!!user?.mfa_enabled} />
+
         {/* Delete account */}
         <DeleteAccountCard username={user?.username ?? ''} mfaEnabled={!!user?.mfa_enabled} onDeleted={logout} />
       </div>
+    </div>
+  );
+}
+
+function ExportKeyCard({ username, mfaEnabled }: { username: string; mfaEnabled: boolean }) {
+  const { data: keys } = useQuery({ queryKey: ['keys'], queryFn: () => apiClient.listKeys() });
+  const exportable = (keys ?? []).filter((k) => k.key_type !== 'proxy' && k.key_type !== 'frost-user');
+  const [keyId, setKeyId] = useState('');
+  const [format, setFormat] = useState<'nsec' | 'ncryptsec'>('ncryptsec');
+  const [exportPassword, setExportPassword] = useState('');
+  const [password, setPassword] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState('');
+  // The exported key lives only in this component's state: never in the query
+  // cache, storage or the URL. Hiding it or leaving the page drops it.
+  const [exported, setExported] = useState<{ value: string; npub: string; format: string } | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const selectedKeyId = keyId || exportable[0]?.id || '';
+
+  const exportMutation = useMutation({
+    mutationFn: () =>
+      apiClient.exportKey(selectedKeyId, {
+        password,
+        confirm,
+        format,
+        mfaCode: mfaEnabled ? mfaCode : undefined,
+        exportPassword: format === 'ncryptsec' ? exportPassword : undefined,
+      }),
+    onSuccess: (res) => {
+      setExported({ value: res.value, npub: res.npub, format: res.format });
+      setPassword('');
+      setMfaCode('');
+      setConfirm('');
+      setExportPassword('');
+      exportMutation.reset();
+    },
+    onError: (err: Error) => setError(err.message),
+  });
+
+  const hide = () => {
+    setExported(null);
+    setCopied(false);
+  };
+
+  const canSubmit =
+    selectedKeyId !== '' &&
+    password !== '' &&
+    confirm === username &&
+    (!mfaEnabled || mfaCode !== '') &&
+    (format === 'nsec' || exportPassword.length >= 8);
+
+  return (
+    <div className="card" id="export-key">
+      <h2 className="card-title" style={{ marginBottom: '16px' }}>
+        Export a Key
+      </h2>
+      <p style={{ color: 'var(--signer-text-muted)', marginBottom: '16px' }}>
+        Take your own signing key with you. An <strong>ncryptsec</strong> (NIP-49) is protected by a password you
+        choose here and is the safer choice. A bare <strong>nsec</strong> gives full control of your identity to
+        anyone who sees it. The key is shown once and never stored or logged.
+      </p>
+
+      {error && <div className="auth-error">{error}</div>}
+
+      {exported ? (
+        <div>
+          <div className="form-group">
+            <label className="form-label">
+              Your {exported.format} for {exported.npub.slice(0, 16)}…
+            </label>
+            <textarea className="form-input" readOnly rows={3} value={exported.value} style={{ fontFamily: 'monospace', fontSize: '13px' }} />
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => {
+                void navigator.clipboard.writeText(exported.value).then(() => setCopied(true));
+              }}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+            <button type="button" className="btn btn-primary" onClick={hide}>
+              I have saved it, hide it
+            </button>
+          </div>
+        </div>
+      ) : exportable.length === 0 ? (
+        <p style={{ color: 'var(--signer-text-muted)' }}>You have no keys that can be exported.</p>
+      ) : (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            setError('');
+            exportMutation.mutate();
+          }}
+        >
+          <div className="form-group">
+            <label className="form-label">Key</label>
+            <select className="form-input" value={selectedKeyId} onChange={(e) => setKeyId(e.target.value)}>
+              {exportable.map((k) => (
+                <option key={k.id} value={k.id}>
+                  {k.name || k.pubkey.slice(0, 16)}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Format</label>
+            <select className="form-input" value={format} onChange={(e) => setFormat(e.target.value as 'nsec' | 'ncryptsec')}>
+              <option value="ncryptsec">ncryptsec (password-protected, recommended)</option>
+              <option value="nsec">nsec (unprotected)</option>
+            </select>
+          </div>
+          {format === 'ncryptsec' && (
+            <div className="form-group">
+              <label className="form-label">Password to protect the export (at least 8 characters)</label>
+              <input type="password" className="form-input" value={exportPassword} onChange={(e) => setExportPassword(e.target.value)} autoComplete="new-password" required />
+            </div>
+          )}
+          <div className="form-group">
+            <label className="form-label">Your account password</label>
+            <input type="password" className="form-input" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" required />
+          </div>
+          {mfaEnabled && (
+            <div className="form-group">
+              <label className="form-label">MFA code</label>
+              <input className="form-input" inputMode="numeric" autoComplete="one-time-code" value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} required />
+            </div>
+          )}
+          <div className="form-group">
+            <label className="form-label">
+              Type your username <strong>{username}</strong> to confirm
+            </label>
+            <input className="form-input" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="off" required />
+          </div>
+          <button type="submit" className="btn btn-primary" disabled={!canSubmit || exportMutation.isPending}>
+            {exportMutation.isPending ? 'Exporting...' : 'Export key'}
+          </button>
+        </form>
+      )}
     </div>
   );
 }
@@ -110,7 +256,8 @@ function DeleteAccountCard({ username, mfaEnabled, onDeleted }: { username: stri
       </h2>
       <p style={{ color: 'var(--signer-text-muted)', marginBottom: '12px' }}>
         Before you delete your account, make sure you can still use your identity elsewhere: keep your own copy
-        of each key (its nsec or recovery phrase) or move it to another signer first. Deleting removes your
+        of each key (its nsec or recovery phrase) or move it to another signer first. You can{' '}
+        <a href="#export-key">export each key above</a>. Deleting removes your
         account, your keys, every app connection and your encrypted key storage from this signer. The signer
         cannot recover a deleted key.
       </p>

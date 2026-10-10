@@ -105,6 +105,25 @@ class ApiClient {
     });
   }
 
+  // Export one of the user's own keys. The value is shown once and must not be
+  // cached or stored by the caller.
+  async exportKey(
+    keyId: string,
+    req: { password: string; confirm: string; format: 'nsec' | 'ncryptsec'; mfaCode?: string; exportPassword?: string },
+  ): Promise<{ format: string; value: string; pubkey: string; npub: string }> {
+    return this.fetch(`/keys/${encodeURIComponent(keyId)}/export`, {
+      method: 'POST',
+      cache: 'no-store',
+      body: JSON.stringify({
+        password: req.password,
+        confirm: req.confirm,
+        format: req.format,
+        ...(req.mfaCode ? { mfa_code: req.mfaCode } : {}),
+        ...(req.format === 'ncryptsec' ? { export_password: req.exportPassword } : {}),
+      }),
+    });
+  }
+
   async changePassword(currentPassword: string, newPassword: string): Promise<void> {
     return this.fetch('/users/password', {
       method: 'PUT',
