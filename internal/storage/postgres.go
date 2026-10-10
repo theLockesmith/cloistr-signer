@@ -1580,6 +1580,24 @@ func (ps *PostgresStorage) DeleteUser(ctx context.Context, id string) error {
 	return nil
 }
 
+func (ps *PostgresStorage) ConsumeBackupCode(ctx context.Context, userID, hashedCode string) (bool, error) {
+	// One atomic statement: only the backup-code columns change, and only if
+	// the code is still stored, so a concurrent consume of the same code
+	// matches no row.
+	result, err := ps.db.ExecContext(ctx, `
+		UPDATE signer_web_accounts
+		SET backup_codes = array_remove(backup_codes, $2), backup_codes_used = backup_codes_used + 1, updated_at = NOW()
+		WHERE id = $1 AND $2 = ANY(backup_codes)`, userID, hashedCode)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
+}
+
 func (ps *PostgresStorage) IncrementFailedLogins(ctx context.Context, userID string) error {
 	result, err := ps.db.ExecContext(ctx, `
 		UPDATE signer_web_accounts SET failed_login_attempts = failed_login_attempts + 1, updated_at = NOW()
