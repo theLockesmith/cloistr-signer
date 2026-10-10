@@ -49,6 +49,7 @@ type Handler struct {
 	keyLoads         keyLoadTracker      // key unlocks in flight on this replica (see key_load_tracker.go)
 	forward          *forwarder          // cross-replica session forwarding (nil = disabled, see forward.go)
 	accountVault     accountVault        // Vault deletions for account deletion (nil = Vault disabled)
+	vaultToken       vaultTokenStatuser  // the signer's own Vault token, for /health (nil = Vault disabled)
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -282,6 +283,7 @@ func NewHandler(cfg *config.Config, signer *signer.Signer, store storage.Storage
 	}
 	if vaultClient != nil {
 		h.accountVault = vaultClient
+		h.vaultToken = vaultClient
 	}
 	return h
 }
@@ -447,8 +449,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 // Health check response
 type HealthResponse struct {
-	Status    string `json:"status"`
-	Timestamp string `json:"timestamp"`
+	Status     string `json:"status"`
+	Timestamp  string `json:"timestamp"`
+	VaultToken string `json:"vault_token,omitempty"` // ok | low | unknown | invalid; empty when Vault is disabled
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -456,9 +459,11 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	vaultToken, _ := vaultTokenHealth(h.vaultToken)
 	h.jsonResponse(w, http.StatusOK, HealthResponse{
-		Status:    "ok",
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Status:     "ok",
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		VaultToken: vaultToken,
 	})
 }
 
@@ -476,6 +481,14 @@ func (h *Handler) handleLive(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if vaultToken, ready := vaultTokenHealth(h.vaultToken); !ready {
+		h.jsonResponse(w, http.StatusServiceUnavailable, HealthResponse{
+			Status:     "not ready - vault token expired or invalid",
+			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+			VaultToken: vaultToken,
+		})
 		return
 	}
 	status := h.signer.GetStatus()

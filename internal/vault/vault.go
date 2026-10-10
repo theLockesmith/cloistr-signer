@@ -14,6 +14,7 @@ import (
 	"net/textproto"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/metrics"
@@ -25,6 +26,10 @@ type Client struct {
 	token      string
 	mountPath  string
 	httpClient *http.Client
+
+	tokenMu      sync.Mutex
+	tokenExpiry  time.Time // zero until the first renewal or lookup succeeds
+	tokenInvalid bool      // Vault answered 403 to the token's own renewal
 }
 
 // Config holds Vault configuration
@@ -1160,6 +1165,9 @@ func (c *Client) RenewSelf(ctx context.Context) (int, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusForbidden {
+			return 0, fmt.Errorf("%w (status %d): %s", ErrTokenInvalid, resp.StatusCode, string(bodyBytes))
+		}
 		return 0, fmt.Errorf("vault renew error (status %d): %s", resp.StatusCode, string(bodyBytes))
 	}
 
@@ -1213,50 +1221,6 @@ func (c *Client) RenewToken(ctx context.Context, token string) (int, error) {
 		return 0, fmt.Errorf("failed to decode renew response: %w", err)
 	}
 	return result.Auth.LeaseDuration, nil
-}
-
-// StartTokenRenewal keeps the signer's Vault token alive for the life of the
-// process. It renews at roughly half the lease each cycle (floored at 1m,
-// capped at 12h) so a periodic token never lapses. Intended to run in a
-// goroutine; returns when ctx is cancelled. This is the fix for the token
-// silently expiring at its TTL and 403-ing all key operations.
-func (c *Client) StartTokenRenewal(ctx context.Context) {
-	// Initial renew confirms the token is valid + reveals the lease duration.
-	lease, err := c.RenewSelf(ctx)
-	if err != nil {
-		// A root/non-renewable/already-dead token can't be renewed. Log loudly
-		// and fall back to a conservative interval so we keep re-checking
-		// (e.g. after an operator re-mints) without spinning hot.
-		slog.Warn("initial vault token renewal failed — token may be expired, root, or non-renewable", "error", err)
-		lease = 3600
-	} else {
-		slog.Info("vault token auto-renewal started", "lease_seconds", lease)
-	}
-
-	for {
-		wait := time.Duration(lease/2) * time.Second
-		if wait < time.Minute {
-			wait = time.Minute
-		}
-		if wait > 12*time.Hour {
-			wait = 12 * time.Hour
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(wait):
-		}
-
-		newLease, err := c.RenewSelf(ctx)
-		if err != nil {
-			slog.Error("vault token renewal failed", "error", err)
-			lease = 300 // retry sooner on failure
-			continue
-		}
-		lease = newLease
-		slog.Debug("vault token renewed", "lease_seconds", lease)
-	}
 }
 
 // deleteAt issues DELETE on path; 200, 204 and 404 (already gone) all count as

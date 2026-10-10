@@ -1,8 +1,10 @@
 package metrics
 
 import (
+	"math"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -120,6 +122,16 @@ var (
 			Name: "coldforge_signer_nip46_sessions_active",
 			Help: "Active NIP-46 client sessions",
 		},
+	)
+
+	// VaultTokenTTL is the time left on the signer's own Vault token, from the
+	// expiry tracked by the renewal loop. NaN until an expiry is known.
+	VaultTokenTTL = promauto.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "coldforge_signer_vault_token_ttl_seconds",
+			Help: "Seconds until the signer's Vault token expires (NaN until known)",
+		},
+		vaultTokenTTLSeconds,
 	)
 
 	// RelayConnectionsPerKey tracks relay connections per signing key
@@ -280,4 +292,19 @@ func SetActiveNIP46Sessions(count int) {
 // SetRelayConnectionsPerKey sets the number of per-key relay clients
 func SetRelayConnectionsPerKey(count int) {
 	RelayConnectionsPerKey.Set(float64(count))
+}
+
+var vaultTokenExpiry atomic.Int64 // unix nanoseconds; 0 = unknown
+
+// SetVaultTokenExpiry records when the signer's Vault token expires.
+func SetVaultTokenExpiry(t time.Time) {
+	vaultTokenExpiry.Store(t.UnixNano())
+}
+
+func vaultTokenTTLSeconds() float64 {
+	ns := vaultTokenExpiry.Load()
+	if ns == 0 {
+		return math.NaN()
+	}
+	return time.Until(time.Unix(0, ns)).Seconds()
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 )
@@ -193,6 +194,10 @@ func (l *MemoryLogger) Close() error {
 
 // Helper to log to slog
 func logEvent(event *Event) {
+	if event.Type == EventSignCompleted || event.Type == EventSignFailed {
+		logSignEvent(event)
+		return
+	}
 	attrs := []any{
 		"audit_id", event.ID,
 		"type", event.Type,
@@ -212,6 +217,50 @@ func logEvent(event *Event) {
 		attrs = append(attrs, "error", event.ErrorReason)
 	}
 
+	if event.Success {
+		slog.Info("audit", attrs...)
+	} else {
+		slog.Warn("audit", attrs...)
+	}
+}
+
+// podName identifies the replica in every sign record (the pod's hostname).
+var podName = func() string {
+	if h, err := os.Hostname(); err == nil {
+		return h
+	}
+	return "unknown"
+}()
+
+// logSignEvent writes the durable accountability record for one signing
+// request: who (account and client, full pubkeys), what (method, kind, signed
+// event id), where (pod), when, and the outcome. Never the event content.
+func logSignEvent(event *Event) {
+	outcome := "signed"
+	if !event.Success {
+		outcome = "failed"
+	}
+	attrs := []any{
+		"audit_id", event.ID,
+		"type", event.Type,
+		"success", event.Success,
+		"outcome", outcome,
+		"account_pubkey", event.Target,
+		"client_pubkey", event.Actor,
+		"method", event.Details["method"],
+		"event_kind", event.Details["event_kind"],
+		"event_id", event.Details["event_id"],
+		"pod", podName,
+		"at", event.Timestamp.UTC().Format(time.RFC3339Nano),
+	}
+	if event.ErrorReason != "" {
+		attrs = append(attrs, "reason", event.ErrorReason)
+	}
+	for _, k := range []string{"proxy_key", "upstream_pubkey", "delegate_pubkey"} {
+		if v, ok := event.Details[k]; ok {
+			attrs = append(attrs, k, v)
+		}
+	}
 	if event.Success {
 		slog.Info("audit", attrs...)
 	} else {
