@@ -35,6 +35,9 @@ type Config struct {
 	// CacheURL is set (the key-location registry lives in Dragonfly).
 	ForwardSecret string         `yaml:"-"`            // SIGNER_FORWARD_SECRET
 	ForwardPort   string         `yaml:"forward_port"` // SIGNER_FORWARD_PORT, pod-to-pod listener (default 7778)
+	// ShutdownDrainSeconds is how long the pod keeps serving after SIGTERM with
+	// readiness failing, so traffic moves off it before it closes (SHUTDOWN_DRAIN_SECONDS, default 10).
+	ShutdownDrainSeconds int `yaml:"shutdown_drain_seconds"`
 	PodIP         string         `yaml:"-"`            // POD_IP (downward API); auto-detected when empty
 	Recovery      RecoveryConfig `yaml:"recovery"`     // Gating for the unauthenticated account-recovery endpoints
 }
@@ -348,6 +351,7 @@ func Load() (*Config, error) {
 	}
 	cfg.ForwardSecret = os.Getenv("SIGNER_FORWARD_SECRET")
 	cfg.ForwardPort = getEnv("SIGNER_FORWARD_PORT", "7778")
+	cfg.ShutdownDrainSeconds = getEnvInt("SHUTDOWN_DRAIN_SECONDS", 10)
 	cfg.PodIP = os.Getenv("POD_IP")
 	if ttlStr := os.Getenv("REQUEST_CLAIM_TTL_SECONDS"); ttlStr != "" {
 		ttl, err := strconv.Atoi(ttlStr)

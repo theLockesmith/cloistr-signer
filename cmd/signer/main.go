@@ -458,16 +458,18 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	slog.Info("shutting down...")
+	// Drain: fail readiness so Kubernetes stops routing here, but keep serving
+	// what is already routed until the endpoint change has propagated. Closing
+	// at once turns that propagation lag into 502/503s at the edge.
+	drain := time.Duration(cfg.ShutdownDrainSeconds) * time.Second
+	slog.Info("shutting down: draining", "seconds", cfg.ShutdownDrainSeconds)
+	apiHandler.StartDraining()
+	time.Sleep(drain)
 
 	// Graceful shutdown with timeout
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	// Stop signer (disconnect from relays)
-	nip46Signer.Stop()
-
-	// Shutdown HTTP server
 	// Drop this pod's key-location records before it goes away, so another
 	// replica does not try to forward to a pod that no longer exists. Stop the
 	// refresher first so it cannot re-publish them.
@@ -479,12 +481,16 @@ func main() {
 			slog.Info("dropped key-location records on shutdown")
 		}
 	}
-	if forwardServer != nil {
-		_ = forwardServer.Shutdown(shutdownCtx)
-	}
+
+	// Let in-flight HTTP and forwarded requests finish while the signer can
+	// still sign them; stop the signer (relay connections) last.
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("server shutdown error", "error", err)
 	}
+	if forwardServer != nil {
+		_ = forwardServer.Shutdown(shutdownCtx)
+	}
+	nip46Signer.Stop()
 
 	slog.Info("shutdown complete")
 }
