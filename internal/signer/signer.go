@@ -962,21 +962,27 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 		}
 	}()
 
-	// Audit logging on completion (for methods that warrant it)
+	// Audit logging on completion (for methods that warrant it). A successful
+	// sign_event or batch_sign leaves one record per signed event, carrying the
+	// event id and kind but never its content.
 	defer func() {
-		if s.auditLogger != nil && s.shouldAuditMethod(req.Method) {
-			eventKind := s.extractEventKind(req)
-			var eventType audit.EventType
-			var errReason string
-			if err != nil {
-				eventType = audit.EventSignFailed
-				errReason = err.Error()
-			} else {
-				eventType = audit.EventSignCompleted
+		if s.auditLogger == nil || !s.shouldAuditMethod(req.Method) {
+			return
+		}
+		var events []*audit.Event
+		if err != nil {
+			events = append(events, audit.NewSignEvent(audit.EventSignFailed, clientPubkey, targetPubkey, req.Method, s.extractEventKind(req), false, err.Error()))
+		} else if signed := signedEventsInResult(req.Method, result); len(signed) > 0 {
+			for _, ev := range signed {
+				e := audit.NewSignEvent(audit.EventSignCompleted, clientPubkey, targetPubkey, req.Method, ev.Kind, true, "")
+				e.Details["event_id"] = ev.ID
+				events = append(events, e)
 			}
+		} else {
+			events = append(events, audit.NewSignEvent(audit.EventSignCompleted, clientPubkey, targetPubkey, req.Method, s.extractEventKind(req), true, ""))
+		}
 
-			auditEvent := audit.NewSignEvent(eventType, clientPubkey, targetPubkey, req.Method, eventKind, err == nil, errReason)
-
+		for _, auditEvent := range events {
 			// Add proxy/delegate info if this is a proxy key
 			if bunkerURI, isProxy := s.proxyKeys[targetPubkey]; isProxy {
 				if uri, parseErr := bunker.Parse(bunkerURI); parseErr == nil {
@@ -1058,11 +1064,36 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 // shouldAuditMethod returns true if the method should be audit logged
 func (s *Signer) shouldAuditMethod(method string) bool {
 	switch method {
-	case "sign_event", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt", "cloistr_ecdh_tag":
+	case "sign_event", "batch_sign", "nip04_encrypt", "nip04_decrypt", "nip44_encrypt", "nip44_decrypt", "cloistr_ecdh_tag":
 		return true
 	default:
 		return false
 	}
+}
+
+type signedRef struct {
+	ID   string `json:"id"`
+	Kind int    `json:"kind"`
+}
+
+// signedEventsInResult returns the id and kind of each event a successful
+// sign_event or batch_sign produced, or nil for other methods.
+func signedEventsInResult(method, result string) []signedRef {
+	switch method {
+	case "sign_event":
+		var ev signedRef
+		if json.Unmarshal([]byte(result), &ev) != nil || ev.ID == "" {
+			return nil
+		}
+		return []signedRef{ev}
+	case "batch_sign":
+		var evs []signedRef
+		if json.Unmarshal([]byte(result), &evs) != nil {
+			return nil
+		}
+		return evs
+	}
+	return nil
 }
 
 // extractEventKind extracts the event kind from sign_event params
