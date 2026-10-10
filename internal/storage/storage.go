@@ -507,6 +507,11 @@ type Storage interface {
 	UpdateUser(ctx context.Context, user *User) error
 	DeleteUser(ctx context.Context, id string) error
 	IncrementFailedLogins(ctx context.Context, userID string) error
+	// ConsumeBackupCode removes one hashed backup code if it is still stored
+	// and counts it used, touching no other column (a full UpdateUser here
+	// could overwrite a lockout written concurrently). Returns false when the
+	// code is not stored, e.g. a concurrent request already consumed it.
+	ConsumeBackupCode(ctx context.Context, userID, hashedCode string) (bool, error)
 	ResetFailedLogins(ctx context.Context, userID string) error
 	LockUser(ctx context.Context, userID string, until time.Time) error
 	UnlockUser(ctx context.Context, userID string) error
@@ -1468,6 +1473,25 @@ func (m *MemoryStorage) DeleteUser(ctx context.Context, id string) error {
 	}
 
 	return nil
+}
+
+func (m *MemoryStorage) ConsumeBackupCode(ctx context.Context, userID, hashedCode string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	user, exists := m.users[userID]
+	if !exists {
+		return false, ErrUserNotFound
+	}
+	for i, c := range user.BackupCodes {
+		if c == hashedCode {
+			user.BackupCodes = append(user.BackupCodes[:i:i], user.BackupCodes[i+1:]...)
+			user.BackupCodesUsed++
+			user.UpdatedAt = time.Now()
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *MemoryStorage) IncrementFailedLogins(ctx context.Context, userID string) error {

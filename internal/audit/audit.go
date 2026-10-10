@@ -217,6 +217,12 @@ func logEvent(event *Event) {
 	if event.ErrorReason != "" {
 		attrs = append(attrs, "error", event.ErrorReason)
 	}
+	// Small, non-secret details worth having in the durable log line.
+	for _, k := range []string{"format", "key_id"} {
+		if v, ok := event.Details[k]; ok {
+			attrs = append(attrs, k, v)
+		}
+	}
 
 	if event.Success {
 		slog.Info("audit", attrs...)

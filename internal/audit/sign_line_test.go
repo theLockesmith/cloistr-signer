@@ -73,3 +73,17 @@ func TestNonSignLine_Unchanged(t *testing.T) {
 		t.Fatalf("user event got sign fields: %s", buf.String())
 	}
 }
+
+// The key.exported line names the format (and key id) so the durable log
+// shows what kind of export happened, never the key itself.
+func TestKeyExportedLine_ShowsFormat(t *testing.T) {
+	buf := captureSlog(t)
+	e := &Event{Type: EventKeyExported, Actor: "u1", Target: acct, Success: true,
+		Details: map[string]interface{}{"format": "ncryptsec", "key_id": "k1"}}
+	_ = NewMemoryLogger(10).Log(context.Background(), e)
+	var line map[string]any
+	_ = json.Unmarshal(buf.Bytes(), &line)
+	if line["format"] != "ncryptsec" || line["key_id"] != "k1" {
+		t.Fatalf("format/key_id = %v/%v, want ncryptsec/k1: %s", line["format"], line["key_id"], buf.String())
+	}
+}

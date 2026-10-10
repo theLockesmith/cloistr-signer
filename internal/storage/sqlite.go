@@ -1285,6 +1285,46 @@ func (ss *SQLiteStorage) DeleteUser(ctx context.Context, id string) error {
 	return err
 }
 
+func (ss *SQLiteStorage) ConsumeBackupCode(ctx context.Context, userID, hashedCode string) (bool, error) {
+	// backup_codes is a JSON array here, so remove the code in Go and write
+	// back only if the column is unchanged (compare-and-swap), retrying once
+	// if another request changed it in between.
+	for attempt := 0; attempt < 3; attempt++ {
+		var raw string
+		if err := ss.db.QueryRowContext(ctx, `SELECT COALESCE(backup_codes, '[]') FROM signer_web_accounts WHERE id = ?`, userID).Scan(&raw); err != nil {
+			if err == sql.ErrNoRows {
+				return false, ErrUserNotFound
+			}
+			return false, err
+		}
+		var codes []string
+		if err := json.Unmarshal([]byte(raw), &codes); err != nil {
+			return false, err
+		}
+		idx := -1
+		for i, c := range codes {
+			if c == hashedCode {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return false, nil
+		}
+		next, _ := json.Marshal(append(codes[:idx:idx], codes[idx+1:]...))
+		res, err := ss.db.ExecContext(ctx, `
+			UPDATE signer_web_accounts SET backup_codes = ?, backup_codes_used = backup_codes_used + 1
+			WHERE id = ? AND COALESCE(backup_codes, '[]') = ?`, string(next), userID, raw)
+		if err != nil {
+			return false, err
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (ss *SQLiteStorage) IncrementFailedLogins(ctx context.Context, userID string) error {
 	_, err := ss.db.ExecContext(ctx, `
 		UPDATE signer_web_accounts SET failed_login_attempts = failed_login_attempts + 1 WHERE id = ?`, userID)

@@ -2448,7 +2448,20 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("failed to ensure platform user", "error", err, "pubkey", user.Pubkey[:16]+"...")
 	}
 
-	slog.Info("user registered", "username", req.Username, "user_id", userID, "pubkey", user.Pubkey[:16]+"...")
+	// Under Option A the account's identity is its signing key; user.Pubkey is
+	// the derived platform key that reconcile retires once a key exists.
+	// Logging only the latter made the two look like a mismatch.
+	signingPubkey := ""
+	if primaryKey != nil {
+		signingPubkey = primaryKey.Pubkey
+	}
+	if signingPubkey != "" {
+		slog.Info("user registered", "username", req.Username, "user_id", userID,
+			"signing_pubkey", signingPubkey[:16]+"...", "derived_pubkey", user.Pubkey[:16]+"...")
+	} else {
+		slog.Info("user registered", "username", req.Username, "user_id", userID,
+			"derived_pubkey", user.Pubkey[:16]+"...", "signing_pubkey", "none")
+	}
 
 	h.jsonResponse(w, http.StatusCreated, UserResponse{
 		ID:         user.ID,

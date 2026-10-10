@@ -128,11 +128,18 @@ func (g *Guard) CheckMFA(ctx context.Context, user *storage.User, code string) b
 	if idx < 0 {
 		return false
 	}
-	user.BackupCodes = append(user.BackupCodes[:idx:idx], user.BackupCodes[idx+1:]...)
-	user.BackupCodesUsed++
-	if err := g.Store.UpdateUser(ctx, user); err != nil {
+	// Remove exactly this code in storage, touching no other column: a full
+	// UpdateUser from this request's copy of the user could overwrite a lockout
+	// written meanwhile. A concurrent consume of the same code loses here.
+	ok, err := g.Store.ConsumeBackupCode(ctx, user.ID, user.BackupCodes[idx])
+	if err != nil {
 		slog.Error("could not consume backup code; refusing it", "user_id", user.ID, "error", err)
 		return false
 	}
+	if !ok {
+		return false
+	}
+	user.BackupCodes = append(user.BackupCodes[:idx:idx], user.BackupCodes[idx+1:]...)
+	user.BackupCodesUsed++
 	return true
 }
