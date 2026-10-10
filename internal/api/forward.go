@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -44,6 +45,7 @@ import (
 
 const (
 	forwardPath      = "/internal/v1/nostrconnect/session"
+	evictPath        = "/internal/v1/keys/evict"
 	hdrFwdTs         = "X-Signer-Fwd-Ts"
 	hdrFwdNonce      = "X-Signer-Fwd-Nonce"
 	forwardSkew      = 30 * time.Second
@@ -87,6 +89,7 @@ type forwarder struct {
 	client       *http.Client
 	allowAnyAddr bool // tests only: httptest listens on loopback
 	serve        http.HandlerFunc
+	evictLocal   func(ctx context.Context, pubkeys []string)
 
 	mu   sync.Mutex
 	seen map[string]time.Time
@@ -120,7 +123,13 @@ func (h *Handler) SetForwarding(secret []byte, loc KeyLocator) error {
 		locator: loc,
 		client:  &http.Client{Timeout: forwardTimeout},
 		serve:   h.handleNostrConnectSession,
-		seen:    make(map[string]time.Time),
+		evictLocal: func(ctx context.Context, pubkeys []string) {
+			for _, pk := range pubkeys {
+				h.signer.UnregisterKey(pk)
+				h.forgetKeyLocation(ctx, pk)
+			}
+		},
+		seen: make(map[string]time.Time),
 	}
 	return nil
 }
@@ -135,6 +144,13 @@ func (h *Handler) ForwardHandler() http.Handler {
 			return
 		}
 		h.forward.receive(w, r)
+	})
+	mux.HandleFunc(evictPath, func(w http.ResponseWriter, r *http.Request) {
+		if h.forward == nil {
+			http.NotFound(w, r)
+			return
+		}
+		h.forward.receiveEvict(w, r)
 	})
 	return mux
 }
@@ -326,3 +342,94 @@ type bufferedResponse struct {
 func (b *bufferedResponse) Header() http.Header         { return b.header }
 func (b *bufferedResponse) Write(p []byte) (int, error) { return b.body.Write(p) }
 func (b *bufferedResponse) WriteHeader(code int)        { b.status = code }
+
+// evictRequest is the sealed payload of an eviction: keys whose account was
+// deleted, which the holding replica must drop from memory.
+type evictRequest struct {
+	Pubkeys []string `json:"pubkeys"`
+}
+
+// evictRemote tells the replica(s) holding these keys to drop them. Best
+// effort: account deletion has already removed the account, grants and
+// sessions, and a replica that misses this evicts the key on its next use
+// (Signer.evictIfKeyDeleted) or restart.
+func (f *forwarder) evictRemote(ctx context.Context, pubkeys []string) {
+	byAddr := map[string][]string{}
+	for _, pk := range pubkeys {
+		if addr, ok := f.locator.Lookup(ctx, pk); ok {
+			byAddr[addr] = append(byAddr[addr], pk)
+		}
+	}
+	for addr, pks := range byAddr {
+		if !f.allowAnyAddr {
+			host, _, err := net.SplitHostPort(addr)
+			if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsPrivate() {
+				continue
+			}
+		}
+		plain, err := json.Marshal(evictRequest{Pubkeys: pks})
+		if err != nil {
+			continue
+		}
+		nonce := make([]byte, f.aead.NonceSize())
+		if _, err := rand.Read(nonce); err != nil {
+			continue
+		}
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		sealed := f.aead.Seal(nil, nonce, plain, []byte("evict|"+ts))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+evictPath, bytes.NewReader(sealed))
+		if err != nil {
+			continue
+		}
+		req.Header.Set(hdrFwdTs, ts)
+		req.Header.Set(hdrFwdNonce, hex.EncodeToString(nonce))
+		resp, err := f.client.Do(req)
+		if err != nil {
+			slog.Warn("remote key eviction failed", "addr", addr, "keys", len(pks), "error", err)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			slog.Warn("remote key eviction refused", "addr", addr, "status", resp.StatusCode)
+		}
+	}
+}
+
+func (f *forwarder) receiveEvict(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ts := r.Header.Get(hdrFwdTs)
+	nonceHex := r.Header.Get(hdrFwdNonce)
+	sent, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil || time.Since(time.Unix(sent, 0)).Abs() > forwardSkew {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	nonce, err := hex.DecodeString(nonceHex)
+	if err != nil || len(nonce) != f.aead.NonceSize() {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxForwardBody))
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// "evict|" binds the seal to this endpoint: a sealed session forward
+	// cannot be replayed here, nor the reverse.
+	plain, err := f.aead.Open(nil, nonce, raw, []byte("evict|"+ts))
+	if err != nil || !f.firstUse(nonceHex) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var er evictRequest
+	if err := json.Unmarshal(plain, &er); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	f.evictLocal(r.Context(), er.Pubkeys)
+	slog.Info("evicted keys at another replica's request", "keys", len(er.Pubkeys))
+	w.WriteHeader(http.StatusNoContent)
+}
