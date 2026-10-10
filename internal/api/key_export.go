@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -19,6 +20,10 @@ import (
 // ncryptsecLogN is the NIP-49 scrypt cost (2^16 rounds, the spec's suggested
 // interactive default).
 const ncryptsecLogN = 16
+
+// minExportPasswordLen is the shortest ncryptsec export password accepted;
+// the ncryptsec is only as strong as this password against offline guessing.
+const minExportPasswordLen = 8
 
 type keyExportRequest struct {
 	Password       string `json:"password"`
@@ -63,8 +68,8 @@ func (h *Handler) handleKeyExport(w http.ResponseWriter, r *http.Request) {
 	switch req.Format {
 	case "nsec":
 	case "ncryptsec":
-		if req.ExportPassword == "" {
-			h.errorResponse(w, http.StatusBadRequest, "export_password is required for an ncryptsec export")
+		if len([]rune(req.ExportPassword)) < minExportPasswordLen {
+			h.errorResponse(w, http.StatusBadRequest, fmt.Sprintf("export_password must be at least %d characters for an ncryptsec export", minExportPasswordLen))
 			return
 		}
 	default:

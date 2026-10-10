@@ -2467,6 +2467,10 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !h.allowAuthAttempt(w, r, req.Username) {
+		return
+	}
+
 	// Get user
 	user, err := h.storage.GetUserByUsername(r.Context(), req.Username)
 	if err != nil {
@@ -2483,16 +2487,7 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Verify password
 	if !auth.VerifyPassword(req.Password, user.PasswordHash) {
-		// Increment failed login attempts
-		h.storage.IncrementFailedLogins(r.Context(), user.ID)
-
-		// Check if we should lock the account
-		if user.FailedLoginAttempts+1 >= h.authConfig.MaxFailedAttempts {
-			lockUntil := time.Now().Add(h.authConfig.LockoutDuration)
-			h.storage.LockUser(r.Context(), user.ID, lockUntil)
-			slog.Warn("account locked due to failed logins", "username", req.Username)
-		}
-
+		h.recordAuthFailure(r.Context(), user, "password")
 		h.errorResponse(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -2514,6 +2509,7 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 				user.BackupCodesUsed++
 				h.storage.UpdateUser(r.Context(), user)
 			} else {
+				h.recordAuthFailure(r.Context(), user, "mfa")
 				h.errorResponse(w, http.StatusUnauthorized, "invalid MFA code")
 				return
 			}

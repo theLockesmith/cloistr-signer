@@ -1,7 +1,6 @@
 package api
 
 import (
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -12,12 +11,15 @@ import (
 // reauthenticate gates an irreversible or sensitive action (account
 // deletion, key export) on a fresh password, an MFA code when MFA is on, and
 // the username typed as confirmation. On failure it writes the response and
-// returns ok=false. A wrong password counts as a failed login and can lock
-// the account, exactly as at sign-in.
+// returns ok=false. It shares sign-in's attempt limits, and a wrong password
+// or MFA code counts toward the same lockout as at sign-in.
 func (h *Handler) reauthenticate(w http.ResponseWriter, r *http.Request, userID, password, mfaCode, confirm, confirmMsg string) (*storage.User, bool) {
 	user, err := h.storage.GetUser(r.Context(), userID)
 	if err != nil {
 		h.errorResponse(w, http.StatusNotFound, "user not found")
+		return nil, false
+	}
+	if !h.allowAuthAttempt(w, r, user.Username) {
 		return nil, false
 	}
 	if user.LockedUntil != nil && time.Now().Before(*user.LockedUntil) {
@@ -25,11 +27,7 @@ func (h *Handler) reauthenticate(w http.ResponseWriter, r *http.Request, userID,
 		return nil, false
 	}
 	if !auth.VerifyPassword(password, user.PasswordHash) {
-		h.storage.IncrementFailedLogins(r.Context(), user.ID)
-		if user.FailedLoginAttempts+1 >= h.authConfig.MaxFailedAttempts {
-			h.storage.LockUser(r.Context(), user.ID, time.Now().Add(h.authConfig.LockoutDuration))
-			slog.Warn("account locked due to failed password at re-authentication", "user_id", user.ID)
-		}
+		h.recordAuthFailure(r.Context(), user, "password")
 		h.errorResponse(w, http.StatusUnauthorized, "invalid credentials")
 		return nil, false
 	}
@@ -41,6 +39,7 @@ func (h *Handler) reauthenticate(w http.ResponseWriter, r *http.Request, userID,
 		if !auth.ValidateMFACode(user.MFASecret, mfaCode) {
 			idx := auth.ValidateBackupCode(mfaCode, user.BackupCodes)
 			if idx < 0 {
+				h.recordAuthFailure(r.Context(), user, "mfa")
 				h.errorResponse(w, http.StatusUnauthorized, "invalid MFA code")
 				return nil, false
 			}
