@@ -102,6 +102,32 @@ func GenerateJWT(cfg *Config, userID, username string) (string, time.Time, error
 	return GenerateJWTWithSession(cfg, userID, username, "")
 }
 
+// GenerateJWTWithSessionUntil is GenerateJWTWithSession with an explicit expiry
+// (stay signed in: the sign-in lifetime follows the user's choice, and sliding
+// sessions are re-issued with a later expiry on use).
+func GenerateJWTWithSessionUntil(cfg *Config, userID, username, sessionID string, expiresAt time.Time) (string, time.Time, error) {
+	if cfg.JWTSecret == "" {
+		return "", time.Time{}, errors.New("JWT secret not configured")
+	}
+	expiresAt = expiresAt.Truncate(time.Second) // JWT NumericDate has second precision
+	claims := JWTClaims{
+		UserID:    userID,
+		Username:  username,
+		SessionID: sessionID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    cfg.JWTIssuer,
+			Subject:   userID,
+		},
+	}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(cfg.JWTSecret))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("failed to sign token: %w", err)
+	}
+	return signed, expiresAt, nil
+}
+
 // GenerateJWTWithSession generates a new JWT token for a user with session tracking
 func GenerateJWTWithSession(cfg *Config, userID, username, sessionID string) (string, time.Time, error) {
 	if cfg.JWTSecret == "" {

@@ -385,3 +385,16 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("DefaultConfig().MFAIssuer = %q, want %q", cfg.MFAIssuer, "Coldforge")
 	}
 }
+
+func TestGenerateJWTWithSessionUntil(t *testing.T) {
+	cfg := &Config{JWTSecret: "s", JWTIssuer: "t", TokenExpiry: time.Hour}
+	until := time.Now().Add(90 * 24 * time.Hour).Truncate(time.Second)
+	tok, exp, err := GenerateJWTWithSessionUntil(cfg, "u1", "alice", "sess-1", until)
+	if err != nil || !exp.Equal(until) {
+		t.Fatalf("exp=%v err=%v", exp, err)
+	}
+	c, err := ValidateJWT(cfg, tok)
+	if err != nil || c.SessionID != "sess-1" || c.UserID != "u1" || !c.ExpiresAt.Time.Equal(until) {
+		t.Fatalf("claims %+v err %v", c, err)
+	}
+}

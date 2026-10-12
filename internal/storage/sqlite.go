@@ -328,6 +328,7 @@ func (ss *SQLiteStorage) initSchema() error {
 		sealed     BLOB NOT NULL,
 		expires_at TEXT NOT NULL,
 		created_at TEXT NOT NULL,
+		sliding    INTEGER NOT NULL DEFAULT 0,
 		UNIQUE (session_id, key_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_user    ON signer_session_seals(user_id);

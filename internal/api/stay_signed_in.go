@@ -14,6 +14,7 @@ import (
 
 	"github.com/nbd-wtf/go-nostr"
 
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/seal"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
@@ -89,12 +90,21 @@ func (h *Handler) SetSealer(s seal.Sealer) {
 	}
 }
 
-// stayGrant is what a sign-in was granted.
+// stayGrant is what a sign-in was granted. The sign-in session, its token and its
+// seals all share expiresAt.
 type stayGrant struct {
 	choice    string
 	mode      string
 	expiresAt time.Time
+	sliding   bool   // until_signout: renewed on use, up to the idle cap
 	half      []byte // split mode only
+}
+
+func (h *Handler) now() time.Time {
+	if h.stayNow != nil {
+		return h.stayNow()
+	}
+	return time.Now()
 }
 
 // StaySignedInGrant is returned in the login response.
@@ -108,9 +118,11 @@ type StaySignedInGrant struct {
 	SplitHalf string `json:"split_half,omitempty"`
 }
 
-// grantStaySignedIn decides what a sign-in gets. sessionExpiry bounds every grant:
-// a seal never outlives the sign-in session it is bound to.
-func (h *Handler) grantStaySignedIn(choice string, split bool, sessionExpiry time.Time) (*stayGrant, *StaySignedInGrant) {
+// grantStaySignedIn decides what a sign-in gets. A granted choice also sets the
+// sign-in session's lifetime: 1d and 30d are fixed; until_signout slides (renewed
+// on use, ends after SESSION_IDLE_DAYS idle). SESSION_SEAL_MAX_DAYS caps all of
+// them. Session-only (nil grant) keeps the default sign-in lifetime.
+func (h *Handler) grantStaySignedIn(choice string, split bool) (*stayGrant, *StaySignedInGrant) {
 	if choice == "" {
 		return nil, nil
 	}
@@ -134,24 +146,18 @@ func (h *Handler) grantStaySignedIn(choice string, split bool, sessionExpiry tim
 	}
 
 	now := time.Now()
-	exp := sessionExpiry
+	var exp time.Time
 	switch choice {
 	case stayChoiceDay:
 		exp = now.Add(24 * time.Hour)
 	case stayChoiceMonth:
 		exp = now.Add(30 * 24 * time.Hour)
+	case stayChoiceUntilSignOut:
+		exp, g.sliding = now.Add(h.idleWindow()), true
 	}
-	if max := h.config.StaySignedIn.MaxDays; max > 0 {
-		if capAt := now.Add(time.Duration(max) * 24 * time.Hour); exp.After(capAt) {
-			exp = capAt
-		}
-	}
-	if exp.After(sessionExpiry) {
-		exp = sessionExpiry
-	}
-	g.expiresAt = exp
+	g.expiresAt = h.capAtMaxDays(now, exp).Truncate(time.Second)
 
-	resp := &StaySignedInGrant{Granted: choice, Mode: g.mode, ExpiresAt: &exp}
+	resp := &StaySignedInGrant{Granted: choice, Mode: g.mode, ExpiresAt: &g.expiresAt}
 	if g.half != nil {
 		resp.SplitHalf = base64.RawURLEncoding.EncodeToString(g.half)
 	}
@@ -192,7 +198,7 @@ func (h *Handler) sealSessionKeys(ctx context.Context, userID, sessionID string,
 		}
 		row := &storage.SessionSeal{
 			ID: newSealID(), UserID: userID, KeyID: key.ID, Pubkey: key.Pubkey, SessionID: sessionID,
-			Mode: g.mode, Sealed: blob, ExpiresAt: g.expiresAt, CreatedAt: time.Now(),
+			Mode: g.mode, Sealed: blob, ExpiresAt: g.expiresAt, CreatedAt: time.Now(), Sliding: g.sliding,
 		}
 		if err := h.storage.UpsertSessionSeal(ctx, row); err != nil {
 			slog.Error("stay signed in: store seal", "user_id", userID, "pubkey", shortPK(key.Pubkey), "error", err)
@@ -585,4 +591,93 @@ func shortPK(pk string) string {
 		return pk[:16] + "..."
 	}
 	return pk
+}
+
+// ---- Sliding sessions ("until I sign out") ----
+
+// slideRenewEvery throttles renewal writes: a session is extended only once its
+// expiry has fallen this far behind now + idle window.
+const slideRenewEvery = time.Hour
+
+func (h *Handler) idleWindow() time.Duration {
+	d := h.config.StaySignedIn.IdleDays
+	if d < 1 {
+		d = 90
+	}
+	return time.Duration(d) * 24 * time.Hour
+}
+
+// capAtMaxDays applies the operator ceiling, counted from the sign-in.
+func (h *Handler) capAtMaxDays(signedInAt, exp time.Time) time.Time {
+	if max := h.config.StaySignedIn.MaxDays; max > 0 {
+		if ceiling := signedInAt.Add(time.Duration(max) * 24 * time.Hour); exp.After(ceiling) {
+			return ceiling
+		}
+	}
+	return exp
+}
+
+// slideSession renews an "until I sign out" session: its expiry, its seals'
+// expiry and a fresh token all move to now + idle window (capped by max days).
+// Returns ok=false for sessions that don't slide. With force, a token is issued
+// even when the renewal itself is throttled (the explicit refresh call).
+func (h *Handler) slideSession(ctx context.Context, claims *auth.JWTClaims, force bool) (token string, exp time.Time, ok bool) {
+	if h.stay == nil || claims == nil || claims.SessionID == "" {
+		return "", time.Time{}, false
+	}
+	seals, err := h.storage.ListSessionSealsBySession(ctx, claims.SessionID)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	sliding := false
+	for _, sl := range seals {
+		sliding = sliding || sl.Sliding
+	}
+	if !sliding {
+		return "", time.Time{}, false
+	}
+	sess, err := h.storage.GetUserSession(ctx, claims.SessionID)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	exp = sess.ExpiresAt
+	next := h.capAtMaxDays(sess.CreatedAt, h.now().Add(h.idleWindow())).Truncate(time.Second)
+	if next.Sub(sess.ExpiresAt) >= slideRenewEvery {
+		if err := h.storage.ExtendUserSession(ctx, sess.ID, next); err != nil {
+			slog.Warn("stay signed in: session renewal failed", "error", err)
+			return "", time.Time{}, false
+		}
+		if _, err := h.storage.ExtendSessionSeals(ctx, sess.ID, next); err != nil {
+			slog.Warn("stay signed in: seal renewal failed", "error", err)
+		}
+		exp = next
+	} else if !force {
+		return "", time.Time{}, false
+	}
+	token, exp, err = auth.GenerateJWTWithSessionUntil(h.authConfig, claims.UserID, claims.Username, sess.ID, exp)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+	return token, exp, true
+}
+
+// POST /api/v1/users/session/refresh -> {"token","expires_at"} for an "until I sign
+// out" session (renewing it); 409 not_sliding for any other session.
+func (h *Handler) handleSessionRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	tok, exp, ok := h.slideSession(r.Context(), claims, true)
+	if !ok {
+		h.errorResponseCode(w, http.StatusConflict, "not_sliding", "this sign-in has a fixed lifetime; sign in again when it ends")
+		return
+	}
+	http.SetCookie(w, h.newAuthCookie(tok, exp))
+	h.jsonResponse(w, http.StatusOK, map[string]any{"token": tok, "expires_at": exp})
 }

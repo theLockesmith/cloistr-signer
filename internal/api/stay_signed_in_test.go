@@ -444,3 +444,123 @@ func TestStaySignedIn_Options(t *testing.T) {
 }
 
 var _ = config.Config{}
+
+func (f *staySignedInFixture) me(t *testing.T, h *Handler, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	h.handleUserMe(rr, req)
+	return rr
+}
+
+func near(a, b time.Time) bool { return a.Sub(b).Abs() < time.Minute }
+
+// The web session's lifetime follows the choice: 1d and 30d are fixed.
+func TestStaySignedIn_SessionFollowsChoice(t *testing.T) {
+	f := newStayFixture(t)
+	resp, _ := f.loginWith(t, f.h, "1d", false)
+	if !near(resp.ExpiresAt, time.Now().Add(24*time.Hour)) {
+		t.Fatalf("1d sign-in expires %v, want ~1 day", resp.ExpiresAt)
+	}
+	sess, _ := f.store.GetUserSession(context.Background(), claimsOf(t, f.h, resp.Token).SessionID)
+	if !near(sess.ExpiresAt, resp.ExpiresAt) || sealsFor(t, f.store)[0].Sliding {
+		t.Fatalf("1d: session %v, seal sliding %v", sess.ExpiresAt, sealsFor(t, f.store)[0].Sliding)
+	}
+	// Fixed choices do not slide.
+	f.me(t, f.h, resp.Token)
+	again, _ := f.store.GetUserSession(context.Background(), sess.ID)
+	if !again.ExpiresAt.Equal(sess.ExpiresAt) {
+		t.Fatal("a fixed 1d session was extended")
+	}
+}
+
+// until_signout slides: each use pushes the session (and its seal) to now + idle
+// cap, and hands back a fresh token (cookie, or POST /session/refresh).
+func TestStaySignedIn_UntilSignOutSlides(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.config.StaySignedIn.IdleDays = 90
+	resp, _ := f.loginWith(t, f.h, "until_signout", false)
+	idle := 90 * 24 * time.Hour
+	if !near(resp.ExpiresAt, time.Now().Add(idle)) {
+		t.Fatalf("until_signout sign-in expires %v, want ~90 days", resp.ExpiresAt)
+	}
+	sid := claimsOf(t, f.h, resp.Token).SessionID
+	if sl := sealsFor(t, f.store)[0]; !sl.Sliding || !near(sl.ExpiresAt, resp.ExpiresAt) {
+		t.Fatalf("seal %+v, want sliding with the session's expiry", sl)
+	}
+
+	// 80 days later: 10 days of idle budget left.
+	soon := time.Now().Add(10 * 24 * time.Hour)
+	_ = f.store.ExtendUserSession(context.Background(), sid, soon)
+	_, _ = f.store.ExtendSessionSeals(context.Background(), sid, soon)
+
+	rr := f.me(t, f.h, resp.Token)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("me: %d", rr.Code)
+	}
+	sess, _ := f.store.GetUserSession(context.Background(), sid)
+	if !near(sess.ExpiresAt, time.Now().Add(idle)) {
+		t.Fatalf("session not slid: expires %v", sess.ExpiresAt)
+	}
+	if sl := sealsFor(t, f.store)[0]; !near(sl.ExpiresAt, sess.ExpiresAt) {
+		t.Fatalf("seal did not move with the session: %v", sl.ExpiresAt)
+	}
+	var cookie *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "auth_token" {
+			cookie = c
+		}
+	}
+	if cookie == nil || !near(claimsOf(t, f.h, cookie.Value).ExpiresAt.Time, sess.ExpiresAt) {
+		t.Fatal("me did not re-issue the cookie with the new expiry")
+	}
+
+	// Bearer holders refresh explicitly.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/session/refresh", nil)
+	req.Header.Set("Authorization", "Bearer "+resp.Token)
+	rr = httptest.NewRecorder()
+	f.h.handleSessionRefresh(rr, req)
+	var out struct {
+		Token     string    `json:"token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil || rr.Code != 200 || !near(out.ExpiresAt, sess.ExpiresAt) {
+		t.Fatalf("refresh: %d %s", rr.Code, rr.Body.String())
+	}
+	if c := claimsOf(t, f.h, out.Token); c.SessionID != sid {
+		t.Fatalf("refreshed token is for session %q, want %q", c.SessionID, sid)
+	}
+}
+
+func TestStaySignedIn_RefreshRefusesFixedSessions(t *testing.T) {
+	f := newStayFixture(t)
+	resp, _ := f.loginWith(t, f.h, "30d", false)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/session/refresh", nil)
+	req.Header.Set("Authorization", "Bearer "+resp.Token)
+	rr := httptest.NewRecorder()
+	f.h.handleSessionRefresh(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("refresh of a fixed session: %d, want 409", rr.Code)
+	}
+}
+
+// max_days stays the operator ceiling, even for sliding sessions.
+func TestStaySignedIn_SlidingStopsAtMaxDays(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.config.StaySignedIn.IdleDays = 90
+	f.h.config.StaySignedIn.MaxDays = 100
+	resp, _ := f.loginWith(t, f.h, "until_signout", false)
+	sid := claimsOf(t, f.h, resp.Token).SessionID
+	sess, _ := f.store.GetUserSession(context.Background(), sid)
+	created := sess.CreatedAt
+	// Pretend the sign-in was 95 days ago.
+	f.h.stayNow = func() time.Time { return time.Now().Add(95 * 24 * time.Hour) }
+	defer func() { f.h.stayNow = nil }()
+	_ = f.store.ExtendUserSession(context.Background(), sid, time.Now().Add(96*24*time.Hour))
+	f.me(t, f.h, resp.Token)
+	sess, _ = f.store.GetUserSession(context.Background(), sid)
+	if ceiling := created.Add(100 * 24 * time.Hour); sess.ExpiresAt.After(ceiling.Add(time.Minute)) {
+		t.Fatalf("slid to %v, past the 100-day ceiling %v", sess.ExpiresAt, ceiling)
+	}
+}

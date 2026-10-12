@@ -53,6 +53,7 @@ type Handler struct {
 	vaultToken       vaultTokenStatuser  // the signer's own Vault token, for /health (nil = Vault disabled)
 	draining         atomic.Bool         // set on SIGTERM; fails readiness while in-flight work finishes
 	stay             *staySignedIn       // "stay signed in" session seals (nil = not wired; see stay_signed_in.go)
+	stayNow          func() time.Time    // clock for sliding sessions; nil = time.Now (tests override)
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -341,6 +342,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/users/stay-signed-in/options", h.handleStaySignedInOptions)
 	mux.HandleFunc("/api/v1/users/stay-signed-in", h.handleStaySignedIn)
 	mux.HandleFunc("/api/v1/users/session/unseal", h.handleSessionUnseal)
+	mux.HandleFunc("/api/v1/users/session/refresh", h.handleSessionRefresh)
 	mux.HandleFunc("/api/v1/users/me", h.handleUserMe)
 	mux.HandleFunc("/api/v1/users/password", h.handleUserChangePassword)
 
@@ -2581,8 +2583,16 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// Generate session ID first (needed for JWT)
 	sessionID, _ := auth.GenerateSessionID()
 
+	// Stay signed in: decided now, because the sign-in's lifetime follows the
+	// choice (and a split half must go back in this response). Applied once the
+	// keys are unlocked below. Session-only keeps the default lifetime.
+	stay, stayResp := h.grantStaySignedIn(req.StaySignedIn, req.StaySignedInSplit)
+
 	// Generate JWT with session ID (so we can retrieve Vault token later)
 	token, expiresAt, err := auth.GenerateJWTWithSession(h.authConfig, user.ID, user.Username, sessionID)
+	if err == nil && stay != nil {
+		token, expiresAt, err = auth.GenerateJWTWithSessionUntil(h.authConfig, user.ID, user.Username, sessionID, stay.expiresAt)
+	}
 	if err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to generate token")
 		return
@@ -2612,10 +2622,6 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:  time.Now(),
 	}
 	h.storage.CreateUserSession(r.Context(), session)
-
-	// Stay signed in: decided now (a split half must go back in this response),
-	// applied once the keys are unlocked below.
-	stay, stayResp := h.grantStaySignedIn(req.StaySignedIn, req.StaySignedInSplit, expiresAt)
 
 	// Kick off Vault userpass auth in the background. Uses context.Background()
 	// (not r.Context()) because r.Context() is cancelled when the response is
@@ -2818,6 +2824,11 @@ func (h *Handler) handleUserMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete {
 		h.handleSelfDelete(w, r, claims)
 		return
+	}
+	// Every Cloistr app calls this with the shared cookie, so it is where an
+	// "until I sign out" session is renewed (and its cookie re-issued).
+	if tok, exp, ok := h.slideSession(r.Context(), claims, false); ok {
+		http.SetCookie(w, h.newAuthCookie(tok, exp))
 	}
 
 	user, err := h.storage.GetUser(r.Context(), claims.UserID)

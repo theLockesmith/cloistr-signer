@@ -147,6 +147,37 @@ func runSessionSealContract(t *testing.T, s Storage) {
 		t.Fatalf("after deletes live = %v, want [s4]", got)
 	}
 
+	// Sliding round-trips, and ExtendSessionSeals moves a session's seals forward.
+	slide := mk("slide", "sealuser-b", "sealkey-b1", "b1b12", "sess-b1", now.Add(time.Hour))
+	slide.Sliding = true
+	if err := s.UpsertSessionSeal(ctx, slide); err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(90 * 24 * time.Hour)
+	if n, err := s.ExtendSessionSeals(ctx, "sess-b1", later); err != nil || n != 1 {
+		t.Fatalf("ExtendSessionSeals = %d, %v; want 1", n, err)
+	}
+	got, _ := s.ListSessionSealsBySession(ctx, "sess-b1")
+	if len(got) != 1 || !got[0].Sliding || got[0].ExpiresAt.Sub(later).Abs() > time.Second {
+		t.Fatalf("after extend: %+v", got)
+	}
+
+	// Sessions can be extended too.
+	sess := &UserSession{ID: "slide-sess", UserID: "sealuser-b", ExpiresAt: now.Add(time.Hour), CreatedAt: now}
+	if err := s.CreateUserSession(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ExtendUserSession(ctx, "slide-sess", later); err != nil {
+		t.Fatal(err)
+	}
+	us, err := s.GetUserSession(ctx, "slide-sess")
+	if err != nil || us.ExpiresAt.Sub(later).Abs() > time.Second {
+		t.Fatalf("session after extend: %+v %v", us, err)
+	}
+	if err := s.ExtendUserSession(ctx, "no-such-session", later); err == nil {
+		t.Fatal("extended a missing session")
+	}
+
 	// Deleting the key removes its seals (no orphan seal of a deleted key).
 	if err := s.DeleteKey(ctx, "sealkey-b1"); err != nil {
 		t.Fatal(err)

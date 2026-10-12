@@ -113,9 +113,25 @@ func (s *Store) CreateUserSession(ctx context.Context, session *storage.UserSess
 	pipe := s.rdb.TxPipeline()
 	pipe.Set(ctx, s.sessKey(session.ID), data, ttl)
 	pipe.SAdd(ctx, s.userKey(session.UserID), session.ID)
-	pipe.Expire(ctx, s.userKey(session.UserID), userIndexTTL)
-	_, err = pipe.Exec(ctx)
-	return err
+	if _, err = pipe.Exec(ctx); err != nil {
+		return err
+	}
+	return s.raiseIndexTTL(ctx, session.UserID, max(userIndexTTL, ttl))
+}
+
+// raiseIndexTTL makes the user's session index live at least `want`, never
+// shortening it: the index must outlive every session in it, or sign-out
+// everywhere (DeleteUserSessions) can't find a long-lived sliding session.
+func (s *Store) raiseIndexTTL(ctx context.Context, userID string, want time.Duration) error {
+	key := s.userKey(userID)
+	cur, err := s.rdb.TTL(ctx, key).Result()
+	if err != nil {
+		return err
+	}
+	if cur >= want {
+		return nil
+	}
+	return s.rdb.Expire(ctx, key, want).Err()
 }
 
 func (s *Store) GetUserSession(ctx context.Context, id string) (*storage.UserSession, error) {
@@ -191,6 +207,35 @@ func (s *Store) mutate(ctx context.Context, id string, fn func(*storage.UserSess
 	}
 	// KeepTTL leaves the existing expiry untouched.
 	return s.rdb.Set(ctx, s.sessKey(id), data, redis.KeepTTL).Err()
+}
+
+// ExtendUserSession moves a session's expiry and its key's TTL (sliding sessions).
+func (s *Store) ExtendUserSession(ctx context.Context, id string, expiresAt time.Time) error {
+	ctx, cancel := context.WithTimeout(ctx, opTimeout)
+	defer cancel()
+	sess, err := s.getRaw(ctx, id)
+	if err != nil {
+		return err
+	}
+	if time.Now().After(sess.ExpiresAt) {
+		return storage.ErrSessionNotFound
+	}
+	sess.ExpiresAt = expiresAt
+	data, err := json.Marshal(toRecord(sess))
+	if err != nil {
+		return fmt.Errorf("marshal session: %w", err)
+	}
+	ttl := time.Until(expiresAt)
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
+	if err := s.rdb.Set(ctx, s.sessKey(id), data, ttl).Err(); err != nil {
+		return err
+	}
+	if err := s.rdb.SAdd(ctx, s.userKey(sess.UserID), id).Err(); err != nil {
+		return err
+	}
+	return s.raiseIndexTTL(ctx, sess.UserID, ttl+24*time.Hour)
 }
 
 func (s *Store) getRaw(ctx context.Context, id string) (*storage.UserSession, error) {

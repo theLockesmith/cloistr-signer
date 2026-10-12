@@ -476,6 +476,7 @@ func (ps *PostgresStorage) migrate() error {
 		sealed     BYTEA NOT NULL,
 		expires_at TIMESTAMPTZ NOT NULL,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		sliding    BOOLEAN NOT NULL DEFAULT FALSE,
 		UNIQUE (session_id, key_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_user    ON signer_session_seals(user_id);

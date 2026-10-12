@@ -53,6 +53,7 @@ type StaySignedInConfig struct {
 	VaultKey string `yaml:"vault_key"` // SESSION_SEAL_VAULT_KEY: transit key (vault mode; default cloistr-signer-session-seal)
 	MaxDays  int    `yaml:"max_days"`  // SESSION_SEAL_MAX_DAYS: longest a seal may live; 0 = up to the sign-in session's own expiry
 	Split    bool   `yaml:"split"`     // SESSION_SEAL_SPLIT: offer split (browser-held half) sealing (default true)
+	IdleDays int    `yaml:"idle_days"` // SESSION_IDLE_DAYS: "until I sign out" ends after this many idle days (default 90)
 }
 
 // RecoveryConfig gates /api/v1/recovery/challenge, which is unauthenticated by
@@ -277,6 +278,7 @@ func Load() (*Config, error) {
 			Keyfile:  "data/session-seal.key",
 			VaultKey: "cloistr-signer-session-seal",
 			Split:    true,
+			IdleDays: 90,
 		},
 		// RPID and RPOrigins deliberately have no default: they are
 		// environment-specific, and a production default let any new
@@ -613,6 +615,7 @@ func Load() (*Config, error) {
 	ss.Keyfile = getEnv("SESSION_SEAL_KEYFILE", ss.Keyfile)
 	ss.VaultKey = getEnv("SESSION_SEAL_VAULT_KEY", ss.VaultKey)
 	ss.MaxDays = getEnvInt("SESSION_SEAL_MAX_DAYS", ss.MaxDays)
+	ss.IdleDays = getEnvInt("SESSION_IDLE_DAYS", ss.IdleDays)
 	if v := os.Getenv("SESSION_SEAL_SPLIT"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
@@ -624,6 +627,9 @@ func Load() (*Config, error) {
 	case "vault", "keyfile", "none":
 	default:
 		return nil, fmt.Errorf("invalid SESSION_SEALER %q: want vault, keyfile or none", ss.Sealer)
+	}
+	if ss.IdleDays < 1 {
+		return nil, fmt.Errorf("invalid SESSION_IDLE_DAYS %d: must be at least 1", ss.IdleDays)
 	}
 	if ss.MaxDays < 0 {
 		return nil, fmt.Errorf("invalid SESSION_SEAL_MAX_DAYS %d: must be 0 or more", ss.MaxDays)

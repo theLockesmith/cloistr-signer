@@ -171,3 +171,63 @@ func TestDelegation_NonSessionMethod(t *testing.T) {
 		t.Errorf("delegated method errored: %v", err)
 	}
 }
+
+// Sliding sessions ("stay signed in" until sign-out): extending moves both the
+// stored expiry and the key's TTL forward.
+func TestExtendUserSession_MovesExpiryAndTTL(t *testing.T) {
+	s, mr := newTestStore(t)
+	ctx := context.Background()
+	in := sampleSession()
+	if err := s.CreateUserSession(ctx, in); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	newExp := time.Now().Add(90 * 24 * time.Hour)
+	if err := s.ExtendUserSession(ctx, in.ID, newExp); err != nil {
+		t.Fatalf("extend: %v", err)
+	}
+	got, err := s.GetUserSession(ctx, in.ID)
+	if err != nil || !got.ExpiresAt.Equal(newExp.Truncate(0)) && got.ExpiresAt.Sub(newExp).Abs() > time.Second {
+		t.Fatalf("expiry = %v (err %v), want %v", got.ExpiresAt, err, newExp)
+	}
+	if ttl := mr.TTL(s.sessKey(in.ID)); ttl < 89*24*time.Hour {
+		t.Fatalf("TTL = %v, want ~90 days", ttl)
+	}
+	if got.VaultToken != in.VaultToken || got.CosignListenerPubkey != in.CosignListenerPubkey {
+		t.Fatal("extend dropped other fields")
+	}
+	if err := s.ExtendUserSession(ctx, "missing", newExp); err == nil {
+		t.Fatal("extended a missing session")
+	}
+}
+
+// The per-user index must outlive every session in it, or sign-out everywhere
+// (DeleteUserSessions) can't find a long sliding session. A later short sign-in
+// must not shorten it.
+func TestUserIndexOutlivesSlidingSession(t *testing.T) {
+	s, mr := newTestStore(t)
+	ctx := context.Background()
+	long := sampleSession()
+	long.ID = "long"
+	if err := s.CreateUserSession(ctx, long); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ExtendUserSession(ctx, "long", time.Now().Add(90*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	short := sampleSession()
+	short.ID = "short"
+	if err := s.CreateUserSession(ctx, short); err != nil {
+		t.Fatal(err)
+	}
+	if ttl := mr.TTL(s.userKey(long.UserID)); ttl < 90*24*time.Hour {
+		t.Fatalf("user index TTL = %v, shorter than the 90-day session in it", ttl)
+	}
+	// 60 days on, the long session is still there and sign-out finds it.
+	mr.FastForward(60 * 24 * time.Hour)
+	if err := s.DeleteUserSessions(ctx, long.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetUserSession(ctx, "long"); err == nil {
+		t.Fatal("sign-out everywhere missed the sliding session")
+	}
+}

@@ -74,6 +74,30 @@ func (m *MemoryStorage) DeleteSessionSealsByUser(ctx context.Context, userID str
 	return m.dropSessionSealsLocked(func(sl *SessionSeal) bool { return sl.UserID == userID }), nil
 }
 
+func (m *MemoryStorage) ExtendSessionSeals(ctx context.Context, sessionID string, expiresAt time.Time) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, sl := range m.sessionSeals {
+		if sl.SessionID == sessionID {
+			sl.ExpiresAt = expiresAt
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (m *MemoryStorage) ExtendUserSession(ctx context.Context, id string, expiresAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.userSessions[id]
+	if !ok || time.Now().After(s.ExpiresAt) {
+		return ErrSessionNotFound
+	}
+	s.ExpiresAt = expiresAt
+	return nil
+}
+
 func (m *MemoryStorage) DeleteExpiredSessionSeals(ctx context.Context) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -95,7 +119,7 @@ func (m *MemoryStorage) dropSessionSealsLocked(match func(*SessionSeal) bool) in
 
 // ---- Session seals: SQL (Postgres and SQLite share the statements) ----
 
-const sessionSealCols = `id, user_id, key_id, pubkey, session_id, mode, sealed, expires_at, created_at`
+const sessionSealCols = `id, user_id, key_id, pubkey, session_id, mode, sealed, expires_at, created_at, sliding`
 
 type sealDB interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
@@ -116,14 +140,15 @@ func (q sqlSeals) upsert(ctx context.Context, sl *SessionSeal) error {
 	p := q.ph
 	_, err := q.db.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO signer_session_seals (`+sessionSealCols+`)
-		VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+		VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 		ON CONFLICT (session_id, key_id) DO UPDATE SET
 			id = excluded.id, user_id = excluded.user_id, pubkey = excluded.pubkey,
 			mode = excluded.mode, sealed = excluded.sealed,
-			expires_at = excluded.expires_at, created_at = excluded.created_at`,
-		p(1), p(2), p(3), p(4), p(5), p(6), p(7), p(8), p(9)),
+			expires_at = excluded.expires_at, created_at = excluded.created_at,
+			sliding = excluded.sliding`,
+		p(1), p(2), p(3), p(4), p(5), p(6), p(7), p(8), p(9), p(10)),
 		sl.ID, sl.UserID, sl.KeyID, sl.Pubkey, sl.SessionID, sl.Mode, sl.Sealed,
-		q.fmtT(sl.ExpiresAt), q.fmtT(sl.CreatedAt))
+		q.fmtT(sl.ExpiresAt), q.fmtT(sl.CreatedAt), sl.Sliding)
 	if err != nil {
 		return fmt.Errorf("upsert session seal: %w", err)
 	}
@@ -146,7 +171,7 @@ func (q sqlSeals) list(ctx context.Context, where string, arg ...any) ([]*Sessio
 	for rows.Next() {
 		var sl SessionSeal
 		var exp, created any
-		if err := rows.Scan(&sl.ID, &sl.UserID, &sl.KeyID, &sl.Pubkey, &sl.SessionID, &sl.Mode, &sl.Sealed, &exp, &created); err != nil {
+		if err := rows.Scan(&sl.ID, &sl.UserID, &sl.KeyID, &sl.Pubkey, &sl.SessionID, &sl.Mode, &sl.Sealed, &exp, &created, &sl.Sliding); err != nil {
 			return nil, fmt.Errorf("scan session seal: %w", err)
 		}
 		if sl.ExpiresAt, err = q.scanT(exp); err != nil {
@@ -179,6 +204,10 @@ func (q sqlSeals) updateBlob(ctx context.Context, id string, sealed []byte) erro
 
 func (q sqlSeals) deleteBy(ctx context.Context, col, val string) (int, error) {
 	return q.exec(ctx, "delete session seals", `DELETE FROM signer_session_seals WHERE `+col+` = `+q.ph(1), val)
+}
+
+func (q sqlSeals) extend(ctx context.Context, sessionID string, exp time.Time) (int, error) {
+	return q.exec(ctx, "extend session seals", `UPDATE signer_session_seals SET expires_at = `+q.ph(1)+` WHERE session_id = `+q.ph(2), q.fmtT(exp), sessionID)
 }
 
 func (q sqlSeals) deleteExpired(ctx context.Context) (int, error) {
@@ -226,6 +255,19 @@ func (ps *PostgresStorage) DeleteSessionSealsByUser(ctx context.Context, userID 
 func (ps *PostgresStorage) DeleteExpiredSessionSeals(ctx context.Context) (int, error) {
 	return ps.seals().deleteExpired(ctx)
 }
+func (ps *PostgresStorage) ExtendSessionSeals(ctx context.Context, sessionID string, exp time.Time) (int, error) {
+	return ps.seals().extend(ctx, sessionID, exp)
+}
+func (ps *PostgresStorage) ExtendUserSession(ctx context.Context, id string, exp time.Time) error {
+	res, err := ps.db.ExecContext(ctx, `UPDATE signer_web_sessions SET expires_at = $1 WHERE id = $2 AND expires_at > NOW()`, exp, id)
+	if err != nil {
+		return fmt.Errorf("extend user session: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrSessionNotFound
+	}
+	return nil
+}
 
 // ---- SQLite ----
 
@@ -272,4 +314,17 @@ func (ss *SQLiteStorage) DeleteSessionSealsByUser(ctx context.Context, userID st
 }
 func (ss *SQLiteStorage) DeleteExpiredSessionSeals(ctx context.Context) (int, error) {
 	return ss.seals().deleteExpired(ctx)
+}
+func (ss *SQLiteStorage) ExtendSessionSeals(ctx context.Context, sessionID string, exp time.Time) (int, error) {
+	return ss.seals().extend(ctx, sessionID, exp)
+}
+func (ss *SQLiteStorage) ExtendUserSession(ctx context.Context, id string, exp time.Time) error {
+	if s, err := ss.GetUserSession(ctx, id); err != nil || s == nil {
+		return ErrSessionNotFound
+	}
+	_, err := ss.db.ExecContext(ctx, `UPDATE signer_web_sessions SET expires_at = ? WHERE id = ?`, formatTime(exp), id)
+	if err != nil {
+		return fmt.Errorf("extend user session: %w", err)
+	}
+	return nil
 }

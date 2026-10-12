@@ -289,6 +289,7 @@ type SessionSeal struct {
 	Pubkey    string    `json:"pubkey"`
 	SessionID string    `json:"-"`
 	Mode      string    `json:"mode"` // vault, keyfile, split
+	Sliding   bool      `json:"sliding"` // "until sign-out": renewed on use with its session
 	Sealed    []byte    `json:"-"`
 	ExpiresAt time.Time `json:"expires_at"`
 	CreatedAt time.Time `json:"created_at"`
@@ -569,6 +570,11 @@ type Storage interface {
 	DeleteSessionSealsBySession(ctx context.Context, sessionID string) (int, error)
 	DeleteSessionSealsByUser(ctx context.Context, userID string) (int, error)
 	DeleteExpiredSessionSeals(ctx context.Context) (int, error)
+	// ExtendSessionSeals moves the expiry of a session's seals (sliding sessions).
+	ExtendSessionSeals(ctx context.Context, sessionID string, expiresAt time.Time) (int, error)
+	// ExtendUserSession moves a sign-in session's expiry (sliding sessions).
+	// ErrSessionNotFound if it doesn't exist or has expired.
+	ExtendUserSession(ctx context.Context, id string, expiresAt time.Time) error
 
 	// App consent management for cross-subdomain SSO (unified-auth-design §5).
 	// AppID is the nostrconnect client pubkey from the nostrconnect:// URI.
