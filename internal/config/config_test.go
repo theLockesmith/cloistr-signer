@@ -372,7 +372,7 @@ func TestStaySignedInConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := cfg.StaySignedIn
-	if s.Sealer != "keyfile" || s.Keyfile != "data/session-seal.key" || s.VaultKey != "cloistr-signer-session-seal" || s.MaxDays != 0 || !s.Split || s.IdleDays != 90 {
+	if s.Sealer != "none" || s.Keyfile != "data/session-seal.key" || s.VaultKey != "cloistr-signer-session-seal" || s.MaxDays != 0 || !s.Split || s.IdleDays != 90 {
 		t.Fatalf("defaults = %+v", s)
 	}
 

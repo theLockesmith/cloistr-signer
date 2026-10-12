@@ -13,6 +13,7 @@ For quick start and essential info, see [CLAUDE.md](../CLAUDE.md).
 | [api-reference.md](api-reference.md) | Full HTTP API (keys, permissions, users, tokens) |
 | [frost-integration.md](frost-integration.md) | FROST threshold signing |
 | [signer-chaining.md](signer-chaining.md) | Proxy key architecture |
+| [stay-signed-in.md](stay-signed-in.md) | Stay signed in: sealers, lifetimes, trust line, API |
 | [discovery-integration.md](discovery-integration.md) | Discovery service integration |
 | [admin-guide.md](admin-guide.md) | Administrative operations |
 | [user-guide.md](user-guide.md) | End-user documentation |

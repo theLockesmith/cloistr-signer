@@ -48,7 +48,7 @@ type Config struct {
 // StaySignedInConfig configures session seals. See internal/seal for the modes and
 // the trust line they draw.
 type StaySignedInConfig struct {
-	Sealer   string `yaml:"sealer"`    // SESSION_SEALER: vault | keyfile | none (default keyfile)
+	Sealer   string `yaml:"sealer"`    // SESSION_SEALER: vault | keyfile | none (default none)
 	Keyfile  string `yaml:"keyfile"`   // SESSION_SEAL_KEYFILE (keyfile mode; created 0600 if missing). Keep it off the DB's volume.
 	VaultKey string `yaml:"vault_key"` // SESSION_SEAL_VAULT_KEY: transit key (vault mode; default cloistr-signer-session-seal)
 	MaxDays  int    `yaml:"max_days"`  // SESSION_SEAL_MAX_DAYS: longest a seal may live; 0 = up to the sign-in session's own expiry
@@ -274,7 +274,7 @@ func Load() (*Config, error) {
 			AttemptWindowMinutes:     15,
 		},
 		StaySignedIn: StaySignedInConfig{
-			Sealer:   "keyfile",
+			Sealer:   "none", // today's behaviour unless the operator opts in
 			Keyfile:  "data/session-seal.key",
 			VaultKey: "cloistr-signer-session-seal",
 			Split:    true,
