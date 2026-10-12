@@ -75,7 +75,7 @@ func (v *Vault) Open(ctx context.Context, sealed []byte, b Binding) ([]byte, err
 		// A Vault 4xx (wrong context, too-old version, tampered) is an open failure;
 		// anything else (Vault down, timeout) is reported as-is so callers can tell
 		// "this seal is bad" from "try again later".
-		if strings.Contains(err.Error(), "status 400") {
+		if strings.Contains(err.Error(), "status 400") || strings.Contains(err.Error(), "status 404") {
 			return nil, fmt.Errorf("%w: %v", ErrOpen, err)
 		}
 		return nil, fmt.Errorf("seal: vault decrypt: %w", err)

@@ -177,6 +177,13 @@ func runSessionSealContract(t *testing.T, s Storage) {
 	if err := s.ExtendUserSession(ctx, "no-such-session", later); err == nil {
 		t.Fatal("extended a missing session")
 	}
+	dead := &UserSession{ID: "dead-sess", UserID: "sealuser-b", ExpiresAt: now.Add(-time.Minute), CreatedAt: now.Add(-time.Hour)}
+	if err := s.CreateUserSession(ctx, dead); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ExtendUserSession(ctx, "dead-sess", later); err == nil {
+		t.Fatal("revived an expired session")
+	}
 
 	// Deleting the key removes its seals (no orphan seal of a deleted key).
 	if err := s.DeleteKey(ctx, "sealkey-b1"); err != nil {

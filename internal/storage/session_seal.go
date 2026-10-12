@@ -319,12 +319,14 @@ func (ss *SQLiteStorage) ExtendSessionSeals(ctx context.Context, sessionID strin
 	return ss.seals().extend(ctx, sessionID, exp)
 }
 func (ss *SQLiteStorage) ExtendUserSession(ctx context.Context, id string, exp time.Time) error {
-	if s, err := ss.GetUserSession(ctx, id); err != nil || s == nil {
-		return ErrSessionNotFound
-	}
-	_, err := ss.db.ExecContext(ctx, `UPDATE signer_web_sessions SET expires_at = ? WHERE id = ?`, formatTime(exp), id)
+	// Guarded in SQL, like Postgres: an expired session is never revived.
+	res, err := ss.db.ExecContext(ctx, `UPDATE signer_web_sessions SET expires_at = ? WHERE id = ? AND julianday(expires_at) > julianday(?)`,
+		formatTime(exp), id, formatTime(time.Now()))
 	if err != nil {
 		return fmt.Errorf("extend user session: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrSessionNotFound
 	}
 	return nil
 }

@@ -133,6 +133,7 @@ func (h *Handler) grantStaySignedIn(choice string, split bool) (*stayGrant, *Sta
 		return nil, sessionOnly
 	}
 	g := &stayGrant{choice: choice}
+	now := h.now()
 	switch {
 	case split && h.config.StaySignedIn.Split:
 		half, err := seal.NewSplitHalf()
@@ -147,7 +148,6 @@ func (h *Handler) grantStaySignedIn(choice string, split bool) (*stayGrant, *Sta
 		return nil, sessionOnly
 	}
 
-	now := time.Now()
 	var exp time.Time
 	switch choice {
 	case stayChoiceDay:
@@ -374,6 +374,8 @@ func (h *Handler) restoreSealedKey(ctx context.Context, pubkey string) bool {
 
 // lockSealedKeyIfStale is lockSealedKey for the reconcile pass: it re-checks under
 // the lock that the lease wasn't renewed since the pass began.
+// The check and the delete happen under one lock hold, so a lease renewed in
+// between is never dropped.
 func (h *Handler) lockSealedKeyIfStale(ctx context.Context, pubkey string, passStart time.Time, why string) {
 	h.stay.mu.Lock()
 	l, ok := h.stay.leases[pubkey]
@@ -381,8 +383,9 @@ func (h *Handler) lockSealedKeyIfStale(ctx context.Context, pubkey string, passS
 		h.stay.mu.Unlock()
 		return
 	}
+	delete(h.stay.leases, pubkey)
 	h.stay.mu.Unlock()
-	h.lockSealedKey(ctx, pubkey, why)
+	h.unloadSealedKey(ctx, pubkey, l.userID, why)
 }
 
 func (h *Handler) lockSealedKey(ctx context.Context, pubkey, why string) {
@@ -390,10 +393,14 @@ func (h *Handler) lockSealedKey(ctx context.Context, pubkey, why string) {
 	l := h.stay.leases[pubkey]
 	delete(h.stay.leases, pubkey)
 	h.stay.mu.Unlock()
+	h.unloadSealedKey(ctx, pubkey, l.userID, why)
+}
+
+func (h *Handler) unloadSealedKey(ctx context.Context, pubkey, userID, why string) {
 	if h.signer.IsKeyLoaded(pubkey) {
 		h.signer.UnregisterKey(pubkey)
 		h.forgetKeyLocation(ctx, pubkey)
-		slog.Info("stay signed in: key locked", "user_id", l.userID, "pubkey", shortPK(pubkey), "reason", why)
+		slog.Info("stay signed in: key locked", "user_id", userID, "pubkey", shortPK(pubkey), "reason", why)
 	}
 }
 

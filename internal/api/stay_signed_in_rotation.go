@@ -55,14 +55,18 @@ func (h *Handler) rotateVaultSeals(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list seals: %w", err)
 	}
-	rewrapped, failed := 0, 0
+	rewrapped, failed, dead := 0, 0, 0
 	for _, sl := range seals {
 		if sl.Mode != seal.ModeVault {
 			continue
 		}
 		ver := seal.VaultKeyVersion(sl.Sealed)
-		if ver >= latest || ver < minDec {
-			continue // current, or already unopenable (it will expire)
+		if ver < minDec {
+			dead++ // already unopenable; swept when it expires
+			continue
+		}
+		if ver >= latest {
+			continue
 		}
 		ct, _ := seal.VaultCiphertext(sl.Sealed)
 		b := seal.Binding{Pubkey: sl.Pubkey, SessionID: sl.SessionID}
@@ -76,6 +80,9 @@ func (h *Handler) rotateVaultSeals(ctx context.Context) error {
 			continue
 		}
 		rewrapped++
+	}
+	if dead > 0 {
+		slog.Warn("stay signed in: seals below min_decryption_version can no longer open", "count", dead, "min_decryption_version", minDec)
 	}
 	if rewrapped > 0 {
 		slog.Info("stay signed in: re-wrapped seals to the latest key version", "count", rewrapped, "version", latest)
