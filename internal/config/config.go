@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -33,13 +34,27 @@ type Config struct {
 	// holding the user's unlocked key (see internal/api/forward.go). Disabled
 	// unless ForwardSecret is set (>= 32 bytes, same on every replica) and
 	// CacheURL is set (the key-location registry lives in Dragonfly).
-	ForwardSecret string         `yaml:"-"`            // SIGNER_FORWARD_SECRET
-	ForwardPort   string         `yaml:"forward_port"` // SIGNER_FORWARD_PORT, pod-to-pod listener (default 7778)
+	ForwardSecret string `yaml:"-"`            // SIGNER_FORWARD_SECRET
+	ForwardPort   string `yaml:"forward_port"` // SIGNER_FORWARD_PORT, pod-to-pod listener (default 7778)
 	// ShutdownDrainSeconds is how long the pod keeps serving after SIGTERM with
 	// readiness failing, so traffic moves off it before it closes (SHUTDOWN_DRAIN_SECONDS, default 10).
-	ShutdownDrainSeconds int `yaml:"shutdown_drain_seconds"`
-	PodIP         string         `yaml:"-"`            // POD_IP (downward API); auto-detected when empty
-	Recovery      RecoveryConfig `yaml:"recovery"`     // Gating for the unauthenticated account-recovery endpoints
+	ShutdownDrainSeconds int            `yaml:"shutdown_drain_seconds"`
+	PodIP                string         `yaml:"-"`        // POD_IP (downward API); auto-detected when empty
+	Recovery             RecoveryConfig `yaml:"recovery"` // Gating for the unauthenticated account-recovery endpoints
+	// "Stay signed in": sealed copies of unlocked keys so a deploy doesn't lock
+	// users out (internal/seal).
+	StaySignedIn StaySignedInConfig `yaml:"stay_signed_in"`
+}
+
+// StaySignedInConfig configures session seals. See internal/seal for the modes and
+// the trust line they draw.
+type StaySignedInConfig struct {
+	Sealer   string `yaml:"sealer"`    // SESSION_SEALER: vault | keyfile | none (default none)
+	Keyfile  string `yaml:"keyfile"`   // SESSION_SEAL_KEYFILE (keyfile mode; created 0600 if missing). Keep it off the DB's volume.
+	VaultKey string `yaml:"vault_key"` // SESSION_SEAL_VAULT_KEY: transit key (vault mode; default cloistr-signer-session-seal)
+	MaxDays  int    `yaml:"max_days"`  // SESSION_SEAL_MAX_DAYS: longest a seal may live; 0 = up to the sign-in session's own expiry
+	Split    bool   `yaml:"split"`     // SESSION_SEAL_SPLIT: offer split (browser-held half) sealing (default true)
+	IdleDays int    `yaml:"idle_days"` // SESSION_IDLE_DAYS: "until I sign out" ends after this many idle days (default 90)
 }
 
 // RecoveryConfig gates /api/v1/recovery/challenge, which is unauthenticated by
@@ -258,6 +273,13 @@ func Load() (*Config, error) {
 			AttemptsPerAccount:       10,
 			AttemptsPerIP:            30,
 			AttemptWindowMinutes:     15,
+		},
+		StaySignedIn: StaySignedInConfig{
+			Sealer:   "none", // today's behaviour unless the operator opts in
+			Keyfile:  "data/session-seal.key",
+			VaultKey: "cloistr-signer-session-seal",
+			Split:    true,
+			IdleDays: 90,
 		},
 		// RPID and RPOrigins deliberately have no default: they are
 		// environment-specific, and a production default let any new
@@ -589,6 +611,31 @@ func Load() (*Config, error) {
 		cfg.Recovery.IPSecretRotation = d
 	}
 
+	ss := &cfg.StaySignedIn
+	ss.Sealer = getEnv("SESSION_SEALER", ss.Sealer)
+	ss.Keyfile = getEnv("SESSION_SEAL_KEYFILE", ss.Keyfile)
+	ss.VaultKey = getEnv("SESSION_SEAL_VAULT_KEY", ss.VaultKey)
+	ss.MaxDays = getEnvInt("SESSION_SEAL_MAX_DAYS", ss.MaxDays)
+	ss.IdleDays = getEnvInt("SESSION_IDLE_DAYS", ss.IdleDays)
+	if v := os.Getenv("SESSION_SEAL_SPLIT"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid SESSION_SEAL_SPLIT: %w", err)
+		}
+		ss.Split = b
+	}
+	switch ss.Sealer {
+	case "vault", "keyfile", "none":
+	default:
+		return nil, fmt.Errorf("invalid SESSION_SEALER %q: want vault, keyfile or none", ss.Sealer)
+	}
+	if ss.IdleDays < 1 {
+		return nil, fmt.Errorf("invalid SESSION_IDLE_DAYS %d: must be at least 1", ss.IdleDays)
+	}
+	if ss.MaxDays < 0 {
+		return nil, fmt.Errorf("invalid SESSION_SEAL_MAX_DAYS %d: must be 0 or more", ss.MaxDays)
+	}
+
 	return cfg, nil
 }
 
@@ -647,4 +694,20 @@ func (c *Config) MapRelaysToPublic(internalURLs []string) []string {
 		result[i] = c.MapRelayToPublic(url)
 	}
 	return result
+}
+
+// SealKeyfileBesideDB reports whether keyfile mode keeps its key file in the
+// SQLite database's directory (or below it). A snapshot of that volume then holds
+// both the seals and the key that opens them.
+func (c *Config) SealKeyfileBesideDB() bool {
+	if c.StaySignedIn.Sealer != "keyfile" || c.Storage.Type != "sqlite" || c.Storage.DSN == "" || c.StaySignedIn.Keyfile == "" {
+		return false
+	}
+	dbDir, err1 := filepath.Abs(filepath.Dir(strings.TrimPrefix(c.Storage.DSN, "file:")))
+	keyDir, err2 := filepath.Abs(filepath.Dir(c.StaySignedIn.Keyfile))
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	rel, err := filepath.Rel(dbDir, keyDir)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

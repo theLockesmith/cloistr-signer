@@ -59,6 +59,9 @@ func (h *Handler) deleteAccount(ctx context.Context, userID string) (accountDele
 	if err := h.storage.DeleteUserSessions(ctx, userID); err != nil {
 		return res, fmt.Errorf("revoke sessions: %w", err)
 	}
+	// Seals go now, not with the account row: MemoryStorage has no cascade, and
+	// this also locks any key a seal restored on another replica.
+	h.revokeUserSeals(ctx, userID, "account deleted")
 	keys, err := h.storage.ListKeys(ctx, userID)
 	if err != nil {
 		return res, fmt.Errorf("list keys: %w", err)

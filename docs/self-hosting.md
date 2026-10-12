@@ -242,6 +242,18 @@ Once all keys show `encryption_method=vault` in the database, you can remove `EN
 | `MAX_FAILED_LOGINS` | `5` | Failed attempts before lockout |
 | `LOCKOUT_MINUTES` | `15` | Lockout duration |
 
+### Stay Signed In
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SESSION_SEALER` | `none` | `none`, `keyfile` (single host: set this) or `vault` |
+| `SESSION_SEAL_KEYFILE` | `data/session-seal.key` | Key file for `keyfile` mode; keep it off the database's volume |
+| `SESSION_SEAL_SPLIT` | `true` | Offer split (browser-held half) sealing |
+| `SESSION_IDLE_DAYS` | `90` | "Until I sign out" idle limit |
+| `SESSION_SEAL_MAX_DAYS` | `0` | Hard ceiling on any choice (`0` = none) |
+
+See [stay-signed-in.md](stay-signed-in.md) for what each sealer does and its trust line.
+
 ### Server
 
 | Variable | Default | Description |

@@ -25,6 +25,7 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/metrics"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/nostr"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/ratelimit"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/seal"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/sessionstore"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/signer"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
@@ -311,6 +312,11 @@ func main() {
 	// re-minted without the user's password, so without renewal every session
 	// eventually loses Vault access while still looking signed in.
 	go apiHandler.StartUserTokenRenewal(ctx)
+
+	// "Stay signed in": restore sealed keys now and on every replica pass, so a
+	// deploy doesn't lock out users who chose to stay signed in.
+	configureStaySignedIn(apiHandler, cfg, vaultClient)
+	go apiHandler.RunStaySignedIn(ctx)
 
 	// Initialize admin handler for DM-based management
 	adminHandler := admin.New(cfg, store, relayClient, relayPrefsClient, nip46Signer, nip46Signer)
@@ -605,4 +611,33 @@ func (a *frostEncryptorAdapter) Decrypt(ciphertext []byte) ([]byte, error) {
 // variable, and the signer refuses to start.
 func newRelayPrefsClient() (*relayprefs.Client, error) {
 	return relayprefs.NewClientFromEnv()
+}
+
+// configureStaySignedIn builds the SESSION_SEALER sealer. A sealer that can't be
+// built (no Vault, unwritable key file) falls back to none -- session-only, as
+// before -- rather than stopping the signer.
+func configureStaySignedIn(h *api.Handler, cfg *config.Config, vaultClient *vault.Client) {
+	ss := cfg.StaySignedIn
+	var transit seal.Transit
+	if vaultClient != nil {
+		transit = vaultClient
+	}
+	s, err := seal.FromConfig(ss.Sealer, ss.Keyfile, ss.VaultKey, transit)
+	if err != nil {
+		slog.Error("stay signed in: sealer unavailable; offering session-only sign-in", "sealer", ss.Sealer, "error", err)
+		s = seal.None{}
+	}
+	h.SetSealer(s)
+	if v, ok := s.(*seal.Vault); ok && vaultClient != nil {
+		h.SetSealRotator(vaultClient)
+		slog.Info("stay signed in: vault sealer", "transit_key", v.Key())
+	} else if k, ok := s.(*seal.Keyfile); ok {
+		slog.Info("stay signed in: keyfile sealer", "path", ss.Keyfile, "fingerprint", k.Fingerprint())
+		if cfg.SealKeyfileBesideDB() {
+			slog.Warn("stay signed in: SESSION_SEAL_KEYFILE is on the database's volume; a snapshot of it can open every seal. Move the key file to its own volume or secret.",
+				"keyfile", ss.Keyfile, "database", cfg.Storage.DSN)
+		}
+	} else {
+		slog.Info("stay signed in: sealer none (session-only; split sealing available)", "split", ss.Split)
+	}
 }

@@ -1,0 +1,975 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/seal"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/signer"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
+)
+
+// Two handlers on one database stand in for two replicas; a handler created after
+// the login stands in for a pod that started after a deploy. Nothing carries over
+// between handlers except the database (and, in keyfile mode, the key file).
+
+type staySignedInFixture struct {
+	*exportFixture
+	keyfile string
+}
+
+func newStayFixture(t *testing.T) *staySignedInFixture {
+	t.Helper()
+	f := &staySignedInFixture{exportFixture: newExportFixture(t, nil), keyfile: filepath.Join(t.TempDir(), "seal.key")}
+	// Production signs sessions in for 30 days (JWT_EXPIRY=720); give the fixture
+	// longer so the 30-day choice isn't capped by the session itself.
+	f.h.config.Auth.JWTExpiry = 40 * 24
+	f.h.authConfig.TokenExpiry = 40 * 24 * time.Hour
+	f.h.config.StaySignedIn.Split = true
+	f.h.SetSealer(f.keyfileSealer(t))
+	return f
+}
+
+func (f *staySignedInFixture) keyfileSealer(t *testing.T) seal.Sealer {
+	t.Helper()
+	k, err := seal.LoadKeyfile(f.keyfile, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+// replica starts a fresh replica on the shared database with the given sealer.
+func (f *staySignedInFixture) replica(t *testing.T, s seal.Sealer) *Handler {
+	t.Helper()
+	cfg := f.h.config
+	h := NewHandler(cfg, signer.New(cfg, f.store, nil, nil, nil, nil, nil), f.store, nil, nil)
+	h.authConfig.TokenExpiry = f.h.authConfig.TokenExpiry
+	h.SetSealer(s)
+	return h
+}
+
+func (f *staySignedInFixture) loginWith(t *testing.T, h *Handler, choice string, split bool) (LoginResponse, *httptest.ResponseRecorder) {
+	t.Helper()
+	b, _ := json.Marshal(LoginRequest{Username: exportUsername, Password: exportPassword, StaySignedIn: choice, StaySignedInSplit: split})
+	rr := httptest.NewRecorder()
+	h.handleUserLogin(rr, httptest.NewRequest(http.MethodPost, "/api/v1/users/login", bytes.NewReader(b)))
+	var resp LoginResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	// The unlock (and the seal) finish in the background; wait for them.
+	h.keyLoads.wait(context.Background(), exportUserID, 10*time.Second)
+	return resp, rr
+}
+
+func sealsFor(t *testing.T, store storage.Storage) []*storage.SessionSeal {
+	t.Helper()
+	s, err := store.ListLiveSessionSeals(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func claimsOf(t *testing.T, h *Handler, token string) *auth.JWTClaims {
+	t.Helper()
+	c, err := auth.ValidateJWT(h.authConfig, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// The headline: sign in with 30 days, "roll the signer" (a new replica that never
+// saw the login), and the key is usable there with no re-login.
+func TestStaySignedIn_SurvivesDeploy(t *testing.T) {
+	f := newStayFixture(t)
+	resp, rr := f.loginWith(t, f.h, "30d", false)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", rr.Code, rr.Body.String())
+	}
+	g := resp.StaySignedIn
+	if g == nil || g.Granted != "30d" || g.Mode != seal.ModeKeyfile || g.ExpiresAt == nil || g.SplitHalf != "" {
+		t.Fatalf("grant = %+v, want 30d keyfile with an expiry and no split half", g)
+	}
+	if d := time.Until(*g.ExpiresAt); d < 29*24*time.Hour || d > 31*24*time.Hour {
+		t.Fatalf("grant expires in %v, want ~30 days", d)
+	}
+	seals := sealsFor(t, f.store)
+	if len(seals) != 1 || seals[0].Pubkey != f.key.Pubkey || seals[0].SessionID != claimsOf(t, f.h, resp.Token).SessionID {
+		t.Fatalf("seals = %+v, want one for the key, bound to the login session", seals)
+	}
+	if bytes.Contains(seals[0].Sealed, []byte(f.priv)) {
+		t.Fatal("seal row holds the private key in the clear")
+	}
+
+	after := f.replica(t, f.keyfileSealer(t))
+	if after.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("fresh replica had the key before restoring")
+	}
+	after.reconcileSeals(context.Background())
+	priv, ok := after.signer.LoadedPrivateKey(f.key.Pubkey)
+	if !ok || priv != f.priv {
+		t.Fatal("fresh replica did not restore the sealed key")
+	}
+}
+
+// A request for the key on a replica that hasn't reconciled yet restores it lazily
+// (the signer's restorer hook), with no client involvement.
+func TestStaySignedIn_LazyRestore(t *testing.T) {
+	f := newStayFixture(t)
+	f.loginWith(t, f.h, "1d", false)
+	after := f.replica(t, f.keyfileSealer(t))
+	key, _ := f.store.GetKeyByPubkey(context.Background(), f.key.Pubkey)
+	if !after.ensureNostrConnectKeyLoaded(context.Background(), "", exportUserID, key) {
+		t.Fatal("on-demand load did not restore from the seal")
+	}
+}
+
+// Session-only behaves exactly as before: no seal, and a new replica has nothing.
+func TestStaySignedIn_SessionOnlyUnchanged(t *testing.T) {
+	f := newStayFixture(t)
+	for _, choice := range []string{"", "session"} {
+		resp, rr := f.loginWith(t, f.h, choice, false)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("login %q: %d", choice, rr.Code)
+		}
+		if !f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+			t.Fatalf("login %q did not unlock the key on the login replica", choice)
+		}
+		if resp.StaySignedIn != nil && resp.StaySignedIn.Granted != "session" {
+			t.Fatalf("login %q granted %+v", choice, resp.StaySignedIn)
+		}
+	}
+	if s := sealsFor(t, f.store); len(s) != 0 {
+		t.Fatalf("session-only logins left %d seals", len(s))
+	}
+	after := f.replica(t, f.keyfileSealer(t))
+	after.reconcileSeals(context.Background())
+	if after.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("a session-only key appeared on a new replica")
+	}
+}
+
+func TestStaySignedIn_UnknownChoiceRejected(t *testing.T) {
+	f := newStayFixture(t)
+	_, rr := f.loginWith(t, f.h, "forever-and-ever", false)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown choice: %d, want 400", rr.Code)
+	}
+}
+
+// A seal row moved onto another session (or account) does not open.
+func TestStaySignedIn_SwappedBlobFails(t *testing.T) {
+	f := newStayFixture(t)
+	f.loginWith(t, f.h, "30d", false)
+	sl := sealsFor(t, f.store)[0]
+	// Re-home the blob onto a different live session of the same user.
+	other := &storage.UserSession{ID: "other-session", UserID: exportUserID, ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now()}
+	_ = f.store.CreateUserSession(context.Background(), other)
+	_, _ = f.store.DeleteSessionSealsBySession(context.Background(), sl.SessionID)
+	moved := *sl
+	moved.ID, moved.SessionID = "moved", other.ID
+	if err := f.store.UpsertSessionSeal(context.Background(), &moved); err != nil {
+		t.Fatal(err)
+	}
+	after := f.replica(t, f.keyfileSealer(t))
+	after.reconcileSeals(context.Background())
+	if after.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("a seal moved to another session opened")
+	}
+}
+
+// The DB alone cannot unseal: a replica with a different key file gets nothing.
+func TestStaySignedIn_DBCopyAloneCannotUnseal(t *testing.T) {
+	f := newStayFixture(t)
+	f.loginWith(t, f.h, "30d", false)
+	stranger, err := seal.LoadKeyfile(filepath.Join(t.TempDir(), "other.key"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := f.replica(t, stranger)
+	after.reconcileSeals(context.Background())
+	if after.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("a replica without the sealing key restored the key")
+	}
+}
+
+// Expiry is enforced server-side: an expired seal is not restored, and a replica
+// holding the key because of it drops it.
+func TestStaySignedIn_ExpiredIsRefusedAndUnloaded(t *testing.T) {
+	f := newStayFixture(t)
+	f.loginWith(t, f.h, "1d", false)
+	other := f.replica(t, f.keyfileSealer(t))
+	other.reconcileSeals(context.Background())
+	if !other.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("setup: second replica did not restore")
+	}
+	sl := sealsFor(t, f.store)[0]
+	sl.ExpiresAt = time.Now().Add(-time.Second)
+	if err := f.store.UpsertSessionSeal(context.Background(), sl); err != nil {
+		t.Fatal(err)
+	}
+	for name, h := range map[string]*Handler{"login replica": f.h, "restored replica": other} {
+		h.reconcileSeals(context.Background())
+		if h.signer.IsKeyLoaded(f.key.Pubkey) {
+			t.Fatalf("%s still holds the key after its seal expired", name)
+		}
+	}
+	fresh := f.replica(t, f.keyfileSealer(t))
+	fresh.reconcileSeals(context.Background())
+	key, _ := f.store.GetKeyByPubkey(context.Background(), f.key.Pubkey)
+	if fresh.signer.IsKeyLoaded(f.key.Pubkey) || fresh.ensureNostrConnectKeyLoaded(context.Background(), "", exportUserID, key) {
+		t.Fatal("an expired seal was restored")
+	}
+	if n := len(sealsFor(t, f.store)); n != 0 {
+		t.Fatalf("%d live seals after expiry", n)
+	}
+}
+
+// Sign-out deletes the seals and locks the key on every replica.
+func TestStaySignedIn_SignOutRevokes(t *testing.T) {
+	f := newStayFixture(t)
+	resp, _ := f.loginWith(t, f.h, "until_signout", false)
+	if resp.StaySignedIn == nil || resp.StaySignedIn.Granted != "until_signout" {
+		t.Fatalf("grant = %+v", resp.StaySignedIn)
+	}
+	other := f.replica(t, f.keyfileSealer(t))
+	other.reconcileSeals(context.Background())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/logout", nil)
+	req.Header.Set("Authorization", "Bearer "+resp.Token)
+	rr := httptest.NewRecorder()
+	f.h.handleUserLogout(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("logout: %d", rr.Code)
+	}
+	if n := len(sealsFor(t, f.store)); n != 0 {
+		t.Fatalf("%d seals survive sign-out", n)
+	}
+	if f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("login replica still holds the key after sign-out")
+	}
+	other.reconcileSeals(context.Background())
+	if other.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("other replica still holds the key after sign-out")
+	}
+}
+
+// Revoking all sessions (and the session behind a seal disappearing any other
+// way) makes the seal unusable.
+func TestStaySignedIn_SessionGoneRevokes(t *testing.T) {
+	f := newStayFixture(t)
+	f.loginWith(t, f.h, "30d", false)
+	_ = f.store.DeleteUserSessions(context.Background(), exportUserID)
+	after := f.replica(t, f.keyfileSealer(t))
+	after.reconcileSeals(context.Background())
+	if after.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("restored a seal whose session is gone")
+	}
+	f.h.reconcileSeals(context.Background())
+	if f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("login replica kept a key whose seal's session is gone")
+	}
+}
+
+// Revoke-all: DELETE /api/v1/users/stay-signed-in drops every seal but keeps the
+// user signed in to the web UI.
+func TestStaySignedIn_RevokeAllEndpoint(t *testing.T) {
+	f := newStayFixture(t)
+	resp, _ := f.loginWith(t, f.h, "30d", false)
+
+	get := httptest.NewRequest(http.MethodGet, "/api/v1/users/stay-signed-in", nil)
+	get.Header.Set("Authorization", "Bearer "+resp.Token)
+	rr := httptest.NewRecorder()
+	f.h.handleStaySignedIn(rr, get)
+	var list []StaySignedInEntry
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil || rr.Code != 200 || len(list) != 1 || !list[0].Current {
+		t.Fatalf("list: %d %s", rr.Code, rr.Body.String())
+	}
+
+	del := httptest.NewRequest(http.MethodDelete, "/api/v1/users/stay-signed-in", nil)
+	del.Header.Set("Authorization", "Bearer "+resp.Token)
+	rr = httptest.NewRecorder()
+	f.h.handleStaySignedIn(rr, del)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("revoke-all: %d %s", rr.Code, rr.Body.String())
+	}
+	if n := len(sealsFor(t, f.store)); n != 0 {
+		t.Fatalf("%d seals after revoke-all", n)
+	}
+	if f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("key still loaded after revoke-all")
+	}
+	if _, err := f.h.validateAuthHeader(requestWithToken(resp.Token)); err != nil {
+		t.Fatalf("revoke-all signed the user out of the web UI: %v", err)
+	}
+}
+
+// none mode: durable choices are not granted; session-only still works.
+func TestStaySignedIn_NoneMode(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	resp, rr := f.loginWith(t, f.h, "30d", false)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("login: %d", rr.Code)
+	}
+	if resp.StaySignedIn == nil || resp.StaySignedIn.Granted != "session" {
+		t.Fatalf("none mode granted %+v, want session", resp.StaySignedIn)
+	}
+	if !f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("none mode broke the normal unlock")
+	}
+	if n := len(sealsFor(t, f.store)); n != 0 {
+		t.Fatalf("none mode stored %d seals", n)
+	}
+}
+
+// Split mode: only the browser half unseals. A new replica can't restore it on its
+// own; handing the half back over the session restores it; a wrong half is refused.
+func TestStaySignedIn_SplitOnlyWithBrowserHalf(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{}) // split needs no Vault or key file
+	resp, rr := f.loginWith(t, f.h, "30d", true)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", rr.Code, rr.Body.String())
+	}
+	g := resp.StaySignedIn
+	if g == nil || g.Granted != "30d" || g.Mode != seal.ModeSplit || g.SplitHalf == "" {
+		t.Fatalf("grant = %+v, want 30d split with a browser half", g)
+	}
+	half, err := base64.RawURLEncoding.DecodeString(g.SplitHalf)
+	if err != nil || len(half) != seal.SplitHalfLen {
+		t.Fatalf("split half %q not 32 bytes of base64url", g.SplitHalf)
+	}
+	if s := sealsFor(t, f.store); len(s) != 1 || s[0].Mode != seal.ModeSplit || bytes.Contains(s[0].Sealed, half) {
+		t.Fatalf("seal row wrong: %+v", s)
+	}
+
+	after := f.replica(t, seal.None{})
+	after.reconcileSeals(context.Background())
+	key, _ := f.store.GetKeyByPubkey(context.Background(), f.key.Pubkey)
+	if after.signer.IsKeyLoaded(f.key.Pubkey) || after.ensureNostrConnectKeyLoaded(context.Background(), "", exportUserID, key) {
+		t.Fatal("split seal restored without the browser half")
+	}
+
+	unseal := func(h string) *httptest.ResponseRecorder {
+		b, _ := json.Marshal(map[string]string{"split_half": h})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/users/session/unseal", bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+resp.Token)
+		rr := httptest.NewRecorder()
+		after.handleSessionUnseal(rr, req)
+		return rr
+	}
+	wrong := bytes.Clone(half)
+	wrong[0] ^= 1
+	if rr := unseal(base64.RawURLEncoding.EncodeToString(wrong)); rr.Code != http.StatusForbidden || after.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatalf("wrong half: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := unseal("not base64!"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("garbage half: %d", rr.Code)
+	}
+	rr = unseal(g.SplitHalf)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("right half: %d %s", rr.Code, rr.Body.String())
+	}
+	if priv, ok := after.signer.LoadedPrivateKey(f.key.Pubkey); !ok || priv != f.priv {
+		t.Fatal("unseal with the right half did not restore the key")
+	}
+}
+
+func TestStaySignedIn_SplitRefusedWhenDisabled(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.config.StaySignedIn.Split = false
+	f.h.SetSealer(seal.None{})
+	resp, _ := f.loginWith(t, f.h, "30d", true)
+	if resp.StaySignedIn == nil || resp.StaySignedIn.Granted != "session" || resp.StaySignedIn.SplitHalf != "" {
+		t.Fatalf("split disabled but granted %+v", resp.StaySignedIn)
+	}
+}
+
+// A seal never outlives its sign-in session.
+func TestStaySignedIn_CappedBySession(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.authConfig.TokenExpiry = 24 * time.Hour
+	resp, _ := f.loginWith(t, f.h, "30d", false)
+	if g := resp.StaySignedIn; g == nil || g.ExpiresAt == nil || g.ExpiresAt.After(resp.ExpiresAt) {
+		t.Fatalf("grant %+v outlives the session (%v)", g, resp.ExpiresAt)
+	}
+}
+
+// The server-side maximum caps the choice.
+func TestStaySignedIn_MaxDaysCaps(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.config.StaySignedIn.MaxDays = 2
+	resp, _ := f.loginWith(t, f.h, "30d", false)
+	g := resp.StaySignedIn
+	if g == nil || g.ExpiresAt == nil || time.Until(*g.ExpiresAt) > 2*24*time.Hour+time.Minute {
+		t.Fatalf("grant %+v not capped at 2 days", g)
+	}
+	sl := sealsFor(t, f.store)[0]
+	if time.Until(sl.ExpiresAt) > 2*24*time.Hour+time.Minute {
+		t.Fatalf("seal row expires %v, past the 2-day cap", sl.ExpiresAt)
+	}
+}
+
+func TestStaySignedIn_Options(t *testing.T) {
+	f := newStayFixture(t)
+	get := func() StaySignedInOptions {
+		rr := httptest.NewRecorder()
+		f.h.handleStaySignedInOptions(rr, httptest.NewRequest(http.MethodGet, "/api/v1/users/stay-signed-in/options", nil))
+		var o StaySignedInOptions
+		if err := json.Unmarshal(rr.Body.Bytes(), &o); err != nil || rr.Code != 200 {
+			t.Fatalf("options: %d %s", rr.Code, rr.Body.String())
+		}
+		return o
+	}
+	o := get()
+	if o.Sealer != seal.ModeKeyfile || len(o.Choices) != 4 || !o.Split {
+		t.Fatalf("keyfile options = %+v", o)
+	}
+	f.h.SetSealer(seal.None{})
+	o = get()
+	if o.Sealer != seal.ModeNone || len(o.Choices) != 1 || o.Choices[0] != "session" || len(o.SplitChoices) != 4 {
+		t.Fatalf("none options = %+v", o)
+	}
+}
+
+var _ = config.Config{}
+
+func (f *staySignedInFixture) me(t *testing.T, h *Handler, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	h.handleUserMe(rr, req)
+	return rr
+}
+
+func near(a, b time.Time) bool { return a.Sub(b).Abs() < time.Minute }
+
+// The web session's lifetime follows the choice: 1d and 30d are fixed.
+func TestStaySignedIn_SessionFollowsChoice(t *testing.T) {
+	f := newStayFixture(t)
+	resp, _ := f.loginWith(t, f.h, "1d", false)
+	if !near(resp.ExpiresAt, time.Now().Add(24*time.Hour)) {
+		t.Fatalf("1d sign-in expires %v, want ~1 day", resp.ExpiresAt)
+	}
+	sess, _ := f.store.GetUserSession(context.Background(), claimsOf(t, f.h, resp.Token).SessionID)
+	if !near(sess.ExpiresAt, resp.ExpiresAt) || sealsFor(t, f.store)[0].Sliding {
+		t.Fatalf("1d: session %v, seal sliding %v", sess.ExpiresAt, sealsFor(t, f.store)[0].Sliding)
+	}
+	// Fixed choices do not slide.
+	f.me(t, f.h, resp.Token)
+	again, _ := f.store.GetUserSession(context.Background(), sess.ID)
+	if !again.ExpiresAt.Equal(sess.ExpiresAt) {
+		t.Fatal("a fixed 1d session was extended")
+	}
+}
+
+// until_signout slides: each use pushes the session (and its seal) to now + idle
+// cap, and hands back a fresh token (cookie, or POST /session/refresh).
+func TestStaySignedIn_UntilSignOutSlides(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.config.StaySignedIn.IdleDays = 90
+	resp, _ := f.loginWith(t, f.h, "until_signout", false)
+	idle := 90 * 24 * time.Hour
+	if !near(resp.ExpiresAt, time.Now().Add(idle)) {
+		t.Fatalf("until_signout sign-in expires %v, want ~90 days", resp.ExpiresAt)
+	}
+	sid := claimsOf(t, f.h, resp.Token).SessionID
+	if sl := sealsFor(t, f.store)[0]; !sl.Sliding || !near(sl.ExpiresAt, resp.ExpiresAt) {
+		t.Fatalf("seal %+v, want sliding with the session's expiry", sl)
+	}
+
+	// 80 days later: 10 days of idle budget left.
+	soon := time.Now().Add(10 * 24 * time.Hour)
+	_ = f.store.ExtendUserSession(context.Background(), sid, soon)
+	_, _ = f.store.ExtendSessionSeals(context.Background(), sid, soon)
+
+	rr := f.me(t, f.h, resp.Token)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("me: %d", rr.Code)
+	}
+	sess, _ := f.store.GetUserSession(context.Background(), sid)
+	if !near(sess.ExpiresAt, time.Now().Add(idle)) {
+		t.Fatalf("session not slid: expires %v", sess.ExpiresAt)
+	}
+	if sl := sealsFor(t, f.store)[0]; !near(sl.ExpiresAt, sess.ExpiresAt) {
+		t.Fatalf("seal did not move with the session: %v", sl.ExpiresAt)
+	}
+	var cookie *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "auth_token" {
+			cookie = c
+		}
+	}
+	if cookie == nil || !near(claimsOf(t, f.h, cookie.Value).ExpiresAt.Time, sess.ExpiresAt) {
+		t.Fatal("me did not re-issue the cookie with the new expiry")
+	}
+
+	// Bearer holders refresh explicitly.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/session/refresh", nil)
+	req.Header.Set("Authorization", "Bearer "+resp.Token)
+	rr = httptest.NewRecorder()
+	f.h.handleSessionRefresh(rr, req)
+	var out struct {
+		Token     string    `json:"token"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil || rr.Code != 200 || !near(out.ExpiresAt, sess.ExpiresAt) {
+		t.Fatalf("refresh: %d %s", rr.Code, rr.Body.String())
+	}
+	if c := claimsOf(t, f.h, out.Token); c.SessionID != sid {
+		t.Fatalf("refreshed token is for session %q, want %q", c.SessionID, sid)
+	}
+}
+
+func TestStaySignedIn_RefreshRefusesFixedSessions(t *testing.T) {
+	f := newStayFixture(t)
+	resp, _ := f.loginWith(t, f.h, "30d", false)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/session/refresh", nil)
+	req.Header.Set("Authorization", "Bearer "+resp.Token)
+	rr := httptest.NewRecorder()
+	f.h.handleSessionRefresh(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("refresh of a fixed session: %d, want 409", rr.Code)
+	}
+}
+
+// max_days stays the operator ceiling, even for sliding sessions.
+func TestStaySignedIn_SlidingStopsAtMaxDays(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.config.StaySignedIn.IdleDays = 90
+	f.h.config.StaySignedIn.MaxDays = 100
+	resp, _ := f.loginWith(t, f.h, "until_signout", false)
+	sid := claimsOf(t, f.h, resp.Token).SessionID
+	sess, _ := f.store.GetUserSession(context.Background(), sid)
+	created := sess.CreatedAt
+	// Pretend the sign-in was 95 days ago.
+	f.h.stayNow = func() time.Time { return time.Now().Add(95 * 24 * time.Hour) }
+	defer func() { f.h.stayNow = nil }()
+	_ = f.store.ExtendUserSession(context.Background(), sid, time.Now().Add(96*24*time.Hour))
+	f.me(t, f.h, resp.Token)
+	sess, _ = f.store.GetUserSession(context.Background(), sid)
+	if ceiling := created.Add(100 * 24 * time.Hour); sess.ExpiresAt.After(ceiling.Add(time.Minute)) {
+		t.Fatalf("slid to %v, past the 100-day ceiling %v", sess.ExpiresAt, ceiling)
+	}
+}
+
+func (f *staySignedInFixture) browserLogin(t *testing.T, choice string) (LoginResponse, *httptest.ResponseRecorder) {
+	t.Helper()
+	b, _ := json.Marshal(LoginRequest{Username: exportUsername, Password: exportPassword, StaySignedIn: choice, StaySignedInSplit: true})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/login", bytes.NewReader(b))
+	req.Header.Set("Origin", "https://signer.cloistr.xyz")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	rr := httptest.NewRecorder()
+	f.h.handleUserLogin(rr, req)
+	var resp LoginResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	f.h.keyLoads.wait(context.Background(), exportUserID, 10*time.Second)
+	return resp, rr
+}
+
+func halfCookie(rr *httptest.ResponseRecorder) *http.Cookie {
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == splitHalfCookieName {
+			return c
+		}
+	}
+	return nil
+}
+
+// Browser split logins get the half as an HttpOnly cookie scoped to the unseal
+// endpoint, never in the JSON body.
+func TestStaySignedIn_SplitHalfCookieForBrowsers(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	resp, rr := f.browserLogin(t, "30d")
+	if rr.Code != 200 || resp.StaySignedIn == nil || resp.StaySignedIn.Mode != seal.ModeSplit {
+		t.Fatalf("login: %d %+v", rr.Code, resp.StaySignedIn)
+	}
+	if resp.StaySignedIn.SplitHalf != "" || bytes.Contains(rr.Body.Bytes(), []byte("split_half")) {
+		t.Fatal("browser login put the half in the JSON body")
+	}
+	c := halfCookie(rr)
+	if c == nil {
+		t.Fatal("no half cookie")
+	}
+	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode || c.Domain != "" || c.Path != "/api/v1/users/session/unseal" {
+		t.Fatalf("cookie attributes wrong: %+v", c)
+	}
+	if want := int(time.Until(*resp.StaySignedIn.ExpiresAt).Seconds()); c.MaxAge < want-60 || c.MaxAge > want+60 {
+		t.Fatalf("Max-Age %d, want ~%d (the seal's expiry)", c.MaxAge, want)
+	}
+	if half, err := base64.RawURLEncoding.DecodeString(c.Value); err != nil || len(half) != seal.SplitHalfLen {
+		t.Fatalf("cookie value is not a 32-byte half")
+	}
+
+	// Unseal on a fresh replica with an empty body: the cookie alone does it.
+	after := f.replica(t, seal.None{})
+	unseal := func(cookie *http.Cookie, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/users/session/unseal", bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer "+resp.Token)
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		rr := httptest.NewRecorder()
+		after.handleSessionUnseal(rr, req)
+		return rr
+	}
+	if rr := unseal(nil, ""); rr.Code != http.StatusNotFound || !bytes.Contains(rr.Body.Bytes(), []byte("no_split_seal")) {
+		t.Fatalf("missing cookie: %d %s", rr.Code, rr.Body.String())
+	}
+	bad := *c
+	raw, _ := base64.RawURLEncoding.DecodeString(c.Value)
+	raw[0] ^= 1
+	bad.Value = base64.RawURLEncoding.EncodeToString(raw)
+	if rr := unseal(&bad, ""); rr.Code != http.StatusForbidden || !bytes.Contains(rr.Body.Bytes(), []byte("seal_mismatch")) {
+		t.Fatalf("wrong cookie: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := unseal(c, ""); rr.Code != http.StatusOK || !after.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatalf("cookie-only unseal: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// until_signout: the cookie can't be re-issued on slide (the server never keeps
+// the half, and /users/me doesn't receive it), so it lives as long as a browser
+// allows; the server-side seal expiry is what governs.
+func TestStaySignedIn_SplitHalfCookieUntilSignOut(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	_, rr := f.browserLogin(t, "until_signout")
+	if c := halfCookie(rr); c == nil || c.MaxAge < 399*24*3600 {
+		t.Fatalf("until_signout half cookie: %+v", c)
+	}
+	f.h.config.StaySignedIn.MaxDays = 120
+	_, rr = f.browserLogin(t, "until_signout")
+	if c := halfCookie(rr); c == nil || c.MaxAge > 120*24*3600+60 {
+		t.Fatalf("half cookie outlives the 120-day ceiling: %+v", c)
+	}
+}
+
+// Non-browser clients keep the body form.
+func TestStaySignedIn_SplitHalfBodyForNonBrowsers(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	resp, rr := f.loginWith(t, f.h, "30d", true)
+	if resp.StaySignedIn == nil || resp.StaySignedIn.SplitHalf == "" || halfCookie(rr) != nil {
+		t.Fatalf("non-browser split login: body half %q, cookie %v", resp.StaySignedIn.SplitHalf, halfCookie(rr))
+	}
+}
+
+// Sign-out, revoke-all and revoke-sessions clear the half cookie. Each case signs
+// in afresh: sign-out and revoke-sessions end the session, so a shared token would
+// make whichever case runs next answer 401.
+func TestStaySignedIn_SignOutClearsHalfCookie(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	for _, tc := range []struct {
+		name   string
+		method string
+		call   func(http.ResponseWriter, *http.Request)
+	}{
+		{"revoke-all", http.MethodDelete, f.h.handleStaySignedIn},
+		{"sign-out", http.MethodPost, f.h.handleUserLogout},
+		{"revoke-sessions", http.MethodDelete, f.h.handleUserSessions},
+	} {
+		resp, _ := f.browserLogin(t, "30d")
+		req := httptest.NewRequest(tc.method, "/", nil)
+		req.Header.Set("Authorization", "Bearer "+resp.Token)
+		rr := httptest.NewRecorder()
+		tc.call(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", tc.name, rr.Code, rr.Body.String())
+		}
+		c := halfCookie(rr)
+		if c == nil || c.MaxAge >= 0 || c.Path != "/api/v1/users/session/unseal" || c.Domain != "" {
+			t.Fatalf("%s did not clear the half cookie: %+v", tc.name, c)
+		}
+	}
+}
+
+func authCookie(rr *httptest.ResponseRecorder) *http.Cookie {
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "auth_token" {
+			return c
+		}
+	}
+	return nil
+}
+
+// DELETE /api/v1/users/sessions ends every sign-in, this one included: seals go,
+// the key locks, the token stops working and both cookies are cleared.
+func TestStaySignedIn_RevokeSessionsDropsSeals(t *testing.T) {
+	f := newStayFixture(t)
+	resp, _ := f.loginWith(t, f.h, "30d", false)
+	if len(sealsFor(t, f.store)) != 1 || !f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("setup: want one seal and the key loaded")
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/users/sessions", nil)
+	req.Header.Set("Authorization", "Bearer "+resp.Token)
+	rr := httptest.NewRecorder()
+	f.h.handleUserSessions(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("revoke sessions: %d %s", rr.Code, rr.Body.String())
+	}
+	if all, _ := f.store.ListSessionSealsByUser(context.Background(), exportUserID); len(all) != 0 {
+		t.Fatalf("%d seals survive revoking every session", len(all))
+	}
+	if f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("key still loaded after revoking every session")
+	}
+	if _, err := f.h.validateAuthHeader(requestWithToken(resp.Token)); err == nil {
+		t.Fatal("token still valid after revoking every session")
+	}
+	if c := authCookie(rr); c == nil || c.MaxAge >= 0 {
+		t.Fatalf("auth cookie not cleared: %+v", c)
+	}
+	if c := halfCookie(rr); c == nil || c.MaxAge >= 0 {
+		t.Fatalf("half cookie not cleared: %+v", c)
+	}
+}
+
+func (f *staySignedInFixture) changePassword(t *testing.T, token string, browser bool) (ChangePasswordResponse, *httptest.ResponseRecorder) {
+	t.Helper()
+	b, _ := json.Marshal(ChangePasswordRequest{CurrentPassword: exportPassword, NewPassword: "a brand new passphrase"})
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/password", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+token)
+	if browser {
+		req.Header.Set("Origin", "https://signer.cloistr.xyz")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+	}
+	rr := httptest.NewRecorder()
+	f.h.handleUserChangePassword(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("change password: %d %s", rr.Code, rr.Body.String())
+	}
+	var resp ChangePasswordResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	f.h.keyLoads.wait(context.Background(), exportUserID, 10*time.Second)
+	return resp, rr
+}
+
+// A password change ends every other sign-in and its seals; the session that made
+// the change keeps its key, re-sealed under a new seal with the same expiry. A
+// seal from before the change opens nothing afterwards.
+func TestStaySignedIn_PasswordChangeEndsOtherSignIns(t *testing.T) {
+	f := newStayFixture(t)
+	attacker, _ := f.loginWith(t, f.h, "until_signout", false)
+	victim, _ := f.loginWith(t, f.h, "30d", false)
+	aSID, vSID := claimsOf(t, f.h, attacker.Token).SessionID, claimsOf(t, f.h, victim.Token).SessionID
+	before, _ := f.store.ListSessionSealsByUser(context.Background(), exportUserID)
+	if len(before) != 2 {
+		t.Fatalf("setup: %d seals, want 2", len(before))
+	}
+	var aOld, vOld *storage.SessionSeal
+	for _, sl := range before {
+		switch sl.SessionID {
+		case aSID:
+			aOld = sl
+		case vSID:
+			vOld = sl
+		}
+	}
+
+	resp, rr := f.changePassword(t, victim.Token, false)
+	if resp.StaySignedIn == nil || resp.StaySignedIn.Mode != seal.ModeKeyfile || resp.StaySignedIn.SplitHalf != "" {
+		t.Fatalf("grant after change = %+v, want keyfile re-seal", resp.StaySignedIn)
+	}
+	if _, err := f.h.validateAuthHeader(requestWithToken(attacker.Token)); err == nil {
+		t.Fatal("the other sign-in survived the password change")
+	}
+	if _, err := f.h.validateAuthHeader(requestWithToken(victim.Token)); err != nil {
+		t.Fatalf("the session that changed the password was signed out: %v", err)
+	}
+	if c := halfCookie(rr); c == nil || c.MaxAge >= 0 {
+		t.Fatalf("half cookie not cleared: %+v", c)
+	}
+	after, _ := f.store.ListSessionSealsByUser(context.Background(), exportUserID)
+	if len(after) != 1 || after[0].SessionID != vSID {
+		t.Fatalf("seals after change = %+v, want one, for the changing session", after)
+	}
+	if after[0].ID == vOld.ID || bytes.Equal(after[0].Sealed, vOld.Sealed) || !after[0].ExpiresAt.Equal(vOld.ExpiresAt) {
+		t.Fatalf("not re-sealed with the same expiry: old %s %v, new %s %v", vOld.ID, vOld.ExpiresAt, after[0].ID, after[0].ExpiresAt)
+	}
+	if priv, ok := f.h.signer.LoadedPrivateKey(f.key.Pubkey); !ok || priv != f.priv {
+		t.Fatal("the changing session lost its key")
+	}
+
+	// Put the attacker's pre-change seal back (a stale copy) with nothing else:
+	// a fresh replica must not restore from it.
+	if _, err := f.store.DeleteSessionSealsByUser(context.Background(), exportUserID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.UpsertSessionSeal(context.Background(), aOld); err != nil {
+		t.Fatal(err)
+	}
+	fresh := f.replica(t, f.keyfileSealer(t))
+	fresh.reconcileSeals(context.Background())
+	key, _ := f.store.GetKeyByPubkey(context.Background(), f.key.Pubkey)
+	if fresh.signer.IsKeyLoaded(f.key.Pubkey) || fresh.ensureNostrConnectKeyLoaded(context.Background(), "", exportUserID, key) {
+		t.Fatal("a pre-change seal restored the key")
+	}
+}
+
+// Split mode: the change hands the browser a NEW half; the old half no longer
+// opens the session's seal.
+func TestStaySignedIn_PasswordChangeNewSplitHalf(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	login, lrr := f.browserLogin(t, "30d")
+	oldHalf := halfCookie(lrr)
+	if oldHalf == nil {
+		t.Fatal("setup: no half cookie")
+	}
+	resp, rr := f.changePassword(t, login.Token, true)
+	newHalf := halfCookie(rr)
+	if newHalf == nil || newHalf.MaxAge <= 0 || newHalf.Value == oldHalf.Value || newHalf.Path != oldHalf.Path || !newHalf.HttpOnly {
+		t.Fatalf("new half cookie = %+v", newHalf)
+	}
+	if resp.StaySignedIn == nil || resp.StaySignedIn.Mode != seal.ModeSplit || bytes.Contains(rr.Body.Bytes(), []byte("split_half")) {
+		t.Fatalf("browser response: %s", rr.Body.String())
+	}
+
+	after := f.replica(t, seal.None{})
+	unseal := func(half string) int {
+		b, _ := json.Marshal(map[string]string{"split_half": half})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/users/session/unseal", bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer "+login.Token)
+		rr := httptest.NewRecorder()
+		after.handleSessionUnseal(rr, req)
+		return rr.Code
+	}
+	if code := unseal(oldHalf.Value); code != http.StatusForbidden || after.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatalf("pre-change half: %d", code)
+	}
+	if code := unseal(newHalf.Value); code != http.StatusOK || !after.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatalf("new half: %d", code)
+	}
+
+	// Non-browser clients get the new half in the body.
+	f2 := newStayFixture(t)
+	f2.h.SetSealer(seal.None{})
+	login2, _ := f2.loginWith(t, f2.h, "30d", true)
+	resp2, rr2 := f2.changePassword(t, login2.Token, false)
+	if resp2.StaySignedIn == nil || resp2.StaySignedIn.SplitHalf == "" || resp2.StaySignedIn.SplitHalf == login2.StaySignedIn.SplitHalf {
+		t.Fatalf("non-browser response: %s", rr2.Body.String())
+	}
+}
+
+// Session-only sign-ins: the change still ends the others and this one keeps its key.
+func TestStaySignedIn_PasswordChangeSessionOnly(t *testing.T) {
+	f := newStayFixture(t)
+	other, _ := f.loginWith(t, f.h, "", false)
+	me, _ := f.loginWith(t, f.h, "", false)
+	resp, _ := f.changePassword(t, me.Token, false)
+	if resp.StaySignedIn != nil {
+		t.Fatalf("grant = %+v, want none", resp.StaySignedIn)
+	}
+	if _, err := f.h.validateAuthHeader(requestWithToken(other.Token)); err == nil {
+		t.Fatal("the other sign-in survived the password change")
+	}
+	if _, err := f.h.validateAuthHeader(requestWithToken(me.Token)); err != nil {
+		t.Fatalf("this sign-in ended: %v", err)
+	}
+	if !f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("key not loaded after the change")
+	}
+}
+
+// Credentialed CORS from Cloistr apps reaches the unseal endpoint.
+func TestStaySignedIn_UnsealCORS(t *testing.T) {
+	f := newStayFixture(t)
+	mux := http.NewServeMux()
+	f.h.RegisterRoutes(mux)
+	srv := CORSMiddleware(f.h.config)(mux)
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/users/session/unseal", nil)
+	req.Header.Set("Origin", "https://files.cloistr.xyz")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Header().Get("Access-Control-Allow-Origin") != "https://files.cloistr.xyz" || rr.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Fatalf("CORS headers: %v", rr.Header())
+	}
+}
+
+// A 200 from unseal always means the half opened the seal, even when the key is
+// already loaded on this replica (security review H1).
+func TestStaySignedIn_UnsealVerifiesHalfWhenLoaded(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	resp, _ := f.loginWith(t, f.h, "30d", true)
+	if !f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("setup: key not loaded on the login replica")
+	}
+	bogus := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, seal.SplitHalfLen))
+	b, _ := json.Marshal(map[string]string{"split_half": bogus})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/session/unseal", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+resp.Token)
+	rr := httptest.NewRecorder()
+	f.h.handleSessionUnseal(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("wrong half with the key already loaded: %d, want 403", rr.Code)
+	}
+}
+
+// A lease taken after a reconcile pass read the table is not dropped by that pass
+// (security review M1: a sign-in sealing mid-pass).
+func TestStaySignedIn_ReconcileKeepsNewerLease(t *testing.T) {
+	f := newStayFixture(t)
+	passStart := time.Now()
+	time.Sleep(time.Millisecond)
+	f.h.signer.RegisterKey(f.key.Pubkey, f.priv)
+	f.h.stay.lease(f.key.Pubkey, exportUserID)
+	f.h.lockSealedKeyIfStale(context.Background(), f.key.Pubkey, passStart, "test")
+	if !f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("a lease newer than the pass was dropped")
+	}
+	f.h.lockSealedKeyIfStale(context.Background(), f.key.Pubkey, time.Now().Add(time.Second), "test")
+	if f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("a stale lease was kept")
+	}
+}
+
+// The reconcile pass sweeps expired seal rows.
+func TestStaySignedIn_ReconcileSweepsExpired(t *testing.T) {
+	f := newStayFixture(t)
+	ctx := context.Background()
+	if err := f.store.UpsertSessionSeal(ctx, &storage.SessionSeal{
+		ID: "expired-seal", UserID: exportUserID, KeyID: f.key.ID, Pubkey: f.key.Pubkey, SessionID: "gone",
+		Mode: seal.ModeKeyfile, Sealed: []byte("x"), ExpiresAt: time.Now().Add(-time.Hour), CreatedAt: time.Now().Add(-48 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.h.reconcileSeals(ctx)
+	if n, err := f.store.DeleteExpiredSessionSeals(ctx); err != nil || n != 0 {
+		t.Fatalf("reconcile left %d expired seal rows (err %v)", n, err)
+	}
+}
+
+// Account deletion drops the user's seals and locks the key.
+func TestStaySignedIn_AccountDeletionDropsSeals(t *testing.T) {
+	f := newStayFixture(t)
+	f.loginWith(t, f.h, "30d", false)
+	other := f.replica(t, f.keyfileSealer(t))
+	other.reconcileSeals(context.Background())
+	if _, err := f.h.deleteAccount(context.Background(), exportUserID); err != nil {
+		t.Fatal(err)
+	}
+	if all, _ := f.store.ListSessionSealsByUser(context.Background(), exportUserID); len(all) != 0 {
+		t.Fatalf("%d seals survive account deletion", len(all))
+	}
+	other.reconcileSeals(context.Background())
+	if f.h.signer.IsKeyLoaded(f.key.Pubkey) || other.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("key still loaded after account deletion")
+	}
+}

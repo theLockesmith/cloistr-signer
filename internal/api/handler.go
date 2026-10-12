@@ -52,6 +52,8 @@ type Handler struct {
 	accountVault     accountVault        // Vault deletions for account deletion (nil = Vault disabled)
 	vaultToken       vaultTokenStatuser  // the signer's own Vault token, for /health (nil = Vault disabled)
 	draining         atomic.Bool         // set on SIGTERM; fails readiness while in-flight work finishes
+	stay             *staySignedIn       // "stay signed in" session seals (nil = not wired; see stay_signed_in.go)
+	stayNow          func() time.Time    // clock for sliding sessions; nil = time.Now (tests override)
 }
 
 // frostEncryptorAdapter wraps crypto.Encryptor to implement frost.Encryptor
@@ -337,6 +339,10 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/users/register", h.handleUserRegister)
 	mux.HandleFunc("/api/v1/users/login", h.handleUserLogin)
 	mux.HandleFunc("/api/v1/users/logout", h.handleUserLogout)
+	mux.HandleFunc("/api/v1/users/stay-signed-in/options", h.handleStaySignedInOptions)
+	mux.HandleFunc("/api/v1/users/stay-signed-in", h.handleStaySignedIn)
+	mux.HandleFunc("/api/v1/users/session/unseal", h.handleSessionUnseal)
+	mux.HandleFunc("/api/v1/users/session/refresh", h.handleSessionRefresh)
 	mux.HandleFunc("/api/v1/users/me", h.handleUserMe)
 	mux.HandleFunc("/api/v1/users/password", h.handleUserChangePassword)
 
@@ -2295,13 +2301,20 @@ type LoginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	MFACode  string `json:"mfa_code,omitempty"`
+	// StaySignedIn: "session" (default), "1d", "30d" or "until_signout". How long
+	// the unlocked key survives a signer restart. See stay_signed_in.go.
+	StaySignedIn string `json:"stay_signed_in,omitempty"`
+	// StaySignedInSplit asks for split sealing: the browser keeps half of the
+	// sealing key, so only this browser can restore the key after a restart.
+	StaySignedInSplit bool `json:"stay_signed_in_split,omitempty"`
 }
 
 type LoginResponse struct {
-	Token       string       `json:"token"`
-	ExpiresAt   time.Time    `json:"expires_at"`
-	User        UserResponse `json:"user"`
-	MFARequired bool         `json:"mfa_required,omitempty"`
+	Token        string             `json:"token"`
+	ExpiresAt    time.Time          `json:"expires_at"`
+	User         UserResponse       `json:"user"`
+	MFARequired  bool               `json:"mfa_required,omitempty"`
+	StaySignedIn *StaySignedInGrant `json:"stay_signed_in,omitempty"`
 }
 
 type UserResponse struct {
@@ -2488,6 +2501,10 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if !validStayChoice(req.StaySignedIn) {
+		h.errorResponse(w, http.StatusBadRequest, "stay_signed_in must be session, 1d, 30d or until_signout")
+		return
+	}
 
 	guard := h.authGuard()
 	attempt, ok := guard.Begin(r, req.Username)
@@ -2566,8 +2583,16 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// Generate session ID first (needed for JWT)
 	sessionID, _ := auth.GenerateSessionID()
 
+	// Stay signed in: decided now, because the sign-in's lifetime follows the
+	// choice (and a split half must go back in this response). Applied once the
+	// keys are unlocked below. Session-only keeps the default lifetime.
+	stay, stayResp := h.grantStaySignedIn(req.StaySignedIn, req.StaySignedInSplit)
+
 	// Generate JWT with session ID (so we can retrieve Vault token later)
 	token, expiresAt, err := auth.GenerateJWTWithSession(h.authConfig, user.ID, user.Username, sessionID)
+	if err == nil && stay != nil {
+		token, expiresAt, err = auth.GenerateJWTWithSessionUntil(h.authConfig, user.ID, user.Username, sessionID, stay.expiresAt)
+	}
 	if err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to generate token")
 		return
@@ -2603,7 +2628,13 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// sent; we need the goroutine to keep running independently. Password
 	// captured in closure — same lifetime as the sync-flow local var was.
 	if h.vaultClient != nil && h.config.Vault.Enabled {
-		go h.populateVaultTokenAsync(sessionID, user.ID, user.Username, req.Password)
+		go func(userID, username, password string) {
+			h.populateVaultTokenAsync(sessionID, userID, username, password)
+			// Vault-wrapped keys are loaded at the end of the call above.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			h.sealSessionKeys(ctx, userID, sessionID, stay)
+		}(user.ID, user.Username, req.Password)
 	}
 
 	// Load passphrase-wrapped ("pbk:") keys. Independent of Vault: this is the
@@ -2627,6 +2658,7 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 			slog.Info("migrated legacy server-held keys at login", "user_id", userID, "count", n)
 		}
 		h.loadUserPassphraseKeys(ctx, userID, passphrase)
+		h.sealSessionKeys(ctx, userID, sessionID, stay)
 		h.publishLoadedKeys(ctx)
 	}(user.ID, req.Password)
 
@@ -2654,6 +2686,12 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// and the browser scopes the cookie to the issuing host only.
 	http.SetCookie(w, h.newAuthCookie(token, expiresAt))
 
+	// Split mode from a browser: the half goes in an HttpOnly cookie only.
+	if stay != nil && stay.half != nil && isBrowserRequest(r) {
+		http.SetCookie(w, h.splitHalfCookie(stay))
+		stayResp.SplitHalf = ""
+	}
+
 	h.jsonResponse(w, http.StatusOK, LoginResponse{
 		Token:     token,
 		ExpiresAt: expiresAt,
@@ -2665,6 +2703,7 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:  user.CreatedAt,
 			LastLogin:  user.LastLoginAt,
 		},
+		StaySignedIn: stayResp,
 	})
 
 	// The eager Vault-key pre-load that used to live here is now the tail of
@@ -2684,6 +2723,7 @@ func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 	// Returning 401 here would leave the .cloistr.xyz cookie set and make "sign out"
 	// appear not to work. Server-side cleanup runs only when a session exists.
 	http.SetCookie(w, h.clearAuthCookie())
+	http.SetCookie(w, clearSplitHalfCookie())
 
 	claims, err := h.validateAuthHeader(r)
 	if err != nil {
@@ -2693,6 +2733,9 @@ func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 
 	// Unregister user's Vault-encrypted keys from signer runtime
 	h.unloadUserVaultKeys(r.Context(), claims.UserID)
+
+	// Sign-out ends "stay signed in": drop every seal and lock those keys.
+	h.revokeUserSeals(r.Context(), claims.UserID, "signed out")
 
 	// Revoke Vault tokens for all sessions before deleting them
 	if h.vaultClient != nil && h.config.Vault.Enabled {
@@ -2788,6 +2831,11 @@ func (h *Handler) handleUserMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete {
 		h.handleSelfDelete(w, r, claims)
 		return
+	}
+	// Every Cloistr app calls this with the shared cookie, so it is where an
+	// "until I sign out" session is renewed (and its cookie re-issued).
+	if tok, exp, ok := h.slideSession(r.Context(), claims, false); ok {
+		http.SetCookie(w, h.newAuthCookie(tok, exp))
 	}
 
 	user, err := h.storage.GetUser(r.Context(), claims.UserID)
@@ -2903,9 +2951,55 @@ func (h *Handler) handleUserChangePassword(w http.ResponseWriter, r *http.Reques
 			"user_id", user.ID)
 	}
 
-	slog.Info("password changed", "username", user.Username, "user_id", user.ID, "keys_rewrapped", rewrapped)
+	// A password change ends every other sign-in. A user who changes it after a
+	// compromise must not leave the attacker a session, and with stay signed in a
+	// session can carry a sealed key that outlives deploys. So: delete every other
+	// session, drop every seal (locking those keys here and on the replica holding
+	// them), then unlock again with the new password and re-seal only this session,
+	// with the same mode and expiry, under fresh seals. A pre-change seal (or split
+	// half) never opens anything afterwards.
+	ctx := r.Context()
+	stay, stayResp := h.regrantForSession(ctx, claims.SessionID)
+	ended := h.endSessions(ctx, user.ID, claims.SessionID)
+	dropped := h.revokeUserSeals(ctx, user.ID, "password changed")
+	if h.stay != nil {
+		var vaultToken string
+		if cur, err := h.storage.GetUserSession(ctx, claims.SessionID); err == nil && cur != nil {
+			vaultToken = cur.VaultToken
+		}
+		// Same shape as the login unlock: registered before the goroutine so a key
+		// request that arrives meanwhile waits for it.
+		unlockDone := h.keyLoads.begin(user.ID)
+		go func(userID, sessionID, passphrase, vaultToken string) {
+			defer unlockDone()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			h.loadUserPassphraseKeys(ctx, userID, passphrase)
+			h.loadUserVaultKeys(ctx, userID, vaultToken)
+			h.sealSessionKeys(ctx, userID, sessionID, stay)
+			h.publishLoadedKeys(ctx)
+		}(user.ID, claims.SessionID, req.NewPassword, vaultToken)
+	}
 
-	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "password changed successfully"})
+	if stay != nil && stay.half != nil && isBrowserRequest(r) {
+		http.SetCookie(w, h.splitHalfCookie(stay))
+		stayResp.SplitHalf = ""
+	} else {
+		http.SetCookie(w, clearSplitHalfCookie())
+	}
+
+	slog.Info("password changed", "username", user.Username, "user_id", user.ID, "keys_rewrapped", rewrapped,
+		"sessions_ended", ended, "seals_dropped", dropped, "resealed", stay != nil)
+
+	h.jsonResponse(w, http.StatusOK, ChangePasswordResponse{Message: "password changed successfully", StaySignedIn: stayResp})
+}
+
+// ChangePasswordResponse answers PUT /api/v1/users/password. StaySignedIn is set
+// when this session's keys were re-sealed; in split mode for a non-browser client
+// it carries the NEW split half (the old one no longer opens anything).
+type ChangePasswordResponse struct {
+	Message      string             `json:"message"`
+	StaySignedIn *StaySignedInGrant `json:"stay_signed_in,omitempty"`
 }
 
 // rewrapPassphraseKeys re-encrypts every passphrase-wrapped key this user owns from the
@@ -3170,8 +3264,12 @@ func (h *Handler) handleUserSessions(w http.ResponseWriter, r *http.Request) {
 		h.jsonResponse(w, http.StatusOK, response)
 
 	case http.MethodDelete:
-		// Delete all sessions except current
-		h.storage.DeleteUserSessions(r.Context(), claims.UserID)
+		// Ends every session, this one included, so the caller is signed out too:
+		// clear its cookies the way sign-out does.
+		h.revokeUserSeals(r.Context(), claims.UserID, "all sessions revoked")
+		h.endSessions(r.Context(), claims.UserID, "")
+		http.SetCookie(w, h.clearAuthCookie())
+		http.SetCookie(w, clearSplitHalfCookie())
 		h.jsonResponse(w, http.StatusOK, map[string]string{"message": "all sessions revoked"})
 
 	default:
@@ -3308,6 +3406,10 @@ func (h *Handler) getUserVaultEncryptor(ctx context.Context, claims *auth.JWTCla
 // non-Vault keys.
 func (h *Handler) ensureNostrConnectKeyLoaded(ctx context.Context, sessionID, userID string, key *storage.Key) bool {
 	if h.signer.IsKeyLoaded(key.Pubkey) {
+		return true
+	}
+	// A live "stay signed in" seal restores the key with no Vault token needed.
+	if h.restoreSealedKey(ctx, key.Pubkey) {
 		return true
 	}
 	if h.vaultClient == nil || !crypto.IsVaultEncrypted(key.EncryptedNsec) {

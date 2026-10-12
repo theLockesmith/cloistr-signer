@@ -92,6 +92,7 @@ type Signer struct {
 	servicePriv            string                            // never a user's custody key -- see SetServiceKey
 	keys                   map[string]string                 // pubkey -> private key (hex)
 	keysLock               sync.RWMutex                      // Protects keys map for concurrent access
+	keyRestorer            KeyRestorer                       // stay signed in: restores a locked user-held key from a session seal (guarded by keysLock)
 	keyRelays              map[string][]string               // pubkey -> configured relays (from storage)
 	proxyKeys              map[string]string                 // pubkey -> bunker URI (for proxy keys)
 	frostKeys              map[string]string                 // pubkey -> frost key ID (for FROST keys)
@@ -2264,9 +2265,10 @@ func (s *Signer) resolveSigningKey(ctx context.Context, pubkey string) (string, 
 
 	material := key.EncryptedNsec
 	if method := crypto.DetectEncryptionMethod(material); method.UserHeld() {
-		// Genuinely unavailable to this process without the user. Not an error
-		// to shout about; the caller decides how to surface it.
-		return "", false
+		// Unavailable to this process without the user, unless a live session
+		// seal ("stay signed in") can restore it. Not an error to shout about;
+		// the caller decides how to surface it.
+		return s.restoreUserHeldKey(ctx, pubkey)
 	}
 	if crypto.IsEncrypted(material) && s.encryptor != nil {
 		decrypted, decErr := s.encryptor.Decrypt(material)
