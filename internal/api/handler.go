@@ -2950,13 +2950,16 @@ func (h *Handler) rewrapPassphraseKeys(ctx context.Context, userID, oldPassphras
 		return nil, 0, nil
 	}
 
-	// Persist, tracking what has been written so it can be undone.
+	// Persist, tracking what has been written so it can be undone. UpdateKeyEncryption,
+	// not UpdateKey: the SQL backends' UpdateKey never writes encrypted_nsec, so a
+	// re-wrap saved through it was silently dropped (only MemoryStorage kept it).
+	passphraseMethod := string(crypto.EncryptionMethodPassphrase)
 	var written []pending
 	restore := func() error {
 		var firstErr error
 		for _, p := range written {
 			p.key.EncryptedNsec = p.oldCT
-			if err := h.storage.UpdateKey(ctx, p.key); err != nil && firstErr == nil {
+			if err := h.storage.UpdateKeyEncryption(ctx, p.key.ID, p.oldCT, passphraseMethod); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
@@ -2965,7 +2968,7 @@ func (h *Handler) rewrapPassphraseKeys(ctx context.Context, userID, oldPassphras
 
 	for _, p := range todo {
 		p.key.EncryptedNsec = p.newCT
-		if err := h.storage.UpdateKey(ctx, p.key); err != nil {
+		if err := h.storage.UpdateKeyEncryption(ctx, p.key.ID, p.newCT, passphraseMethod); err != nil {
 			if rbErr := restore(); rbErr != nil {
 				slog.Error("key re-wrap rollback failed; some keys may be wrapped under the new passphrase",
 					"user_id", userID, "rollback_error", rbErr)

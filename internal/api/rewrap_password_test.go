@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/crypto"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
@@ -15,7 +17,7 @@ const (
 )
 
 // seedPassphraseKey stores a key wrapped under the given passphrase.
-func seedPassphraseKey(t *testing.T, store *storage.MemoryStorage, id, owner, passphrase, plaintext string) *storage.Key {
+func seedPassphraseKey(t *testing.T, store storage.Storage, id, owner, passphrase, plaintext string) *storage.Key {
 	t.Helper()
 	enc, err := crypto.NewPassphraseEncryptor(passphrase)
 	if err != nil {
@@ -172,5 +174,54 @@ func TestRewrapPassphraseKeys_RollbackRestoresOldCiphertext(t *testing.T) {
 	oldEnc, _ := crypto.NewPassphraseEncryptor(rwOldPass)
 	if _, err := oldEnc.Decrypt(got.EncryptedNsec); err != nil {
 		t.Errorf("after rollback the key is not readable under the old passphrase: %v", err)
+	}
+}
+
+// The same invariants on a SQL backend. MemoryStorage.UpdateKey stores the whole
+// struct, so a re-wrap persisted through it passed every test above while SQLite
+// and Postgres silently dropped the new ciphertext.
+func sqliteRewrapHandler(t *testing.T) (*Handler, storage.Storage) {
+	t.Helper()
+	h, _ := testHandler(t)
+	store, err := storage.NewSQLiteStorage(filepath.Join(t.TempDir(), "signer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if err := store.CreateUser(context.Background(), &storage.User{
+		ID: testUserID, Username: "rewrap-user", PasswordHash: "x", Role: "user",
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.storage = store
+	return h, store
+}
+
+func TestRewrapPassphraseKeys_PersistsOnSQL(t *testing.T) {
+	h, store := sqliteRewrapHandler(t)
+	ctx := context.Background()
+	k := seedPassphraseKey(t, store, "key-sql", testUserID, rwOldPass, rwNsec)
+	original := k.EncryptedNsec
+
+	rollback, count, err := h.rewrapPassphraseKeys(ctx, testUserID, rwOldPass, rwNewPass)
+	if err != nil || count != 1 {
+		t.Fatalf("rewrapPassphraseKeys: count=%d err=%v", count, err)
+	}
+	got, err := store.GetKey(ctx, "key-sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newEnc, _ := crypto.NewPassphraseEncryptor(rwNewPass)
+	if pt, err := newEnc.Decrypt(got.EncryptedNsec); err != nil || pt != rwNsec {
+		t.Fatalf("stored key not readable under the NEW passphrase: %v", err)
+	}
+
+	if err := rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	got, _ = store.GetKey(ctx, "key-sql")
+	if got.EncryptedNsec != original {
+		t.Fatal("rollback did not restore the stored ciphertext")
 	}
 }
