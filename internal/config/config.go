@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -693,4 +694,20 @@ func (c *Config) MapRelaysToPublic(internalURLs []string) []string {
 		result[i] = c.MapRelayToPublic(url)
 	}
 	return result
+}
+
+// SealKeyfileBesideDB reports whether keyfile mode keeps its key file in the
+// SQLite database's directory (or below it). A snapshot of that volume then holds
+// both the seals and the key that opens them.
+func (c *Config) SealKeyfileBesideDB() bool {
+	if c.StaySignedIn.Sealer != "keyfile" || c.Storage.Type != "sqlite" || c.Storage.DSN == "" || c.StaySignedIn.Keyfile == "" {
+		return false
+	}
+	dbDir, err1 := filepath.Abs(filepath.Dir(strings.TrimPrefix(c.Storage.DSN, "file:")))
+	keyDir, err2 := filepath.Abs(filepath.Dir(c.StaySignedIn.Keyfile))
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	rel, err := filepath.Rel(dbDir, keyDir)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

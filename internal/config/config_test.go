@@ -400,3 +400,24 @@ func TestStaySignedInConfig(t *testing.T) {
 		t.Fatal("negative SESSION_SEAL_MAX_DAYS accepted")
 	}
 }
+
+func TestSealKeyfileBesideDB(t *testing.T) {
+	for _, tc := range []struct {
+		sealer, typ, dsn, keyfile string
+		want                      bool
+	}{
+		{"keyfile", "sqlite", "data/signer.db", "data/session-seal.key", true}, // the defaults
+		{"keyfile", "sqlite", "/var/lib/signer/signer.db", "/var/lib/signer/keys/seal.key", true},
+		{"keyfile", "sqlite", "file:/var/lib/signer/signer.db", "/var/lib/signer/seal.key", true},
+		{"keyfile", "sqlite", "/var/lib/signer/signer.db", "/run/secrets/seal.key", false},
+		{"keyfile", "sqlite", "/var/lib/signer/signer.db", "/var/lib/signer-keys/seal.key", false},
+		{"keyfile", "postgres", "postgres://db/signer", "data/session-seal.key", false},
+		{"vault", "sqlite", "data/signer.db", "data/session-seal.key", false},
+	} {
+		c := &Config{}
+		c.StaySignedIn.Sealer, c.Storage.Type, c.Storage.DSN, c.StaySignedIn.Keyfile = tc.sealer, tc.typ, tc.dsn, tc.keyfile
+		if got := c.SealKeyfileBesideDB(); got != tc.want {
+			t.Errorf("%+v: got %v, want %v", tc, got, tc.want)
+		}
+	}
+}

@@ -234,3 +234,94 @@ func TestKeyfileThroughSymlink(t *testing.T) {
 		t.Fatal("group-readable target accepted through a symlink")
 	}
 }
+
+// Each defense layer, pinned on its own.
+
+// Every seal gets a fresh random nonce.
+func TestSealNoncesAreFresh(t *testing.T) {
+	ikm := bytes.Repeat([]byte{7}, 32)
+	a, err := aeadSeal(ikm, "test", secret, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := aeadSeal(ikm, "test", secret, alice)
+	const n = 12 // GCM nonce
+	if bytes.Equal(a[:n], b[:n]) || bytes.Equal(a[:n], make([]byte, n)) {
+		t.Fatalf("nonce reused or zero: %x / %x", a[:n], b[:n])
+	}
+}
+
+// The binding is in the HKDF info: a key derived for one binding can't open a
+// blob made under another binding's key, even with matching associated data.
+func TestBindingInKeyDerivation(t *testing.T) {
+	ikm := bytes.Repeat([]byte{7}, 32)
+	bob := Binding{Pubkey: "bb22", SessionID: "sess-1"}
+	gcm, err := derivedGCM(ikm, "test", alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	nonce[0] = 1
+	blob := gcm.Seal(bytes.Clone(nonce), nonce, secret, bob.Bytes()) // alice's key, bob's AAD
+	if _, err := aeadOpen(ikm, "test", blob, bob); !errors.Is(err, ErrOpen) {
+		t.Fatalf("opened with a key derived for another binding: %v", err)
+	}
+}
+
+// The binding is the associated data: the right key with the wrong AAD fails.
+func TestBindingInAssociatedData(t *testing.T) {
+	ikm := bytes.Repeat([]byte{7}, 32)
+	bob := Binding{Pubkey: "bb22", SessionID: "sess-1"}
+	gcm, err := derivedGCM(ikm, "test", bob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	nonce[0] = 1
+	blob := gcm.Seal(bytes.Clone(nonce), nonce, secret, alice.Bytes()) // bob's key, alice's AAD
+	if _, err := aeadOpen(ikm, "test", blob, bob); !errors.Is(err, ErrOpen) {
+		t.Fatalf("opened with mismatched associated data: %v", err)
+	}
+}
+
+// The server half is part of the key: change it in the blob and the right browser
+// half no longer opens it.
+func TestSplitServerHalfInKey(t *testing.T) {
+	half := mustHalf(t)
+	blob, err := SplitSeal(secret, half, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob[len(splitPrefix)] ^= 1
+	if _, err := SplitOpen(blob, half, alice); !errors.Is(err, ErrOpen) {
+		t.Fatalf("opened with a changed server half: %v", err)
+	}
+}
+
+// An all-zero browser half is refused when sealing and when opening, and short or
+// truncated input is an open failure, not a panic.
+func TestSplitRejectsZeroAndShortInput(t *testing.T) {
+	zero := make([]byte, SplitHalfLen)
+	if _, err := SplitSeal(secret, zero, alice); !errors.Is(err, ErrOpen) {
+		t.Fatalf("sealed under a zero half: %v", err)
+	}
+	// A blob sealed under a zero half (bypassing SplitSeal) must not open with it.
+	server := bytes.Repeat([]byte{9}, SplitHalfLen)
+	body, err := aeadSeal(splitIKM(server, zero), splitPurpose, secret, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := append(append(append([]byte{}, splitPrefix...), server...), body...)
+	if _, err := SplitOpen(blob, zero, alice); !errors.Is(err, ErrOpen) {
+		t.Fatalf("opened with a zero half: %v", err)
+	}
+	half := mustHalf(t)
+	for _, b := range [][]byte{nil, splitPrefix, blob[:len(splitPrefix)+SplitHalfLen-1], blob[:len(splitPrefix)+SplitHalfLen+3]} {
+		if _, err := SplitOpen(b, half, alice); !errors.Is(err, ErrOpen) {
+			t.Fatalf("short blob (%d bytes): %v", len(b), err)
+		}
+	}
+	if _, err := SplitOpen(blob, half[:SplitHalfLen-1], alice); !errors.Is(err, ErrOpen) {
+		t.Fatalf("short half: %v", err)
+	}
+}

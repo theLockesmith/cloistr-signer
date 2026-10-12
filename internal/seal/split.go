@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
+	"net/http"
 )
 
 // Split sealing (strict, opt-in per user). The sealing key is HKDF(serverHalf ||
@@ -15,6 +16,12 @@ import (
 // Needs no Vault and no key file.
 //
 // Blob format: "sp1" || serverHalf[32] || nonce || ct.
+
+// The browser half's cookie. Named here so the API and the web UI clear the same one.
+const (
+	SplitHalfCookieName = "cloistr_seal_half"
+	SplitHalfCookiePath = "/api/v1/users/session/unseal"
+)
 
 // SplitHalfLen is the length of each half in bytes.
 const SplitHalfLen = 32
@@ -39,7 +46,8 @@ func SplitSeal(plaintext, browserHalf []byte, b Binding) ([]byte, error) {
 	if err := b.validate(); err != nil {
 		return nil, err
 	}
-	if len(browserHalf) != SplitHalfLen {
+	var zero [SplitHalfLen]byte
+	if len(browserHalf) != SplitHalfLen || subtle.ConstantTimeCompare(browserHalf, zero[:]) == 1 {
 		return nil, ErrOpen
 	}
 	server := make([]byte, SplitHalfLen)
@@ -75,4 +83,10 @@ func SplitOpen(blob, browserHalf []byte, b Binding) ([]byte, error) {
 func splitIKM(server, browser []byte) []byte {
 	ikm := make([]byte, 0, 2*SplitHalfLen)
 	return append(append(ikm, server...), browser...)
+}
+
+// ClearSplitHalfCookie expires the browser half's cookie.
+func ClearSplitHalfCookie() *http.Cookie {
+	return &http.Cookie{Name: SplitHalfCookieName, Value: "", Path: SplitHalfCookiePath, MaxAge: -1,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode}
 }

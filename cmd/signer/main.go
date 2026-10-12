@@ -633,6 +633,10 @@ func configureStaySignedIn(h *api.Handler, cfg *config.Config, vaultClient *vaul
 		slog.Info("stay signed in: vault sealer", "transit_key", v.Key())
 	} else if k, ok := s.(*seal.Keyfile); ok {
 		slog.Info("stay signed in: keyfile sealer", "path", ss.Keyfile, "fingerprint", k.Fingerprint())
+		if cfg.SealKeyfileBesideDB() {
+			slog.Warn("stay signed in: SESSION_SEAL_KEYFILE is on the database's volume; a snapshot of it can open every seal. Move the key file to its own volume or secret.",
+				"keyfile", ss.Keyfile, "database", cfg.Storage.DSN)
+		}
 	} else {
 		slog.Info("stay signed in: sealer none (session-only; split sealing available)", "split", ss.Split)
 	}

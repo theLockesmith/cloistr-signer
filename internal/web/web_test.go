@@ -13,6 +13,7 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/discovery"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/seal"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 	"github.com/nbd-wtf/go-nostr"
 )
@@ -315,6 +316,39 @@ func TestHandleLogout(t *testing.T) {
 	}
 	if !found {
 		t.Error("logout should set auth_token cookie")
+	}
+}
+
+// Web sign-out drops the session's stay-signed-in seals and clears the split
+// half's cookie.
+func TestHandleLogout_DropsSeals(t *testing.T) {
+	h, store, _ := testHandler(t)
+	_, user := createTestUser(t, h, store, "sealed")
+	ctx := context.Background()
+	token, exp, _ := auth.GenerateJWTWithSession(h.authConfig, user.ID, user.Username, "web-sess")
+	store.CreateUserSession(ctx, &storage.UserSession{ID: "web-sess", UserID: user.ID, ExpiresAt: exp, CreatedAt: time.Now()})
+	store.CreateKey(ctx, &storage.Key{ID: "k1", Name: "k", Pubkey: "aa11", OwnerID: user.ID, EncryptedNsec: "pbk:x", CreatedAt: time.Now()})
+	if err := store.UpsertSessionSeal(ctx, &storage.SessionSeal{ID: "s1", UserID: user.ID, KeyID: "k1", Pubkey: "aa11",
+		SessionID: "web-sess", Mode: "keyfile", Sealed: []byte("x"), ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/logout", nil)
+	req.AddCookie(&http.Cookie{Name: "auth_token", Value: token})
+	rr := httptest.NewRecorder()
+	h.handleLogout(rr, req)
+
+	if seals, _ := store.ListSessionSealsBySession(ctx, "web-sess"); len(seals) != 0 {
+		t.Fatalf("%d seals survive web sign-out", len(seals))
+	}
+	cleared := false
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == seal.SplitHalfCookieName && c.MaxAge < 0 && c.Path == seal.SplitHalfCookiePath {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("web sign-out did not clear the split half cookie")
 	}
 }
 

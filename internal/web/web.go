@@ -21,6 +21,7 @@ import (
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/config"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/discovery"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/seal"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
@@ -1274,18 +1275,28 @@ func (h *Handler) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// endSession deletes a sign-in session and its stay-signed-in seals. Replicas
+// holding a key restored from those seals lock it on their next reconcile pass.
+func (h *Handler) endSession(ctx context.Context, sessionID string) {
+	if _, err := h.storage.DeleteSessionSealsBySession(ctx, sessionID); err != nil {
+		slog.Warn("end session: delete seals", "session_id", sessionID, "error", err)
+	}
+	h.storage.DeleteUserSession(ctx, sessionID)
+}
+
 // handleLogout clears the auth cookie and redirects to login
 func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	// Delete the session from the database if it exists
 	if cookie, err := r.Cookie("auth_token"); err == nil {
 		if claims, err := auth.ValidateJWT(h.authConfig, cookie.Value); err == nil && claims.SessionID != "" {
-			h.storage.DeleteUserSession(r.Context(), claims.SessionID)
+			h.endSession(r.Context(), claims.SessionID)
 		}
 	}
 
 	// Clear the auth cookie by setting it to expire in the past
 	// Clear the parent-domain cookie. Domain must match the issuing Set-Cookie.
 	http.SetCookie(w, h.clearAuthCookie())
+	http.SetCookie(w, seal.ClearSplitHalfCookie())
 	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
@@ -1527,7 +1538,7 @@ func (h *Handler) getCurrentUser(r *http.Request) *storage.User {
 			inactivityTimeout := time.Duration(h.config.Auth.SessionInactivityMinutes) * time.Minute
 			if time.Since(*session.LastActivity) > inactivityTimeout {
 				// Session inactive too long - delete it
-				h.storage.DeleteUserSession(r.Context(), claims.SessionID)
+				h.endSession(r.Context(), claims.SessionID)
 				return nil
 			}
 		}

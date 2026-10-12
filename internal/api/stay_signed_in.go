@@ -48,6 +48,10 @@ const (
 	stayChoiceUntilSignOut = "until_signout"
 )
 
+// stayChoiceKept is reported (never offered) when a password change re-seals the
+// session's keys: same mode and expiry as before, new seal.
+const stayChoiceKept = "kept"
+
 var stayChoices = []string{stayChoiceSession, stayChoiceDay, stayChoiceMonth, stayChoiceUntilSignOut}
 
 func validStayChoice(c string) bool {
@@ -111,7 +115,7 @@ func (h *Handler) now() time.Time {
 
 // StaySignedInGrant is returned in the login response.
 type StaySignedInGrant struct {
-	Granted   string     `json:"granted"`              // session, 1d, 30d, until_signout
+	Granted   string     `json:"granted"`              // session, 1d, 30d, until_signout; kept after a password change
 	Mode      string     `json:"mode,omitempty"`       // vault, keyfile or split; empty for session
 	ExpiresAt *time.Time `json:"expires_at,omitempty"` // when the key locks again
 	// SplitHalf is the browser half (base64url, 32 bytes) for split mode. The
@@ -736,8 +740,8 @@ func (h *Handler) handleSessionRefresh(w http.ResponseWriter, r *http.Request) {
 // /users/me doesn't receive the cookie), so it lives as long as browsers allow,
 // or until SESSION_SEAL_MAX_DAYS. The server-side seal expiry governs either way.
 const (
-	splitHalfCookieName = "cloistr_seal_half"
-	splitHalfCookiePath = "/api/v1/users/session/unseal"
+	splitHalfCookieName = seal.SplitHalfCookieName
+	splitHalfCookiePath = seal.SplitHalfCookiePath
 	browserCookieMax    = 400 * 24 * time.Hour // browsers cap cookie lifetimes at 400 days
 )
 
@@ -763,7 +767,63 @@ func (h *Handler) splitHalfCookie(g *stayGrant) *http.Cookie {
 	}
 }
 
-func clearSplitHalfCookie() *http.Cookie {
-	return &http.Cookie{Name: splitHalfCookieName, Value: "", Path: splitHalfCookiePath, MaxAge: -1,
-		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode}
+func clearSplitHalfCookie() *http.Cookie { return seal.ClearSplitHalfCookie() }
+
+// regrantForSession builds a fresh grant for a session that already holds seals:
+// same mode, same expiry, same sliding rule, and a NEW split half in split mode, so
+// nothing sealed before (and no half handed out before) opens what is sealed next.
+// Nil when the session holds no seal or its mode is no longer available here.
+func (h *Handler) regrantForSession(ctx context.Context, sessionID string) (*stayGrant, *StaySignedInGrant) {
+	if h.stay == nil || sessionID == "" {
+		return nil, nil
+	}
+	seals, err := h.storage.ListSessionSealsBySession(ctx, sessionID)
+	if err != nil || len(seals) == 0 {
+		return nil, nil
+	}
+	sl := seals[0]
+	g := &stayGrant{choice: "re-seal", mode: sl.Mode, expiresAt: sl.ExpiresAt, sliding: sl.Sliding}
+	switch {
+	case sl.Mode == seal.ModeSplit:
+		half, err := seal.NewSplitHalf()
+		if err != nil {
+			slog.Error("stay signed in: cannot make a split half; not re-sealing", "error", err)
+			return nil, nil
+		}
+		g.half = half
+	case !h.stay.sealer.Enabled() || h.stay.sealer.Mode() != sl.Mode:
+		return nil, nil
+	}
+	resp := &StaySignedInGrant{Granted: stayChoiceKept, Mode: g.mode, ExpiresAt: &g.expiresAt}
+	if g.half != nil {
+		resp.SplitHalf = base64.RawURLEncoding.EncodeToString(g.half)
+	}
+	return g, resp
+}
+
+// endSessions deletes every sign-in session of userID except keep (empty: all of
+// them) and revokes their Vault tokens. Seals are not touched; see revokeUserSeals.
+func (h *Handler) endSessions(ctx context.Context, userID, keep string) int {
+	sessions, err := h.storage.ListUserSessions(ctx, userID)
+	if err != nil {
+		slog.Error("end sessions: list", "user_id", userID, "error", err)
+		return 0
+	}
+	n := 0
+	for _, s := range sessions {
+		if s.ID == keep {
+			continue
+		}
+		if s.VaultToken != "" && h.vaultClient != nil && h.config.Vault.Enabled {
+			if err := h.vaultClient.RevokeToken(ctx, s.VaultToken); err != nil {
+				slog.Warn("failed to revoke vault token", "error", err, "session_id", s.ID)
+			}
+		}
+		if err := h.storage.DeleteUserSession(ctx, s.ID); err != nil {
+			slog.Error("end sessions: delete", "user_id", userID, "session_id", s.ID, "error", err)
+			continue
+		}
+		n++
+	}
+	return n
 }

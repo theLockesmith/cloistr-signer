@@ -2951,9 +2951,55 @@ func (h *Handler) handleUserChangePassword(w http.ResponseWriter, r *http.Reques
 			"user_id", user.ID)
 	}
 
-	slog.Info("password changed", "username", user.Username, "user_id", user.ID, "keys_rewrapped", rewrapped)
+	// A password change ends every other sign-in. A user who changes it after a
+	// compromise must not leave the attacker a session, and with stay signed in a
+	// session can carry a sealed key that outlives deploys. So: delete every other
+	// session, drop every seal (locking those keys here and on the replica holding
+	// them), then unlock again with the new password and re-seal only this session,
+	// with the same mode and expiry, under fresh seals. A pre-change seal (or split
+	// half) never opens anything afterwards.
+	ctx := r.Context()
+	stay, stayResp := h.regrantForSession(ctx, claims.SessionID)
+	ended := h.endSessions(ctx, user.ID, claims.SessionID)
+	dropped := h.revokeUserSeals(ctx, user.ID, "password changed")
+	if h.stay != nil {
+		var vaultToken string
+		if cur, err := h.storage.GetUserSession(ctx, claims.SessionID); err == nil && cur != nil {
+			vaultToken = cur.VaultToken
+		}
+		// Same shape as the login unlock: registered before the goroutine so a key
+		// request that arrives meanwhile waits for it.
+		unlockDone := h.keyLoads.begin(user.ID)
+		go func(userID, sessionID, passphrase, vaultToken string) {
+			defer unlockDone()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			h.loadUserPassphraseKeys(ctx, userID, passphrase)
+			h.loadUserVaultKeys(ctx, userID, vaultToken)
+			h.sealSessionKeys(ctx, userID, sessionID, stay)
+			h.publishLoadedKeys(ctx)
+		}(user.ID, claims.SessionID, req.NewPassword, vaultToken)
+	}
 
-	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "password changed successfully"})
+	if stay != nil && stay.half != nil && isBrowserRequest(r) {
+		http.SetCookie(w, h.splitHalfCookie(stay))
+		stayResp.SplitHalf = ""
+	} else {
+		http.SetCookie(w, clearSplitHalfCookie())
+	}
+
+	slog.Info("password changed", "username", user.Username, "user_id", user.ID, "keys_rewrapped", rewrapped,
+		"sessions_ended", ended, "seals_dropped", dropped, "resealed", stay != nil)
+
+	h.jsonResponse(w, http.StatusOK, ChangePasswordResponse{Message: "password changed successfully", StaySignedIn: stayResp})
+}
+
+// ChangePasswordResponse answers PUT /api/v1/users/password. StaySignedIn is set
+// when this session's keys were re-sealed; in split mode for a non-browser client
+// it carries the NEW split half (the old one no longer opens anything).
+type ChangePasswordResponse struct {
+	Message      string             `json:"message"`
+	StaySignedIn *StaySignedInGrant `json:"stay_signed_in,omitempty"`
 }
 
 // rewrapPassphraseKeys re-encrypts every passphrase-wrapped key this user owns from the
@@ -2998,13 +3044,16 @@ func (h *Handler) rewrapPassphraseKeys(ctx context.Context, userID, oldPassphras
 		return nil, 0, nil
 	}
 
-	// Persist, tracking what has been written so it can be undone.
+	// Persist, tracking what has been written so it can be undone. UpdateKeyEncryption,
+	// not UpdateKey: the SQL backends' UpdateKey never writes encrypted_nsec, so a
+	// re-wrap saved through it was silently dropped (only MemoryStorage kept it).
+	passphraseMethod := string(crypto.EncryptionMethodPassphrase)
 	var written []pending
 	restore := func() error {
 		var firstErr error
 		for _, p := range written {
 			p.key.EncryptedNsec = p.oldCT
-			if err := h.storage.UpdateKey(ctx, p.key); err != nil && firstErr == nil {
+			if err := h.storage.UpdateKeyEncryption(ctx, p.key.ID, p.oldCT, passphraseMethod); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
@@ -3013,7 +3062,7 @@ func (h *Handler) rewrapPassphraseKeys(ctx context.Context, userID, oldPassphras
 
 	for _, p := range todo {
 		p.key.EncryptedNsec = p.newCT
-		if err := h.storage.UpdateKey(ctx, p.key); err != nil {
+		if err := h.storage.UpdateKeyEncryption(ctx, p.key.ID, p.newCT, passphraseMethod); err != nil {
 			if rbErr := restore(); rbErr != nil {
 				slog.Error("key re-wrap rollback failed; some keys may be wrapped under the new passphrase",
 					"user_id", userID, "rollback_error", rbErr)
@@ -3215,9 +3264,12 @@ func (h *Handler) handleUserSessions(w http.ResponseWriter, r *http.Request) {
 		h.jsonResponse(w, http.StatusOK, response)
 
 	case http.MethodDelete:
-		// Delete all sessions except current
+		// Ends every session, this one included, so the caller is signed out too:
+		// clear its cookies the way sign-out does.
 		h.revokeUserSeals(r.Context(), claims.UserID, "all sessions revoked")
-		h.storage.DeleteUserSessions(r.Context(), claims.UserID)
+		h.endSessions(r.Context(), claims.UserID, "")
+		http.SetCookie(w, h.clearAuthCookie())
+		http.SetCookie(w, clearSplitHalfCookie())
 		h.jsonResponse(w, http.StatusOK, map[string]string{"message": "all sessions revoked"})
 
 	default:
