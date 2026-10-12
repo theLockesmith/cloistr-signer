@@ -2686,6 +2686,12 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// and the browser scopes the cookie to the issuing host only.
 	http.SetCookie(w, h.newAuthCookie(token, expiresAt))
 
+	// Split mode from a browser: the half goes in an HttpOnly cookie only.
+	if stay != nil && stay.half != nil && isBrowserRequest(r) {
+		http.SetCookie(w, h.splitHalfCookie(stay))
+		stayResp.SplitHalf = ""
+	}
+
 	h.jsonResponse(w, http.StatusOK, LoginResponse{
 		Token:     token,
 		ExpiresAt: expiresAt,
@@ -2717,6 +2723,7 @@ func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 	// Returning 401 here would leave the .cloistr.xyz cookie set and make "sign out"
 	// appear not to work. Server-side cleanup runs only when a session exists.
 	http.SetCookie(w, h.clearAuthCookie())
+	http.SetCookie(w, clearSplitHalfCookie())
 
 	claims, err := h.validateAuthHeader(r)
 	if err != nil {

@@ -564,3 +564,184 @@ func TestStaySignedIn_SlidingStopsAtMaxDays(t *testing.T) {
 		t.Fatalf("slid to %v, past the 100-day ceiling %v", sess.ExpiresAt, ceiling)
 	}
 }
+
+func (f *staySignedInFixture) browserLogin(t *testing.T, choice string) (LoginResponse, *httptest.ResponseRecorder) {
+	t.Helper()
+	b, _ := json.Marshal(LoginRequest{Username: exportUsername, Password: exportPassword, StaySignedIn: choice, StaySignedInSplit: true})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/login", bytes.NewReader(b))
+	req.Header.Set("Origin", "https://signer.cloistr.xyz")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	rr := httptest.NewRecorder()
+	f.h.handleUserLogin(rr, req)
+	var resp LoginResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	f.h.keyLoads.wait(context.Background(), exportUserID, 10*time.Second)
+	return resp, rr
+}
+
+func halfCookie(rr *httptest.ResponseRecorder) *http.Cookie {
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == splitHalfCookieName {
+			return c
+		}
+	}
+	return nil
+}
+
+// Browser split logins get the half as an HttpOnly cookie scoped to the unseal
+// endpoint, never in the JSON body.
+func TestStaySignedIn_SplitHalfCookieForBrowsers(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	resp, rr := f.browserLogin(t, "30d")
+	if rr.Code != 200 || resp.StaySignedIn == nil || resp.StaySignedIn.Mode != seal.ModeSplit {
+		t.Fatalf("login: %d %+v", rr.Code, resp.StaySignedIn)
+	}
+	if resp.StaySignedIn.SplitHalf != "" || bytes.Contains(rr.Body.Bytes(), []byte("split_half")) {
+		t.Fatal("browser login put the half in the JSON body")
+	}
+	c := halfCookie(rr)
+	if c == nil {
+		t.Fatal("no half cookie")
+	}
+	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode || c.Domain != "" || c.Path != "/api/v1/users/session/unseal" {
+		t.Fatalf("cookie attributes wrong: %+v", c)
+	}
+	if want := int(time.Until(*resp.StaySignedIn.ExpiresAt).Seconds()); c.MaxAge < want-60 || c.MaxAge > want+60 {
+		t.Fatalf("Max-Age %d, want ~%d (the seal's expiry)", c.MaxAge, want)
+	}
+	if half, err := base64.RawURLEncoding.DecodeString(c.Value); err != nil || len(half) != seal.SplitHalfLen {
+		t.Fatalf("cookie value is not a 32-byte half")
+	}
+
+	// Unseal on a fresh replica with an empty body: the cookie alone does it.
+	after := f.replica(t, seal.None{})
+	unseal := func(cookie *http.Cookie, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/users/session/unseal", bytes.NewReader([]byte(body)))
+		req.Header.Set("Authorization", "Bearer "+resp.Token)
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		rr := httptest.NewRecorder()
+		after.handleSessionUnseal(rr, req)
+		return rr
+	}
+	if rr := unseal(nil, ""); rr.Code != http.StatusNotFound || !bytes.Contains(rr.Body.Bytes(), []byte("no_split_seal")) {
+		t.Fatalf("missing cookie: %d %s", rr.Code, rr.Body.String())
+	}
+	bad := *c
+	raw, _ := base64.RawURLEncoding.DecodeString(c.Value)
+	raw[0] ^= 1
+	bad.Value = base64.RawURLEncoding.EncodeToString(raw)
+	if rr := unseal(&bad, ""); rr.Code != http.StatusForbidden || !bytes.Contains(rr.Body.Bytes(), []byte("seal_mismatch")) {
+		t.Fatalf("wrong cookie: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := unseal(c, ""); rr.Code != http.StatusOK || !after.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatalf("cookie-only unseal: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// until_signout: the cookie can't be re-issued on slide (the server never keeps
+// the half, and /users/me doesn't receive it), so it lives as long as a browser
+// allows; the server-side seal expiry is what governs.
+func TestStaySignedIn_SplitHalfCookieUntilSignOut(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	_, rr := f.browserLogin(t, "until_signout")
+	if c := halfCookie(rr); c == nil || c.MaxAge < 399*24*3600 {
+		t.Fatalf("until_signout half cookie: %+v", c)
+	}
+	f.h.config.StaySignedIn.MaxDays = 120
+	_, rr = f.browserLogin(t, "until_signout")
+	if c := halfCookie(rr); c == nil || c.MaxAge > 120*24*3600+60 {
+		t.Fatalf("half cookie outlives the 120-day ceiling: %+v", c)
+	}
+}
+
+// Non-browser clients keep the body form.
+func TestStaySignedIn_SplitHalfBodyForNonBrowsers(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	resp, rr := f.loginWith(t, f.h, "30d", true)
+	if resp.StaySignedIn == nil || resp.StaySignedIn.SplitHalf == "" || halfCookie(rr) != nil {
+		t.Fatalf("non-browser split login: body half %q, cookie %v", resp.StaySignedIn.SplitHalf, halfCookie(rr))
+	}
+}
+
+// Sign-out and revoke-all clear the half cookie.
+func TestStaySignedIn_SignOutClearsHalfCookie(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	resp, _ := f.browserLogin(t, "30d")
+	for name, call := range map[string]func(http.ResponseWriter, *http.Request){
+		"revoke-all": f.h.handleStaySignedIn,
+		"sign-out":   f.h.handleUserLogout,
+	} {
+		method := http.MethodPost
+		if name == "revoke-all" {
+			method = http.MethodDelete
+		}
+		req := httptest.NewRequest(method, "/", nil)
+		req.Header.Set("Authorization", "Bearer "+resp.Token)
+		rr := httptest.NewRecorder()
+		call(rr, req)
+		c := halfCookie(rr)
+		if c == nil || c.MaxAge >= 0 || c.Path != "/api/v1/users/session/unseal" {
+			t.Fatalf("%s did not clear the half cookie: %+v", name, c)
+		}
+	}
+}
+
+// Credentialed CORS from Cloistr apps reaches the unseal endpoint.
+func TestStaySignedIn_UnsealCORS(t *testing.T) {
+	f := newStayFixture(t)
+	mux := http.NewServeMux()
+	f.h.RegisterRoutes(mux)
+	srv := CORSMiddleware(f.h.config)(mux)
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/users/session/unseal", nil)
+	req.Header.Set("Origin", "https://files.cloistr.xyz")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Header().Get("Access-Control-Allow-Origin") != "https://files.cloistr.xyz" || rr.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Fatalf("CORS headers: %v", rr.Header())
+	}
+}
+
+// A 200 from unseal always means the half opened the seal, even when the key is
+// already loaded on this replica (security review H1).
+func TestStaySignedIn_UnsealVerifiesHalfWhenLoaded(t *testing.T) {
+	f := newStayFixture(t)
+	f.h.SetSealer(seal.None{})
+	resp, _ := f.loginWith(t, f.h, "30d", true)
+	if !f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("setup: key not loaded on the login replica")
+	}
+	bogus := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, seal.SplitHalfLen))
+	b, _ := json.Marshal(map[string]string{"split_half": bogus})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users/session/unseal", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+resp.Token)
+	rr := httptest.NewRecorder()
+	f.h.handleSessionUnseal(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("wrong half with the key already loaded: %d, want 403", rr.Code)
+	}
+}
+
+// A lease taken after a reconcile pass read the table is not dropped by that pass
+// (security review M1: a sign-in sealing mid-pass).
+func TestStaySignedIn_ReconcileKeepsNewerLease(t *testing.T) {
+	f := newStayFixture(t)
+	passStart := time.Now()
+	time.Sleep(time.Millisecond)
+	f.h.signer.RegisterKey(f.key.Pubkey, f.priv)
+	f.h.stay.lease(f.key.Pubkey, exportUserID)
+	f.h.lockSealedKeyIfStale(context.Background(), f.key.Pubkey, passStart, "test")
+	if !f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("a lease newer than the pass was dropped")
+	}
+	f.h.lockSealedKeyIfStale(context.Background(), f.key.Pubkey, time.Now().Add(time.Second), "test")
+	if f.h.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("a stale lease was kept")
+	}
+}

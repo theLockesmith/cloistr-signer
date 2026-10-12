@@ -217,3 +217,20 @@ func mustHalf(t *testing.T) []byte {
 	}
 	return h
 }
+
+// A symlink to a 0600 key file (how Kubernetes mounts a Secret) loads; a
+// group-readable target is refused through the link too.
+func TestKeyfileThroughSymlink(t *testing.T) {
+	_, path := newKeyfile(t)
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadKeyfile(link, false); err != nil {
+		t.Fatalf("symlinked 0600 keyfile refused: %v", err)
+	}
+	_ = os.Chmod(path, 0o644)
+	if _, err := LoadKeyfile(link, false); err == nil {
+		t.Fatal("group-readable target accepted through a symlink")
+	}
+}

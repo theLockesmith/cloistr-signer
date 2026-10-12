@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -39,22 +40,32 @@ func LoadKeyfile(path string, create bool) (*Keyfile, error) {
 	if path == "" {
 		return nil, errors.New("seal: keyfile mode needs SESSION_SEAL_KEYFILE")
 	}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) && create {
 		if err := writeNewKeyfile(path); err != nil {
 			return nil, err
 		}
-		data, err = os.ReadFile(path)
+		f, err = os.Open(path)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("seal: read keyfile: %w", err)
+		return nil, fmt.Errorf("seal: open keyfile: %w", err)
 	}
-	st, err := os.Stat(path)
+	defer f.Close()
+	// Check the file actually opened (a Kubernetes Secret mount is a symlink to
+	// it), and read from the same descriptor so it can't be swapped in between.
+	st, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("seal: stat keyfile: %w", err)
 	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("seal: keyfile %s is not a regular file", path)
+	}
 	if st.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("seal: keyfile %s is mode %o; it must not be readable by group or others (chmod 600)", path, st.Mode().Perm())
+		return nil, fmt.Errorf("seal: keyfile %s is mode %o; it must not be readable by group or others (chmod 600, or defaultMode 0400 on a Secret volume)", path, st.Mode().Perm())
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 4096))
+	if err != nil {
+		return nil, fmt.Errorf("seal: read keyfile: %w", err)
 	}
 	raw, err := hex.DecodeString(strings.TrimSpace(string(data)))
 	if err != nil || len(raw) != 32 {

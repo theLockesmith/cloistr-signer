@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -76,6 +77,7 @@ type staySignedIn struct {
 // sign-in, or restored). Leased keys are dropped when no live seal remains.
 type sealLease struct {
 	userID string
+	at     time.Time // when this replica (re)acquired it
 }
 
 // SetSealer turns stay-signed-in on with the given sealer (seal.None{} offers only
@@ -215,7 +217,7 @@ func (h *Handler) sealSessionKeys(ctx context.Context, userID, sessionID string,
 
 func (s *staySignedIn) lease(pubkey, userID string) {
 	s.mu.Lock()
-	s.leases[pubkey] = sealLease{userID: userID}
+	s.leases[pubkey] = sealLease{userID: userID, at: time.Now()}
 	delete(s.missUntil, pubkey)
 	s.mu.Unlock()
 }
@@ -265,6 +267,7 @@ func (h *Handler) reconcileSeals(ctx context.Context) {
 	if h.stay == nil {
 		return
 	}
+	passStart := time.Now()
 	live, unsure, err := h.liveSeals(ctx)
 	if err != nil {
 		slog.Warn("stay signed in: list seals failed; holding current state", "error", err)
@@ -273,14 +276,16 @@ func (h *Handler) reconcileSeals(ctx context.Context) {
 
 	h.stay.mu.Lock()
 	var drop []string
-	for pk := range h.stay.leases {
-		if len(live[pk]) == 0 && !unsure[pk] {
+	for pk, l := range h.stay.leases {
+		// A lease taken after this pass read the table (a sign-in that just
+		// sealed) is newer than what we saw: leave it for the next pass.
+		if len(live[pk]) == 0 && !unsure[pk] && l.at.Before(passStart) {
 			drop = append(drop, pk)
 		}
 	}
 	h.stay.mu.Unlock()
 	for _, pk := range drop {
-		h.lockSealedKey(ctx, pk, "seal expired or revoked")
+		h.lockSealedKeyIfStale(ctx, pk, passStart, "seal expired or revoked")
 	}
 
 	restored := 0
@@ -365,6 +370,19 @@ func (h *Handler) restoreSealedKey(ctx context.Context, pubkey string) bool {
 	h.stay.missUntil[pubkey] = time.Now().Add(lazyRestoreBackoff)
 	h.stay.mu.Unlock()
 	return false
+}
+
+// lockSealedKeyIfStale is lockSealedKey for the reconcile pass: it re-checks under
+// the lock that the lease wasn't renewed since the pass began.
+func (h *Handler) lockSealedKeyIfStale(ctx context.Context, pubkey string, passStart time.Time, why string) {
+	h.stay.mu.Lock()
+	l, ok := h.stay.leases[pubkey]
+	if !ok || !l.at.Before(passStart) {
+		h.stay.mu.Unlock()
+		return
+	}
+	h.stay.mu.Unlock()
+	h.lockSealedKey(ctx, pubkey, why)
 }
 
 func (h *Handler) lockSealedKey(ctx context.Context, pubkey, why string) {
@@ -503,6 +521,7 @@ func (h *Handler) handleStaySignedIn(w http.ResponseWriter, r *http.Request) {
 		h.jsonResponse(w, http.StatusOK, out)
 	case http.MethodDelete:
 		n := h.revokeUserSeals(r.Context(), claims.UserID, "revoked by user")
+		http.SetCookie(w, clearSplitHalfCookie())
 		h.jsonResponse(w, http.StatusOK, map[string]int{"revoked": n})
 	default:
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -524,12 +543,22 @@ func (h *Handler) handleSessionUnseal(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	// The half comes from the body (non-browser clients) or, for browsers, from
+	// the HttpOnly cookie set at sign-in; the body may then be empty.
 	var body struct {
 		SplitHalf string `json:"split_half"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		h.errorResponse(w, http.StatusBadRequest, "invalid request body")
 		return
+	}
+	if body.SplitHalf == "" {
+		c, cerr := r.Cookie(splitHalfCookieName)
+		if cerr != nil || c.Value == "" {
+			h.errorResponseCode(w, http.StatusNotFound, "no_split_seal", "no browser half for this session; sign in again")
+			return
+		}
+		body.SplitHalf = c.Value
 	}
 	half, err := base64.RawURLEncoding.DecodeString(body.SplitHalf)
 	if err != nil {
@@ -554,13 +583,15 @@ func (h *Handler) handleSessionUnseal(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		found++
+		// Always verify the half, even if the key is already loaded here: a
+		// 200 must mean "this half opens this session's seal".
+		pt, err := seal.SplitOpen(sl.Sealed, half, seal.Binding{Pubkey: sl.Pubkey, SessionID: sl.SessionID})
+		if err != nil {
+			continue
+		}
 		if h.signer.IsKeyLoaded(sl.Pubkey) {
 			h.stay.lease(sl.Pubkey, sl.UserID)
 			restored++
-			continue
-		}
-		pt, err := seal.SplitOpen(sl.Sealed, half, seal.Binding{Pubkey: sl.Pubkey, SessionID: sl.SessionID})
-		if err != nil {
 			continue
 		}
 		if h.installSealedKey(r.Context(), sl, string(pt)) {
@@ -680,4 +711,45 @@ func (h *Handler) handleSessionRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, h.newAuthCookie(tok, exp))
 	h.jsonResponse(w, http.StatusOK, map[string]any{"token": tok, "expires_at": exp})
+}
+
+// ---- Split half cookie (browsers) ----
+
+// The browser half lives in an HttpOnly cookie scoped to the unseal endpoint, so
+// page scripts never see it. Host-only, Strict (the other Cloistr apps are
+// same-site). Its Max-Age is the seal's expiry; for until_signout it can't be
+// re-issued as the session slides (the server never keeps the half, and
+// /users/me doesn't receive the cookie), so it lives as long as browsers allow,
+// or until SESSION_SEAL_MAX_DAYS. The server-side seal expiry governs either way.
+const (
+	splitHalfCookieName = "cloistr_seal_half"
+	splitHalfCookiePath = "/api/v1/users/session/unseal"
+	browserCookieMax    = 400 * 24 * time.Hour // browsers cap cookie lifetimes at 400 days
+)
+
+// isBrowserRequest: browsers send Sec-Fetch-Mode (and Origin on CORS/POST);
+// plain HTTP clients don't. Browser split sign-ins get the half as a cookie only.
+func isBrowserRequest(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Mode") != "" || r.Header.Get("Origin") != ""
+}
+
+func (h *Handler) splitHalfCookie(g *stayGrant) *http.Cookie {
+	life := time.Until(g.expiresAt)
+	if g.sliding {
+		life = h.capAtMaxDays(time.Now(), time.Now().Add(browserCookieMax)).Sub(time.Now())
+	}
+	return &http.Cookie{
+		Name:     splitHalfCookieName,
+		Value:    base64.RawURLEncoding.EncodeToString(g.half),
+		Path:     splitHalfCookiePath,
+		MaxAge:   int(life.Seconds()),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	}
+}
+
+func clearSplitHalfCookie() *http.Cookie {
+	return &http.Cookie{Name: splitHalfCookieName, Value: "", Path: splitHalfCookiePath, MaxAge: -1,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode}
 }
