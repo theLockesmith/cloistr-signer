@@ -300,6 +300,13 @@ func (h *Handler) reconcileSeals(ctx context.Context) {
 	if restored > 0 {
 		h.publishLoadedKeys(ctx)
 	}
+	h.stay.mu.Lock()
+	for pk, until := range h.stay.missUntil {
+		if passStart.After(until) {
+			delete(h.stay.missUntil, pk) // backoff over; don't keep it forever
+		}
+	}
+	h.stay.mu.Unlock()
 	if n, err := h.storage.DeleteExpiredSessionSeals(ctx); err == nil && n > 0 {
 		slog.Info("stay signed in: swept expired seals", "count", n)
 	}
