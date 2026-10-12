@@ -364,3 +364,39 @@ func TestMapRelaysToPublic_NilMappings(t *testing.T) {
 		t.Errorf("MapRelaysToPublic with nil mappings should pass through, got %v", result)
 	}
 }
+
+func TestStaySignedInConfig(t *testing.T) {
+	t.Setenv("CONFIG_PATH", "/nonexistent.yaml")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := cfg.StaySignedIn
+	if s.Sealer != "keyfile" || s.Keyfile != "data/session-seal.key" || s.VaultKey != "cloistr-signer-session-seal" || s.MaxDays != 0 || !s.Split {
+		t.Fatalf("defaults = %+v", s)
+	}
+
+	t.Setenv("SESSION_SEALER", "vault")
+	t.Setenv("SESSION_SEAL_KEYFILE", "/secrets/seal.key")
+	t.Setenv("SESSION_SEAL_VAULT_KEY", "other-key")
+	t.Setenv("SESSION_SEAL_MAX_DAYS", "90")
+	t.Setenv("SESSION_SEAL_SPLIT", "false")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s = cfg.StaySignedIn
+	if s.Sealer != "vault" || s.Keyfile != "/secrets/seal.key" || s.VaultKey != "other-key" || s.MaxDays != 90 || s.Split {
+		t.Fatalf("overrides = %+v", s)
+	}
+
+	t.Setenv("SESSION_SEALER", "plaintext")
+	if _, err := Load(); err == nil {
+		t.Fatal("unknown SESSION_SEALER accepted")
+	}
+	t.Setenv("SESSION_SEALER", "none")
+	t.Setenv("SESSION_SEAL_MAX_DAYS", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("negative SESSION_SEAL_MAX_DAYS accepted")
+	}
+}
