@@ -315,6 +315,23 @@ func (ss *SQLiteStorage) initSchema() error {
 		PRIMARY KEY (user_id, app_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_app_consents_user ON signer_app_consents(user_id);
+
+	-- "Stay signed in" session seals (see postgres.go). Timestamps are fixed-width
+	-- UTC RFC 3339 text, so string comparison orders them correctly.
+	CREATE TABLE IF NOT EXISTS signer_session_seals (
+		id         TEXT PRIMARY KEY,
+		user_id    TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
+		key_id     TEXT NOT NULL REFERENCES signer_keys(id) ON DELETE CASCADE,
+		pubkey     TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		mode       TEXT NOT NULL,
+		sealed     BLOB NOT NULL,
+		expires_at TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		UNIQUE (session_id, key_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_user    ON signer_session_seals(user_id);
+	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_expires ON signer_session_seals(expires_at);
 	`
 
 	_, err := ss.db.Exec(schema)

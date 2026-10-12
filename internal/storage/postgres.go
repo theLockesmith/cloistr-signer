@@ -462,6 +462,24 @@ func (ps *PostgresStorage) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_lightning_keys_user        ON signer_lightning_keys(user_id);
 	CREATE INDEX IF NOT EXISTS idx_signer_lightning_keys_linking_key ON signer_lightning_keys(linking_key);
+
+	-- "Stay signed in" session seals: a sealed copy of a decrypted user key, so any
+	-- replica can restore it after a deploy. sealed is opaque (internal/seal); it
+	-- cannot be opened from the DB alone. Deleting the key or the account drops it.
+	CREATE TABLE IF NOT EXISTS signer_session_seals (
+		id         TEXT PRIMARY KEY,
+		user_id    TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
+		key_id     TEXT NOT NULL REFERENCES signer_keys(id) ON DELETE CASCADE,
+		pubkey     TEXT NOT NULL,
+		session_id TEXT NOT NULL,
+		mode       TEXT NOT NULL,
+		sealed     BYTEA NOT NULL,
+		expires_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		UNIQUE (session_id, key_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_user    ON signer_session_seals(user_id);
+	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_expires ON signer_session_seals(expires_at);
 	`
 
 	_, err := ps.db.Exec(schema)

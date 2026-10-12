@@ -279,6 +279,21 @@ type UserSession struct {
 	CreatedAt            time.Time  `json:"created_at"`
 }
 
+// SessionSeal is a sealed copy of a decrypted user key, kept so any replica can
+// restore the key after a deploy ("stay signed in"). Sealed is opaque here; see
+// internal/seal. One row per (session, key).
+type SessionSeal struct {
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id"`
+	KeyID     string    `json:"key_id"`
+	Pubkey    string    `json:"pubkey"`
+	SessionID string    `json:"-"`
+	Mode      string    `json:"mode"` // vault, keyfile, split
+	Sealed    []byte    `json:"-"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // AppConsent records that a user has approved a cross-subdomain nostrconnect
 // from a specific app (identified by its client pubkey). Once recorded, the
 // signer auto-approves subsequent connections without prompting the user again.
@@ -545,6 +560,16 @@ type Storage interface {
 	DeleteUserSessions(ctx context.Context, userID string) error
 	CleanExpiredUserSessions(ctx context.Context) error
 
+	// Session seals ("stay signed in"). Listing methods return unexpired rows only.
+	UpsertSessionSeal(ctx context.Context, seal *SessionSeal) error
+	ListLiveSessionSeals(ctx context.Context) ([]*SessionSeal, error)
+	ListSessionSealsBySession(ctx context.Context, sessionID string) ([]*SessionSeal, error)
+	ListSessionSealsByUser(ctx context.Context, userID string) ([]*SessionSeal, error)
+	UpdateSessionSealBlob(ctx context.Context, id string, sealed []byte) error
+	DeleteSessionSealsBySession(ctx context.Context, sessionID string) (int, error)
+	DeleteSessionSealsByUser(ctx context.Context, userID string) (int, error)
+	DeleteExpiredSessionSeals(ctx context.Context) (int, error)
+
 	// App consent management for cross-subdomain SSO (unified-auth-design §5).
 	// AppID is the nostrconnect client pubkey from the nostrconnect:// URI.
 	// First-time connections require consent; subsequent ones auto-approve.
@@ -671,6 +696,7 @@ type MemoryStorage struct {
 	usersByEmail       map[string]*User
 	userSessions       map[string]*UserSession
 	userSessionsByUser map[string]map[string]*UserSession // userID -> sessionID -> UserSession
+	sessionSeals       map[string]*SessionSeal            // id -> SessionSeal
 	bunkerSecrets      map[string]*BunkerSecret           // secret value -> BunkerSecret
 	settings           map[string]string                  // key -> value
 	// FROST threshold signing
@@ -713,6 +739,7 @@ func NewMemoryStorage() *MemoryStorage {
 		usersByEmail:        make(map[string]*User),
 		userSessions:        make(map[string]*UserSession),
 		userSessionsByUser:  make(map[string]map[string]*UserSession),
+		sessionSeals:        make(map[string]*SessionSeal),
 		bunkerSecrets:       make(map[string]*BunkerSecret),
 		settings:            make(map[string]string),
 		frostKeys:           make(map[string]*FrostKey),
@@ -863,6 +890,7 @@ func (m *MemoryStorage) DeleteKey(ctx context.Context, id string) error {
 		delete(m.keysByName, key.Name)
 	}
 	delete(m.permissions, id)
+	m.dropSessionSealsLocked(func(sl *SessionSeal) bool { return sl.KeyID == id })
 	return nil
 }
 
@@ -1471,6 +1499,7 @@ func (m *MemoryStorage) DeleteUser(ctx context.Context, id string) error {
 		}
 		delete(m.userSessionsByUser, id)
 	}
+	m.dropSessionSealsLocked(func(sl *SessionSeal) bool { return sl.UserID == id })
 
 	return nil
 }
