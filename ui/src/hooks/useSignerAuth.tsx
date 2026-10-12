@@ -27,7 +27,9 @@ import {
 // SharedAuthProvider populates (which uses the @cloistr/auth singleton) — the
 // mismatch threw "useNostrAuth must be used within an AuthProvider".
 import { useNostrAuth } from '@cloistr/auth';
+import { KEEPALIVE_INTERVAL_MS } from '@cloistr/ui';
 import apiClient from '../api/client';
+import { runRefreshTick } from '../lib/sessionRefresh';
 import { unlockShareStorage, lockShareStorage } from '../lib/frostStorage';
 import type { User, LoginRequest, RegisterRequest } from '../types/api';
 
@@ -258,6 +260,39 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
       console.warn('FROST share storage unlock failed', unlockErr);
     }
   }, [saveAuthState]);
+
+  // ==========================================
+  // Keep an "until I sign out" sign-in alive
+  // ==========================================
+
+  // While a local JWT is held, renew it now and then hourly. A fixed-lifetime
+  // sign-in answers not_sliding once and is left alone; the stored expiry is what
+  // initAuth checks on the next load, so it has to move with the token.
+  const hasLocalToken = !!token && !sessionMode;
+  useEffect(() => {
+    if (!hasLocalToken) return;
+    let stopped = false;
+    const tick = () => runRefreshTick({
+      refresh: () => apiClient.refreshSession(),
+      save: (newToken, expiresAt) => {
+        if (stopped) return;
+        localStorage.setItem(STORAGE_KEYS.TOKEN, newToken);
+        localStorage.setItem(STORAGE_KEYS.TOKEN_EXPIRY, expiresAt);
+        apiClient.setToken(newToken);
+        setToken(newToken);
+      },
+      stop: () => {
+        stopped = true;
+        clearInterval(id);
+      },
+    });
+    const id = setInterval(tick, KEEPALIVE_INTERVAL_MS);
+    void tick();
+    return () => {
+      stopped = true;
+      clearInterval(id);
+    };
+  }, [hasLocalToken]);
 
   // ==========================================
   // Sync Nostr auth to signer backend
