@@ -111,6 +111,12 @@ class ApiClient {
     return this.fetch('/users/me');
   }
 
+  // Renews an "until I sign out" sign-in: a fresh token and expiry. 409
+  // not_sliding for a fixed-lifetime sign-in.
+  async refreshSession(): Promise<{ token: string; expires_at: string }> {
+    return this.fetch('/users/session/refresh', { method: 'POST' });
+  }
+
   // Permanently delete the signed-in account (keys, grants, Vault objects).
   // Requires the password, the MFA code if MFA is enabled, and the username
   // typed exactly as confirmation.
