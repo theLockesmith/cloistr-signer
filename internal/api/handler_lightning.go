@@ -232,11 +232,10 @@ func (h *Handler) handleLNURLAuthCallback(w http.ResponseWriter, r *http.Request
 	}
 
 	if session.IsLink && session.BoundUserID != "" {
-		// Claim the challenge first, so a replayed callback cannot link twice.
-		if !h.claimLightningChallenge(w, r, k1, session.BoundUserID) {
-			return
-		}
-		// Link mode: associate key with the bound user.
+		// Link mode. Store the key first and claim the challenge last, so the
+		// browser's poll reports "linked" only once the key really is linked
+		// to this user. A failed write leaves the challenge pending, and the
+		// wallet can retry it.
 		lk := &storage.LightningKey{
 			ID:         uuid.New().String(),
 			UserID:     session.BoundUserID,
@@ -245,13 +244,27 @@ func (h *Handler) handleLNURLAuthCallback(w http.ResponseWriter, r *http.Request
 			CreatedAt:  time.Now(),
 		}
 		if err := h.storage.CreateLightningKey(r.Context(), lk); err != nil {
-			if err == storage.ErrLightningKeyExists {
-				// Already linked to this user — idempotent, treat as success.
-			} else {
+			if !errors.Is(err, storage.ErrLightningKeyExists) {
 				slog.Error("lightning link: store key failed", "error", err)
 				lnurlError(w, "failed to link key")
 				return
 			}
+			// Linking keys are unique across accounts: "exists" is a no-op
+			// only when it is already this user's.
+			existing, err := h.storage.GetLightningKeyByLinkingKey(r.Context(), key)
+			if err != nil {
+				slog.Error("lightning link: look up existing key failed", "error", err)
+				lnurlError(w, "failed to link key")
+				return
+			}
+			if existing.UserID != session.BoundUserID {
+				slog.Warn("lightning link: key already linked to another account", "user_id", session.BoundUserID)
+				lnurlError(w, "this wallet key is already linked to another account")
+				return
+			}
+		}
+		if !h.claimLightningChallenge(w, r, k1, session.BoundUserID) {
+			return
 		}
 
 		slog.Info("lightning link successful", "user_id", session.BoundUserID)
