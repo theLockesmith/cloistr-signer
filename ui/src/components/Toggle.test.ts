@@ -48,28 +48,37 @@ describe('Toggle prop contract (source-level)', () => {
   });
 });
 
-describe('ThemeToggle placement invariant (source-level)', () => {
-  // Verify that Layout.tsx passes ThemeToggle as a Header child rather than
-  // embedding it inside the auth-gated subheader nav. This test reads the
-  // source file directly and fails if the placement regresses.
-  it('Layout passes ThemeToggle as a Header child, not inside the auth-gated subheader', async () => {
+describe('Single theme control invariant (source-level)', () => {
+  // Theme controls live only in the shared @cloistr/ui Header's app menu
+  // (its Appearance section), as in every other Cloistr app. The signer used
+  // to add its own ThemeToggle beside it, so its header showed two. This
+  // fails if a second theme control comes back anywhere in the app source.
+  it('no signer component renders its own ThemeToggle', async () => {
     const fs = await import('fs');
     const path = await import('path');
-    const layoutPath = path.resolve(
-      import.meta.dirname ?? __dirname,
-      '../components/Layout.tsx',
+    const srcRoot = path.resolve(import.meta.dirname ?? __dirname, '..');
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else if (/\.tsx$/.test(e.name) && !/\.test\./.test(e.name)) {
+          if (/<ThemeToggle\b/.test(fs.readFileSync(full, 'utf-8'))) offenders.push(full);
+        }
+      }
+    };
+    walk(srcRoot);
+    expect(offenders).toEqual([]);
+  });
+
+  it('Layout passes the shared Header no children (the deprecated slot)', async () => {
+    const fs = await import('fs');
+    const path = await import('path');
+    const src = fs.readFileSync(
+      path.resolve(import.meta.dirname ?? __dirname, '../components/Layout.tsx'),
+      'utf-8',
     );
-    const src = fs.readFileSync(layoutPath, 'utf-8');
-
-    // The ThemeToggle must appear BETWEEN <Header and </Header> (as a child).
-    const headerBlock = src.match(/<Header[\s\S]*?<\/Header>/)?.[0] ?? '';
-    expect(headerBlock).toContain('<ThemeToggle');
-
-    // The ThemeToggle must NOT appear inside the app-subheader nav block.
-    // app-subheader nav is always after </Header> so find the nav block.
-    const afterHeader = src.split('</Header>')[1] ?? '';
-    const subheaderBlock = afterHeader.match(/<nav className="app-subheader"[\s\S]*?<\/nav>/)?.[0] ?? '';
-    expect(subheaderBlock).not.toContain('<ThemeToggle');
+    expect(src).not.toContain('</Header>');
   });
 });
 
@@ -119,8 +128,8 @@ describe('Toggle CSS classes invariant (source-level)', () => {
 });
 
 describe('ThemeProvider mount invariant (source-level)', () => {
-  // These tests verify at the source level that ThemeProvider is mounted and that
-  // ThemeToggle will therefore have a context to read. No DOM / jsdom required:
+  // These tests verify at the source level that ThemeProvider is mounted, so the shared
+  // Header's Appearance section has a context to read. No DOM / jsdom required:
   // we read the source files directly. "Source-level" means we are asserting on
   // text, not on runtime rendering behaviour.
   it('App.tsx imports ThemeProvider from @cloistr/ui', async () => {
