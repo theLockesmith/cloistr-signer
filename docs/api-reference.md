@@ -157,9 +157,18 @@ Create or update a permission.
 | `user_pubkey` | Yes | Client's public key (64 hex chars) |
 | `methods` | Yes | Allowed NIP-46 methods |
 | `allowed_kinds` | No | Restrict to specific event kinds |
-| `expires_at` | No | Permission expiration |
+| `expires_at` | No | Permission expiration. Omitted: an existing grant keeps its expiry; a new grant never expires. A past time is refused (400). |
+| `slot` | No | `default` (everyday) or `publisher`. Omitted: an existing grant keeps its slot; a new grant goes in `default`. |
+| `replace` | No | Must be `true` for a new client to take a slot another client's live grant holds (that grant is then revoked). |
 
-**Response:** `201 Created`
+If the client already holds a live grant on this key, the request amends it in
+place: methods and kinds are replaced, while slot, expiry, app details and
+creation time stay unless named. Naming a different slot for an existing grant
+is refused (409); revoke it first. A new client in an occupied slot without
+`replace` is refused (409), so a role's other grant is never revoked as a side
+effect.
+
+**Response:** `200 OK` with the stored permission, including its `slot`.
 
 ### DELETE /api/v1/keys/{id}/permissions/{pubkey}
 
