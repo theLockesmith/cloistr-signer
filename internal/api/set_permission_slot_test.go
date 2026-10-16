@@ -131,6 +131,7 @@ func TestSetPermission_Refusals(t *testing.T) {
 	for name, body := range map[string]string{
 		"move slot":   `{"user_pubkey":"` + publisherCli + `","methods":["sign_event"],"slot":"default"}`,
 		"bad slot":    `{"user_pubkey":"` + publisherCli + `","methods":["sign_event"],"slot":"everyday"}`,
+		"upper hex":   `{"user_pubkey":"` + strings.ToUpper(newcomerCli) + `","methods":["sign_event"],"slot":"publisher","replace":true}`,
 		"past expiry": `{"user_pubkey":"` + publisherCli + `","methods":["sign_event"],"expires_at":"2020-01-01T00:00:00Z"}`,
 	} {
 		rr := postPermission(t, h, body)
@@ -140,6 +141,30 @@ func TestSetPermission_Refusals(t *testing.T) {
 	}
 	if p := mustLive(t, store, publisherCli); p.Slot != storage.SlotPublisher || len(p.AllowedKinds) != 1 {
 		t.Fatalf("a refused request changed the grant: %+v", p)
+	}
+	mustLive(t, store, everydayCli)
+}
+
+// A lapsed (expired, not revoked) publisher grant re-granted without a slot
+// stays in the publisher slot, and naming another slot is refused.
+func TestSetPermission_LapsedGrantKeepsSlot(t *testing.T) {
+	h, store, _ := slottedRoleKey(t)
+	ctx := context.Background()
+	past := time.Now().Add(-time.Hour)
+	lapsed := mustLive(t, store, publisherCli)
+	lapsed.ExpiresAt = &past
+	if err := store.SetPermission(ctx, lapsed); err != nil {
+		t.Fatal(err)
+	}
+	if rr := postPermission(t, h, `{"user_pubkey":"`+publisherCli+`","methods":["sign_event"],"slot":"default"}`); rr.Code != http.StatusConflict {
+		t.Fatalf("slot move of a lapsed grant: %d %s, want 409", rr.Code, rr.Body.String())
+	}
+	future := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	if rr := postPermission(t, h, `{"user_pubkey":"`+publisherCli+`","methods":["sign_event"],"allowed_kinds":[33301],"expires_at":"`+future+`"}`); rr.Code != http.StatusOK {
+		t.Fatalf("re-grant: %d %s", rr.Code, rr.Body.String())
+	}
+	if p := mustLive(t, store, publisherCli); p.Slot != storage.SlotPublisher {
+		t.Fatalf("re-granted lapsed grant moved to slot %q", p.Slot)
 	}
 	mustLive(t, store, everydayCli)
 }
