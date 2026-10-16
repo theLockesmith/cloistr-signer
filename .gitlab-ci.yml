@@ -74,7 +74,9 @@ test:frost-wasm:
   before_script:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl >/dev/null
     - rustup target add wasm32-unknown-unknown
-    - curl -sSfL https://github.com/rustwasm/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-x86_64-unknown-linux-musl.tar.gz | tar xz -C /usr/local/bin --strip-components=1 wasm-pack-v0.15.0-x86_64-unknown-linux-musl/wasm-pack
+    # Pinned, checksummed tools from this project's package registry: no
+    # github.com download (see ui/frost-wasm/install-tools.sh).
+    - sh ui/frost-wasm/install-tools.sh /usr/local/bin
   script:
     - cd ui/frost-wasm
     - cargo test --release --locked
