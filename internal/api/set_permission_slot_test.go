@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -167,4 +168,38 @@ func TestSetPermission_LapsedGrantKeepsSlot(t *testing.T) {
 		t.Fatalf("re-granted lapsed grant moved to slot %q", p.Slot)
 	}
 	mustLive(t, store, everydayCli)
+}
+
+// permLookupFails: the grant lookup hits a storage failure; writes are counted.
+type permLookupFails struct {
+	storage.Storage
+	writes int
+}
+
+func (s *permLookupFails) GetPermission(context.Context, string, string) (*storage.Permission, error) {
+	return nil, errors.New("connection reset by peer")
+}
+
+func (s *permLookupFails) SetPermission(ctx context.Context, p *storage.Permission) error {
+	s.writes++
+	return s.Storage.SetPermission(ctx, p)
+}
+
+// A storage failure while looking up the client's grant is a 500 with no
+// write. Treating it as "no grant" would store a fresh grant over the real one
+// (amend in place skipped, slot and expiry lost).
+func TestSetPermission_LookupFailureIsServerErrorNoWrite(t *testing.T) {
+	h, store, _ := slottedRoleKey(t)
+	failing := &permLookupFails{Storage: store}
+	h.storage = failing
+	rr := postPermission(t, h, `{"user_pubkey":"`+publisherCli+`","methods":["sign_event"],"allowed_kinds":[1]}`)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("lookup failure: %d %s, want 500", rr.Code, rr.Body.String())
+	}
+	if failing.writes != 0 {
+		t.Fatalf("%d permission writes after a failed lookup, want none", failing.writes)
+	}
+	if p := mustLive(t, store, publisherCli); len(p.AllowedKinds) != 1 || p.AllowedKinds[0] != 33301 {
+		t.Fatalf("grant changed after a failed lookup: %v", p.AllowedKinds)
+	}
 }
