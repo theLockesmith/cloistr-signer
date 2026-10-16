@@ -87,3 +87,26 @@ func TestKeyExportedLine_ShowsFormat(t *testing.T) {
 		t.Fatalf("format/key_id = %v/%v, want ncryptsec/k1: %s", line["format"], line["key_id"], buf.String())
 	}
 }
+
+// The d tag reaches the durable log line, capped because the client chooses it.
+func TestSignLine_CarriesCappedDTag(t *testing.T) {
+	buf := captureSlog(t)
+	e := NewSignEvent(EventSignCompleted, client, acct, "sign_event", 30023, true, "")
+	e.Details["event_id"] = "eeee"
+	e.Details["d_tag"] = "my-page"
+	_ = NewMemoryLogger(10).Log(context.Background(), e)
+	var line map[string]any
+	_ = json.Unmarshal(buf.Bytes(), &line)
+	if line["d_tag"] != "my-page" {
+		t.Fatalf("d_tag = %v, want my-page", line["d_tag"])
+	}
+
+	buf.Reset()
+	e.Details["d_tag"] = strings.Repeat("x", 5000)
+	_ = NewMemoryLogger(10).Log(context.Background(), e)
+	line = nil
+	_ = json.Unmarshal(buf.Bytes(), &line)
+	if d, _ := line["d_tag"].(string); len(d) > maxDTagLogLen+3 || !strings.HasPrefix(d, "xxx") {
+		t.Fatalf("d_tag logged as %d chars, want capped at %d", len(d), maxDTagLogLen)
+	}
+}

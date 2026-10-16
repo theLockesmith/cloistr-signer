@@ -240,8 +240,8 @@ var podName = func() string {
 }()
 
 // logSignEvent writes the durable accountability record for one signing
-// request: who (account and client, full pubkeys), what (method, kind, signed
-// event id), where (pod), when, and the outcome. Never the event content.
+// request: who (account and client, full pubkeys), what (method, kind, d tag,
+// signed event id), where (pod), when, and the outcome. Never the event content.
 func logSignEvent(event *Event) {
 	outcome := "signed"
 	if !event.Success {
@@ -263,6 +263,11 @@ func logSignEvent(event *Event) {
 	if event.ErrorReason != "" {
 		attrs = append(attrs, "reason", event.ErrorReason)
 	}
+	// The d tag names an addressable event (a page, a list); capped, since the
+	// client chooses it. Never the content.
+	if d, ok := event.Details["d_tag"].(string); ok && d != "" {
+		attrs = append(attrs, "d_tag", truncate(d, maxDTagLogLen))
+	}
 	for _, k := range []string{"proxy_key", "upstream_pubkey", "delegate_pubkey"} {
 		if v, ok := event.Details[k]; ok {
 			attrs = append(attrs, k, v)
@@ -274,6 +279,8 @@ func logSignEvent(event *Event) {
 		slog.Warn("audit", attrs...)
 	}
 }
+
+const maxDTagLogLen = 200
 
 func truncate(s string, n int) string {
 	if len(s) <= n {

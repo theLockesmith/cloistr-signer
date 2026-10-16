@@ -992,16 +992,22 @@ func (s *Signer) handleRequest(ctx context.Context, targetPubkey, privateKey, cl
 			return
 		}
 		var events []*audit.Event
+		withDTag := func(e *audit.Event, d string) *audit.Event {
+			if d != "" {
+				e.Details["d_tag"] = d
+			}
+			return e
+		}
 		if err != nil {
-			events = append(events, audit.NewSignEvent(audit.EventSignFailed, clientPubkey, targetPubkey, req.Method, s.extractEventKind(req), false, err.Error()))
+			events = append(events, withDTag(audit.NewSignEvent(audit.EventSignFailed, clientPubkey, targetPubkey, req.Method, s.extractEventKind(req), false, err.Error()), extractDTag(req)))
 		} else if signed := signedEventsInResult(req.Method, result); len(signed) > 0 {
 			for _, ev := range signed {
 				e := audit.NewSignEvent(audit.EventSignCompleted, clientPubkey, targetPubkey, req.Method, ev.Kind, true, "")
 				e.Details["event_id"] = ev.ID
-				events = append(events, e)
+				events = append(events, withDTag(e, dTagOf(ev.Tags)))
 			}
 		} else {
-			events = append(events, audit.NewSignEvent(audit.EventSignCompleted, clientPubkey, targetPubkey, req.Method, s.extractEventKind(req), true, ""))
+			events = append(events, withDTag(audit.NewSignEvent(audit.EventSignCompleted, clientPubkey, targetPubkey, req.Method, s.extractEventKind(req), true, ""), extractDTag(req)))
 		}
 
 		for _, auditEvent := range events {
@@ -1094,11 +1100,39 @@ func (s *Signer) shouldAuditMethod(method string) bool {
 }
 
 type signedRef struct {
-	ID   string `json:"id"`
-	Kind int    `json:"kind"`
+	ID   string     `json:"id"`
+	Kind int        `json:"kind"`
+	Tags [][]string `json:"tags"`
 }
 
-// signedEventsInResult returns the id and kind of each event a successful
+// dTagOf returns the value of the first "d" tag (the name an addressable
+// event keeps across edits), or "" when there is none. It goes in the sign
+// record so a stray publication can be traced to the page it replaced.
+func dTagOf(tags [][]string) string {
+	for _, t := range tags {
+		if len(t) >= 2 && t[0] == "d" {
+			return t[1]
+		}
+	}
+	return ""
+}
+
+// extractDTag is extractEventKind for the d tag: read from the request, for
+// records of signatures that did not complete.
+func extractDTag(req *NIP46Request) string {
+	if req.Method != "sign_event" || len(req.Params) < 1 {
+		return ""
+	}
+	var event struct {
+		Tags [][]string `json:"tags"`
+	}
+	if json.Unmarshal([]byte(req.Params[0]), &event) != nil {
+		return ""
+	}
+	return dTagOf(event.Tags)
+}
+
+// signedEventsInResult returns the id, kind and tags of each event a successful
 // sign_event or batch_sign produced, or nil for other methods.
 func signedEventsInResult(method, result string) []signedRef {
 	switch method {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,5 +88,61 @@ func TestSignAudit_OneRecordPerSignature(t *testing.T) {
 	failed, _ := logger.Query(ctx, &audit.Filter{Types: []audit.EventType{audit.EventSignFailed}})
 	if len(failed) != 1 || failed[0].ErrorReason == "" || failed[0].Details["event_kind"] != 4 {
 		t.Fatalf("sign.failed records = %+v, want one with a reason and kind 4", failed)
+	}
+}
+
+func addressableReq(t *testing.T, kind int, d string) *NIP46Request {
+	t.Helper()
+	ev, _ := json.Marshal(map[string]any{
+		"kind": kind, "content": "page body that must never be logged", "created_at": time.Now().Unix(),
+		"tags": [][]string{{"title", "x"}, {"d", d}},
+	})
+	return &NIP46Request{ID: "r", Method: "sign_event", Params: []string{string(ev)}}
+}
+
+// An addressable event's record carries its d tag, signed or refused, so a stray
+// publication can be traced to the page it touched with one grep.
+func TestSignAudit_RecordsDTag(t *testing.T) {
+	logger := audit.NewMemoryLogger(100)
+	s := New(&config.Config{}, storage.NewMemoryStorage(), nil, nil, nil, nil, logger)
+	priv := nostr.GeneratePrivateKey()
+	account, _ := nostr.GetPublicKey(priv)
+	s.RegisterKey(account, priv)
+	client, _ := nostr.GetPublicKey(nostr.GeneratePrivateKey())
+	perm := &storage.Permission{KeyID: account, UserPubkey: client, Methods: []string{"sign_event"}, AllowedKinds: []int{30023, 1}}
+	ctx := context.Background()
+
+	if _, err := s.handleRequest(ctx, account, priv, client, addressableReq(t, 30023, "my-page"), perm); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.handleRequest(ctx, account, priv, client, addressableReq(t, 30024, "draft-page"), perm); err == nil {
+		t.Fatal("kind 30024 should be refused by the permission")
+	}
+	if _, err := s.handleRequest(ctx, account, priv, client, signReq(t, "sign_event", 1), perm); err != nil {
+		t.Fatal(err)
+	}
+
+	completed, _ := logger.Query(ctx, &audit.Filter{Types: []audit.EventType{audit.EventSignCompleted}})
+	byKind := map[any]*audit.Event{}
+	for _, e := range completed {
+		byKind[e.Details["event_kind"]] = e
+	}
+	if e := byKind[30023]; e == nil || e.Details["d_tag"] != "my-page" {
+		t.Fatalf("kind 30023 record = %+v, want d_tag my-page", e)
+	}
+	if e := byKind[1]; e == nil {
+		t.Fatal("no record for the kind 1 signature")
+	} else if _, ok := e.Details["d_tag"]; ok {
+		t.Fatalf("kind 1 record has a d_tag it never carried: %+v", e.Details)
+	}
+	failed, _ := logger.Query(ctx, &audit.Filter{Types: []audit.EventType{audit.EventSignFailed}})
+	if len(failed) != 1 || failed[0].Details["d_tag"] != "draft-page" {
+		t.Fatalf("sign.failed records = %+v, want one with d_tag draft-page", failed)
+	}
+	for _, e := range append(completed, failed...) {
+		b, _ := json.Marshal(e)
+		if strings.Contains(string(b), "must never be logged") {
+			t.Fatalf("record carries event content: %s", b)
+		}
 	}
 }
