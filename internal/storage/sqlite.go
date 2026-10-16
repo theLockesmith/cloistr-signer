@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -335,8 +337,333 @@ func (ss *SQLiteStorage) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_expires ON signer_session_seals(expires_at);
 	`
 
+	// A database made by an older version keeps its old tables: CREATE TABLE
+	// IF NOT EXISTS skips them, so columns added since would be missing, and
+	// the indexes below would fail on them and stop startup. Bring those tables
+	// up to this schema first.
+	if err := ss.upgradeTables(schema); err != nil {
+		return fmt.Errorf("upgrade tables from an older version: %w", err)
+	}
 	_, err := ss.db.Exec(schema)
 	return err
+}
+
+// upgradeTables adds to each existing table the columns the schema declares
+// and the table lacks, taking each column's type, NOT NULL and default from the
+// schema itself (built in a scratch in-memory database), so a column added to
+// the schema later is covered without a hand-written ALTER. SQLite cannot add a
+// primary-key column, or a NOT NULL one without a constant default: such a
+// column is reported as an error rather than added in a weaker form.
+//
+// It then revokes all but the most recently used live grant per (key, slot),
+// as postgres.go does, so the one-live-grant-per-slot index can be built on
+// data written before slots existed. Idempotent: once the index exists there
+// is never more than one live grant per slot, so later startups revoke nothing.
+func (ss *SQLiteStorage) upgradeTables(schema string) error {
+	want, err := schemaColumns(schema)
+	if err != nil {
+		return err
+	}
+	if err := ss.rebuildChangedTables(schema); err != nil {
+		return err
+	}
+	tx, err := ss.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for table, cols := range want {
+		have, err := tableColumns(tx, table)
+		if err != nil {
+			return err
+		}
+		if len(have) == 0 {
+			continue // new table: the schema creates it whole
+		}
+		for _, c := range cols {
+			if have[c.name] {
+				continue
+			}
+			if c.pk {
+				return fmt.Errorf("%s.%s: cannot add a primary-key column to an existing table", table, c.name)
+			}
+			def := fmt.Sprintf("ALTER TABLE %q ADD COLUMN %q %s", table, c.name, c.typ)
+			if c.notNull {
+				if !c.dflt.Valid {
+					return fmt.Errorf("%s.%s: NOT NULL with no default cannot be added to an existing table", table, c.name)
+				}
+				def += " NOT NULL"
+			}
+			if c.dflt.Valid {
+				def += " DEFAULT " + c.dflt.String
+			}
+			if _, err := tx.Exec(def); err != nil {
+				return fmt.Errorf("%s: %w", def, err)
+			}
+			slog.Info("sqlite: added column from a newer schema", "table", table, "column", c.name)
+		}
+	}
+
+	if have, err := tableColumns(tx, "signer_permissions"); err != nil {
+		return err
+	} else if len(have) > 0 {
+		if _, err := tx.Exec(`
+			UPDATE signer_permissions SET revoked_at = datetime('now'), revoked_by = 'schema-migration'
+			WHERE rowid IN (
+				SELECT rowid FROM (
+					SELECT rowid, ROW_NUMBER() OVER (
+						PARTITION BY key_id, slot ORDER BY COALESCE(last_used_at, created_at) DESC) AS rn
+					FROM signer_permissions WHERE revoked_at IS NULL)
+				WHERE rn > 1)`); err != nil {
+			return fmt.Errorf("revoke surplus grants per slot: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// rebuildChangedTables recreates each existing table whose foreign keys
+// differ from the schema's: SQLite cannot ALTER a constraint, so the table is
+// rebuilt from the schema's own CREATE statement and its rows copied over
+// (columns both versions have; new ones take their defaults).
+//
+// The case this exists for: until 2026-09-03 signer_permissions.key_id
+// referenced signer_keys(id), while every writer stored the key's pubkey, so
+// with foreign keys on, no grant could be stored. Rows are carried over with
+// key_id resolved to the key's pubkey (whether it held the id or the pubkey);
+// a row naming no existing key is dropped and counted in the log.
+func (ss *SQLiteStorage) rebuildChangedTables(schema string) error {
+	scratch, err := scratchSchema(schema)
+	if err != nil {
+		return err
+	}
+	defer scratch.Close()
+
+	var changed []string
+	tables, err := tableNames(scratch)
+	if err != nil {
+		return err
+	}
+	for _, table := range tables {
+		have, err := foreignKeys(ss.db, table)
+		if err != nil {
+			return err
+		}
+		if have == nil {
+			continue // not in this database yet
+		}
+		want, err := foreignKeys(scratch, table)
+		if err != nil {
+			return err
+		}
+		if have.String() != want.String() {
+			changed = append(changed, table)
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+
+	// Foreign keys must be off while a table is dropped and renamed (the
+	// documented SQLite procedure); the pragma cannot change inside a
+	// transaction. The pool holds one connection, so it applies to the tx.
+	if _, err := ss.db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer ss.db.Exec(`PRAGMA foreign_keys = ON`)
+
+	tx, err := ss.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, table := range changed {
+		var create string
+		if err := scratch.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&create); err != nil {
+			return err
+		}
+		tmp := table + "__upgrade"
+		i := strings.Index(create, table)
+		if i < 0 {
+			return fmt.Errorf("%s: table name not found in its CREATE statement", table)
+		}
+		if _, err := tx.Exec(create[:i] + tmp + create[i+len(table):]); err != nil {
+			return fmt.Errorf("%s: create replacement: %w", table, err)
+		}
+		oldCols, err := tableColumns(tx, table)
+		if err != nil {
+			return err
+		}
+		newCols, err := tableColumns(tx, tmp)
+		if err != nil {
+			return err
+		}
+		type pair struct{ col, sel string }
+		var pairs []pair
+		for c := range newCols {
+			if !oldCols[c] {
+				continue
+			}
+			sel := fmt.Sprintf("o.%q", c)
+			if table == "signer_permissions" && c == "key_id" {
+				sel = `(SELECT k.pubkey FROM signer_keys k WHERE k.pubkey = o.key_id OR k.id = o.key_id LIMIT 1)`
+			}
+			pairs = append(pairs, pair{fmt.Sprintf("%q", c), sel})
+		}
+		sort.Slice(pairs, func(a, b int) bool { return pairs[a].col < pairs[b].col })
+		var cols, sel []string
+		for _, p := range pairs {
+			cols, sel = append(cols, p.col), append(sel, p.sel)
+		}
+		where := ""
+		if table == "signer_permissions" {
+			where = ` WHERE EXISTS (SELECT 1 FROM signer_keys k WHERE k.pubkey = o.key_id OR k.id = o.key_id)`
+		}
+		res, err := tx.Exec(fmt.Sprintf("INSERT INTO %q (%s) SELECT %s FROM %q o%s",
+			tmp, strings.Join(cols, ", "), strings.Join(sel, ", "), table, where))
+		if err != nil {
+			return fmt.Errorf("%s: copy rows: %w", table, err)
+		}
+		var before int64
+		if err := tx.QueryRow(fmt.Sprintf("SELECT count(*) FROM %q", table)).Scan(&before); err != nil {
+			return err
+		}
+		copied, _ := res.RowsAffected()
+		if _, err := tx.Exec(fmt.Sprintf("DROP TABLE %q", table)); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(fmt.Sprintf("ALTER TABLE %q RENAME TO %q", tmp, table)); err != nil {
+			return err
+		}
+		slog.Info("sqlite: rebuilt table whose foreign keys changed", "table", table,
+			"rows_copied", copied, "rows_dropped", before-copied)
+	}
+	return tx.Commit()
+}
+
+type schemaColumn struct {
+	name, typ string
+	notNull   bool
+	dflt      sql.NullString
+	pk        bool
+}
+
+// schemaColumns builds schema in a scratch in-memory database and returns each
+// table's columns in declaration order.
+func schemaColumns(schema string) (map[string][]schemaColumn, error) {
+	scratch, err := scratchSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	defer scratch.Close()
+	tables, err := tableNames(scratch)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]schemaColumn, len(tables))
+	for _, table := range tables {
+		info, err := scratch.Query(fmt.Sprintf("PRAGMA table_info(%q)", table))
+		if err != nil {
+			return nil, err
+		}
+		for info.Next() {
+			var cid, notNull, pk int
+			var c schemaColumn
+			if err := info.Scan(&cid, &c.name, &c.typ, &notNull, &c.dflt, &pk); err != nil {
+				info.Close()
+				return nil, err
+			}
+			c.notNull, c.pk = notNull == 1, pk > 0
+			out[table] = append(out[table], c)
+		}
+		info.Close()
+	}
+	return out, nil
+}
+
+// scratchSchema builds schema in a fresh in-memory database.
+func scratchSchema(schema string) (*sql.DB, error) {
+	scratch, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return nil, err
+	}
+	scratch.SetMaxOpenConns(1) // one connection: each one has its own :memory: database
+	if _, err := scratch.Exec(schema); err != nil {
+		scratch.Close()
+		return nil, fmt.Errorf("build schema in scratch database: %w", err)
+	}
+	return scratch, nil
+}
+
+func tableNames(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// fkSet is a table's foreign keys as sorted "from->table(to) on-delete" lines.
+type fkSet []string
+
+func (f fkSet) String() string { return strings.Join(f, "; ") }
+
+// foreignKeys returns table's foreign keys, or nil if the table does not exist.
+func foreignKeys(db *sql.DB, table string) (fkSet, error) {
+	var exists int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if exists == 0 {
+		return nil, nil
+	}
+	rows, err := db.Query(fmt.Sprintf("PRAGMA foreign_key_list(%q)", table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := fkSet{}
+	for rows.Next() {
+		var id, seq int
+		var ref, from string
+		var to sql.NullString
+		var onUpdate, onDelete, match string
+		if err := rows.Scan(&id, &seq, &ref, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			return nil, err
+		}
+		out = append(out, fmt.Sprintf("%s->%s(%s) on delete %s", from, ref, to.String, onDelete))
+	}
+	sort.Strings(out)
+	return out, rows.Err()
+}
+
+// tableColumns returns the column names table has now; empty if it does not exist.
+func tableColumns(tx *sql.Tx, table string) (map[string]bool, error) {
+	rows, err := tx.Query(fmt.Sprintf("PRAGMA table_info(%q)", table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	have := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		have[name] = true
+	}
+	return have, rows.Err()
 }
 
 // Helper functions for JSON encoding/decoding arrays
