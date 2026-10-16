@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -16,8 +17,19 @@ import (
 
 // SQLiteStorage implements Storage using SQLite
 type SQLiteStorage struct {
-	db   *sql.DB
-	path string // database file; the upgrade backup is written beside it
+	db       *sql.DB
+	path     string // database file; the upgrade backup is written beside it
+	backedUp bool   // this process already took its pre-upgrade backup
+}
+
+// schemaBusyRetryFor bounds how long startup waits out another process that
+// holds the database (typically one upgrading it at the same moment).
+var schemaBusyRetryFor = 2 * time.Minute
+
+// vacuumInto writes the backup; a variable so a test can make it fail.
+var vacuumInto = func(db *sql.DB, path string) error {
+	_, err := db.Exec(`VACUUM INTO ?`, path)
+	return err
 }
 
 // NewSQLiteStorage creates a new SQLite-backed storage
@@ -33,15 +45,16 @@ func NewSQLiteStorage(path string) (*SQLiteStorage, error) {
 	// Limit connections to 1 for SQLite (it handles concurrency via locking)
 	db.SetMaxOpenConns(1)
 
-	// Test connection
-	if err := db.Ping(); err != nil {
+	// Test connection. Opening an older database switches it to WAL, which
+	// needs the lock too, so this waits out a concurrent start the same way.
+	if err := retryBusy(db.Ping); err != nil {
 		return nil, fmt.Errorf("failed to ping sqlite database: %w", err)
 	}
 
 	ss := &SQLiteStorage{db: db, path: path}
 
 	// Initialize schema
-	if err := ss.initSchema(); err != nil {
+	if err := retryBusy(ss.initSchema); err != nil {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
@@ -50,6 +63,33 @@ func NewSQLiteStorage(path string) (*SQLiteStorage, error) {
 
 func (ss *SQLiteStorage) Close() error {
 	return ss.db.Close()
+}
+
+// retryBusy runs fn, retrying while another process holds the database.
+// Two signers starting at once on an older database both try to upgrade it;
+// one gets SQLITE_BUSY mid-upgrade (busy_timeout does not cover a read
+// transaction that must become a write one). Every upgrade step is one
+// transaction and safe to repeat, and a retry re-checks what is still needed,
+// so the second process ends up finding the first one's work done.
+func retryBusy(fn func() error) error {
+	deadline := time.Now().Add(schemaBusyRetryFor)
+	wait := 50 * time.Millisecond
+	for {
+		err := fn()
+		if err == nil || !isSQLiteBusy(err) || time.Now().After(deadline) {
+			return err
+		}
+		slog.Info("sqlite: database busy during startup, retrying", "error", err, "wait", wait)
+		time.Sleep(wait)
+		if wait < time.Second {
+			wait *= 2
+		}
+	}
+}
+
+func isSQLiteBusy(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "database is locked")
 }
 
 func (ss *SQLiteStorage) initSchema() error {
@@ -608,16 +648,22 @@ func (ss *SQLiteStorage) upgradeNeeded(schema string, want map[string][]schemaCo
 // in-memory database has no file to keep and is not copied. If the copy
 // fails the upgrade does not run.
 func (ss *SQLiteStorage) backupBeforeUpgrade() error {
-	if ss.path == "" || ss.path == ":memory:" || strings.HasPrefix(ss.path, "file::memory:") {
-		return nil
+	if ss.backedUp || ss.path == "" || ss.path == ":memory:" || strings.HasPrefix(ss.path, "file::memory:") {
+		return nil // a retried start keeps its first backup: the database as it was
 	}
 	// Nanoseconds in the name: a start that fails after the backup and is
 	// retried at once must not find its own earlier backup in the way
 	// (VACUUM INTO refuses an existing file, which would block startup).
 	backup := ss.path + ".pre-upgrade-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".bak"
-	if _, err := ss.db.Exec(`VACUUM INTO ?`, backup); err != nil {
+	if err := vacuumInto(ss.db, backup); err != nil {
+		// A failed copy (a full disk) can leave a partial or empty file that
+		// looks like a backup. Remove it so nobody restores from it.
+		if rmErr := os.Remove(backup); rmErr != nil && !os.IsNotExist(rmErr) {
+			slog.Warn("sqlite upgrade: could not remove the failed backup", "backup", backup, "error", rmErr)
+		}
 		return fmt.Errorf("back up the database before upgrading it (to %s): %w", backup, err)
 	}
+	ss.backedUp = true
 	slog.Info("sqlite upgrade: database backed up before upgrading", "backup", backup)
 	return nil
 }

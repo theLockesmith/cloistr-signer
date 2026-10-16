@@ -5,10 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -209,5 +211,68 @@ func TestSQLiteUpgrade_CurrentDatabaseNotBackedUp(t *testing.T) {
 	}
 	if b, _ := filepath.Glob(path + ".pre-upgrade-*.bak"); len(b) != 0 {
 		t.Fatalf("a current database was backed up: %v", b)
+	}
+}
+
+// Two signer processes starting at once on an old database (a restart that
+// overlaps the old pod, two containers on one volume): both must start. Each
+// NewSQLiteStorage has its own connection, as separate processes do.
+func TestSQLiteUpgrade_SimultaneousStarts(t *testing.T) {
+	for trial := 0; trial < 10; trial++ {
+		path, _ := oldSchemaDB(t)
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		start := make(chan struct{})
+		for i := range errs {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				s, err := NewSQLiteStorage(path)
+				if err == nil {
+					s.Close()
+				}
+				errs[i] = err
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("trial %d, start %d: %v", trial, i, err)
+			}
+		}
+	}
+}
+
+// A backup that fails part way (a full disk) leaves no file behind that could
+// be mistaken for a backup, and the upgrade does not run.
+func TestSQLiteUpgrade_FailedBackupLeavesNoFile(t *testing.T) {
+	path, _ := oldSchemaDB(t)
+	prev := vacuumInto
+	vacuumInto = func(_ *sql.DB, backup string) error {
+		if err := os.WriteFile(backup, nil, 0o600); err != nil { // what a full disk leaves
+			t.Fatal(err)
+		}
+		return errors.New("database or disk is full (13)")
+	}
+	t.Cleanup(func() { vacuumInto = prev })
+
+	if s, err := NewSQLiteStorage(path); err == nil {
+		s.Close()
+		t.Fatal("opened an old database whose backup failed; the upgrade must not run without one")
+	}
+	if left, _ := filepath.Glob(path + ".pre-upgrade-*.bak"); len(left) != 0 {
+		t.Fatalf("failed backup left %v", left)
+	}
+	// Untouched: still the old schema.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var hasPrimary int
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('signer_keys') WHERE name = 'is_primary'`).Scan(&hasPrimary); err != nil || hasPrimary != 0 {
+		t.Fatalf("database changed although the backup failed (is_primary present=%d, %v)", hasPrimary, err)
 	}
 }
