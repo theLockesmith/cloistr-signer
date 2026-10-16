@@ -1,10 +1,14 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -101,5 +105,109 @@ func TestSQLiteUpgrade_FromFirstSchema(t *testing.T) {
 	var fkTarget string
 	if err := s.db.QueryRow(`SELECT "to" FROM pragma_foreign_key_list('signer_permissions')`).Scan(&fkTarget); err != nil || fkTarget != "pubkey" {
 		t.Fatalf("grants foreign key references %q (%v), want pubkey", fkTarget, err)
+	}
+}
+
+// captureLogs sends slog output to a buffer for the test's duration.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+func logLines(t *testing.T, buf *bytes.Buffer, msgPrefix string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		if m, _ := rec["msg"].(string); strings.HasPrefix(m, msgPrefix) {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// Before an upgrade changes anything, the database is copied beside itself
+// as it was (old schema, every row, the orphan included), and each grant the
+// upgrade drops or retires is logged by key and client. A second start, with
+// nothing left to upgrade, takes no new backup.
+func TestSQLiteUpgrade_BacksUpAndLogsWhatItRemoves(t *testing.T) {
+	path, keyPub := oldSchemaDB(t)
+	logs := captureLogs(t)
+
+	s, err := NewSQLiteStorage(path)
+	if err != nil {
+		t.Fatalf("open old database: %v", err)
+	}
+	s.Close()
+
+	backups, _ := filepath.Glob(path + ".pre-upgrade-*.bak")
+	if len(backups) != 1 {
+		t.Fatalf("backups beside the database = %v, want exactly one", backups)
+	}
+	logged := logLines(t, logs, "sqlite upgrade: database backed up")
+	if len(logged) != 1 || logged[0]["backup"] != backups[0] {
+		t.Fatalf("backup log lines = %v, want one naming %s", logged, backups[0])
+	}
+
+	// The backup is the database as it was: old schema, all three grants.
+	b, err := sql.Open("sqlite", backups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hasPrimary, grants int
+	if err := b.QueryRow(`SELECT count(*) FROM pragma_table_info('signer_keys') WHERE name = 'is_primary'`).Scan(&hasPrimary); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.QueryRow(`SELECT count(*) FROM signer_permissions`).Scan(&grants); err != nil {
+		t.Fatal(err)
+	}
+	b.Close()
+	if hasPrimary != 0 || grants != 3 {
+		t.Fatalf("backup has is_primary=%d grants=%d, want the old schema (0) and all 3 grants", hasPrimary, grants)
+	}
+
+	dropped := logLines(t, logs, "sqlite upgrade: dropped grant")
+	if len(dropped) != 1 || dropped[0]["key_id"] != "no-such-key" || dropped[0]["client_pubkey"] != "orphan-client" {
+		t.Fatalf("dropped-grant log lines = %v, want exactly the orphan (no-such-key / orphan-client)", dropped)
+	}
+	retired := logLines(t, logs, "sqlite upgrade: retired")
+	if len(retired) != 1 || retired[0]["key_id"] != keyPub || retired[0]["slot"] != SlotDefault || retired[0]["client_pubkey"] != "older-client" {
+		t.Fatalf("retired-grant log lines = %v, want exactly older-client in the default slot", retired)
+	}
+
+	// Nothing left to upgrade: no second backup, nothing more logged.
+	logs.Reset()
+	s, err = NewSQLiteStorage(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	s.Close()
+	if again, _ := filepath.Glob(path + ".pre-upgrade-*.bak"); len(again) != 1 {
+		t.Fatalf("backups after a second start = %v, want still one", again)
+	}
+	if n := len(logLines(t, logs, "sqlite upgrade:")); n != 0 {
+		t.Fatalf("second start logged %d upgrade lines, want none: %s", n, logs.String())
+	}
+}
+
+// A database this version created needs no upgrade and gets no backup.
+func TestSQLiteUpgrade_CurrentDatabaseNotBackedUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "new.db")
+	for i := 0; i < 2; i++ {
+		s, err := NewSQLiteStorage(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.Close()
+	}
+	if b, _ := filepath.Glob(path + ".pre-upgrade-*.bak"); len(b) != 0 {
+		t.Fatalf("a current database was backed up: %v", b)
 	}
 }

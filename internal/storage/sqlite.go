@@ -16,7 +16,8 @@ import (
 
 // SQLiteStorage implements Storage using SQLite
 type SQLiteStorage struct {
-	db *sql.DB
+	db   *sql.DB
+	path string // database file; the upgrade backup is written beside it
 }
 
 // NewSQLiteStorage creates a new SQLite-backed storage
@@ -37,7 +38,7 @@ func NewSQLiteStorage(path string) (*SQLiteStorage, error) {
 		return nil, fmt.Errorf("failed to ping sqlite database: %w", err)
 	}
 
-	ss := &SQLiteStorage{db: db}
+	ss := &SQLiteStorage{db: db, path: path}
 
 	// Initialize schema
 	if err := ss.initSchema(); err != nil {
@@ -364,6 +365,18 @@ func (ss *SQLiteStorage) upgradeTables(schema string) error {
 	if err != nil {
 		return err
 	}
+	needed, err := ss.upgradeNeeded(schema, want)
+	if err != nil {
+		return err
+	}
+	if !needed {
+		return nil
+	}
+	// The upgrade drops grants naming no key and retires surplus ones, which
+	// cannot be undone in place: keep the database as it was first.
+	if err := ss.backupBeforeUpgrade(); err != nil {
+		return err
+	}
 	if err := ss.rebuildChangedTables(schema); err != nil {
 		return err
 	}
@@ -408,14 +421,17 @@ func (ss *SQLiteStorage) upgradeTables(schema string) error {
 	if have, err := tableColumns(tx, "signer_permissions"); err != nil {
 		return err
 	} else if len(have) > 0 {
-		if _, err := tx.Exec(`
-			UPDATE signer_permissions SET revoked_at = datetime('now'), revoked_by = 'schema-migration'
-			WHERE rowid IN (
-				SELECT rowid FROM (
+		surplus := `SELECT rowid FROM (
 					SELECT rowid, ROW_NUMBER() OVER (
 						PARTITION BY key_id, slot ORDER BY COALESCE(last_used_at, created_at) DESC) AS rn
 					FROM signer_permissions WHERE revoked_at IS NULL)
-				WHERE rn > 1)`); err != nil {
+				WHERE rn > 1`
+		if err := logGrants(tx, "sqlite upgrade: retired surplus grant (an older live grant in the same slot)",
+			`SELECT key_id, slot, user_pubkey FROM signer_permissions WHERE rowid IN (`+surplus+`)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE signer_permissions SET revoked_at = datetime('now'), revoked_by = 'schema-migration'
+			WHERE rowid IN (` + surplus + `)`); err != nil {
 			return fmt.Errorf("revoke surplus grants per slot: %w", err)
 		}
 	}
@@ -438,30 +454,9 @@ func (ss *SQLiteStorage) rebuildChangedTables(schema string) error {
 		return err
 	}
 	defer scratch.Close()
-
-	var changed []string
-	tables, err := tableNames(scratch)
-	if err != nil {
+	changed, err := ss.fkChangedTables(scratch)
+	if err != nil || len(changed) == 0 {
 		return err
-	}
-	for _, table := range tables {
-		have, err := foreignKeys(ss.db, table)
-		if err != nil {
-			return err
-		}
-		if have == nil {
-			continue // not in this database yet
-		}
-		want, err := foreignKeys(scratch, table)
-		if err != nil {
-			return err
-		}
-		if have.String() != want.String() {
-			changed = append(changed, table)
-		}
-	}
-	if len(changed) == 0 {
-		return nil
 	}
 
 	// Foreign keys must be off while a table is dropped and renamed (the
@@ -518,6 +513,11 @@ func (ss *SQLiteStorage) rebuildChangedTables(schema string) error {
 		where := ""
 		if table == "signer_permissions" {
 			where = ` WHERE EXISTS (SELECT 1 FROM signer_keys k WHERE k.pubkey = o.key_id OR k.id = o.key_id)`
+			if err := logGrants(tx, "sqlite upgrade: dropped grant naming no key",
+				`SELECT o.key_id, '', o.user_pubkey FROM signer_permissions o
+				WHERE NOT EXISTS (SELECT 1 FROM signer_keys k WHERE k.pubkey = o.key_id OR k.id = o.key_id)`); err != nil {
+				return err
+			}
 		}
 		res, err := tx.Exec(fmt.Sprintf("INSERT INTO %q (%s) SELECT %s FROM %q o%s",
 			tmp, strings.Join(cols, ", "), strings.Join(sel, ", "), table, where))
@@ -539,6 +539,110 @@ func (ss *SQLiteStorage) rebuildChangedTables(schema string) error {
 			"rows_copied", copied, "rows_dropped", before-copied)
 	}
 	return tx.Commit()
+}
+
+// fkChangedTables lists the existing tables whose foreign keys differ from
+// the schema (built in scratch).
+func (ss *SQLiteStorage) fkChangedTables(scratch *sql.DB) ([]string, error) {
+	tables, err := tableNames(scratch)
+	if err != nil {
+		return nil, err
+	}
+	var changed []string
+	for _, table := range tables {
+		have, err := foreignKeys(ss.db, table)
+		if err != nil {
+			return nil, err
+		}
+		if have == nil {
+			continue // not in this database yet
+		}
+		want, err := foreignKeys(scratch, table)
+		if err != nil {
+			return nil, err
+		}
+		if have.String() != want.String() {
+			changed = append(changed, table)
+		}
+	}
+	return changed, nil
+}
+
+// upgradeNeeded: an existing table lacks a column or has other foreign keys
+// than the schema, or a slot holds more than one live grant. A database this
+// version made, or already upgraded, needs nothing, so no backup is taken.
+func (ss *SQLiteStorage) upgradeNeeded(schema string, want map[string][]schemaColumn) (bool, error) {
+	for table, cols := range want {
+		have, err := tableColumns(ss.db, table)
+		if err != nil {
+			return false, err
+		}
+		if len(have) == 0 {
+			continue
+		}
+		for _, c := range cols {
+			if !have[c.name] {
+				return true, nil
+			}
+		}
+	}
+	scratch, err := scratchSchema(schema)
+	if err != nil {
+		return false, err
+	}
+	defer scratch.Close()
+	if changed, err := ss.fkChangedTables(scratch); err != nil || len(changed) > 0 {
+		return len(changed) > 0, err
+	}
+	if have, err := tableColumns(ss.db, "signer_permissions"); err != nil || len(have) == 0 {
+		return false, err
+	}
+	var surplus int
+	err = ss.db.QueryRow(`SELECT count(*) FROM (SELECT 1 FROM signer_permissions WHERE revoked_at IS NULL
+		GROUP BY key_id, slot HAVING count(*) > 1)`).Scan(&surplus)
+	return surplus > 0, err
+}
+
+// backupBeforeUpgrade copies the database beside itself, as it is before the
+// upgrade, with VACUUM INTO (a consistent copy of the open database). An
+// in-memory database has no file to keep and is not copied. If the copy
+// fails the upgrade does not run.
+func (ss *SQLiteStorage) backupBeforeUpgrade() error {
+	if ss.path == "" || ss.path == ":memory:" || strings.HasPrefix(ss.path, "file::memory:") {
+		return nil
+	}
+	// Nanoseconds in the name: a start that fails after the backup and is
+	// retried at once must not find its own earlier backup in the way
+	// (VACUUM INTO refuses an existing file, which would block startup).
+	backup := ss.path + ".pre-upgrade-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".bak"
+	if _, err := ss.db.Exec(`VACUUM INTO ?`, backup); err != nil {
+		return fmt.Errorf("back up the database before upgrading it (to %s): %w", backup, err)
+	}
+	slog.Info("sqlite upgrade: database backed up before upgrading", "backup", backup)
+	return nil
+}
+
+// logGrants logs one line per grant query returns (key, slot, client), so
+// anything the upgrade drops or retires can be found and restored from the
+// backup.
+func logGrants(q queryer, msg, query string) error {
+	rows, err := q.Query(query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, slot, client string
+		if err := rows.Scan(&key, &slot, &client); err != nil {
+			return err
+		}
+		slog.Warn(msg, "key_id", key, "slot", slot, "client_pubkey", client)
+	}
+	return rows.Err()
+}
+
+type queryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
 }
 
 type schemaColumn struct {
@@ -647,8 +751,8 @@ func foreignKeys(db *sql.DB, table string) (fkSet, error) {
 }
 
 // tableColumns returns the column names table has now; empty if it does not exist.
-func tableColumns(tx *sql.Tx, table string) (map[string]bool, error) {
-	rows, err := tx.Query(fmt.Sprintf("PRAGMA table_info(%q)", table))
+func tableColumns(q queryer, table string) (map[string]bool, error) {
+	rows, err := q.Query(fmt.Sprintf("PRAGMA table_info(%q)", table))
 	if err != nil {
 		return nil, err
 	}
