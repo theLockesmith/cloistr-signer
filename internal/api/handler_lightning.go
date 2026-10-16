@@ -2,10 +2,13 @@ package api
 
 // LNURL-auth (LUD-04) login and linking-key management endpoints.
 //
-// Challenge store design: in-memory map with 10-minute TTL (matches vault
-// implementation). A pod restart invalidates in-flight sessions, which is
-// acceptable given the 10-minute window. Sessions are cleaned up lazily on
-// read (expiry check) and explicitly on successful status-poll (replay guard).
+// Challenge store: the storage backend (signer_lightning_challenges), shared by
+// every replica, with a 10-minute expiry. The three steps of a login each
+// reach whichever replica the load balancer picks; with the challenges in one
+// pod's memory, a login completed only when all three hit the issuing pod
+// (4 of 20 on production, 2026-10-16). Each step is single-use: a callback
+// authenticates a pending challenge once, and a status poll turns an
+// authenticated one into a sign-in once.
 //
 // Flow (login):
 //   1. Client: POST /api/v1/users/lightning/challenge → {lnurl, k1, session_id}
@@ -19,42 +22,28 @@ package api
 //   instead of resolving an existing account.
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 	"github.com/btcsuite/btcd/btcutil/bech32"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"github.com/google/uuid"
-	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
-	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 )
 
-// ---- Challenge store ----
-
-var (
-	lightningSessionsMu sync.RWMutex
-	lightningSessions   = make(map[string]*lightningPendingSession)
-)
-
-type lightningPendingSession struct {
-	SessionID     string
-	K1            string
-	Status        string // "pending" | "authenticated"
-	UserID        string // populated after wallet callback succeeds (login mode)
-	BoundUserID   string // for link sessions: the authenticated user to link to
-	IsLinkSession bool
-	ExpiresAt     time.Time
-	CreatedAt     time.Time
-}
+// lightningChallengeTTL is how long a QR code stays usable.
+const lightningChallengeTTL = 10 * time.Minute
 
 // ---- Helpers ----
 
@@ -82,18 +71,22 @@ func (h *Handler) generateLightningChallenge(boundUserID string, isLink bool) (l
 	}
 	lnurl = strings.ToUpper(encoded)
 
-	lightningSessionsMu.Lock()
-	lightningSessions[k1] = &lightningPendingSession{
-		SessionID:     sessionID,
-		K1:            k1,
-		Status:        "pending",
-		BoundUserID:   boundUserID,
-		IsLinkSession: isLink,
-		ExpiresAt:     time.Now().Add(10 * time.Minute),
-		CreatedAt:     time.Now(),
+	ctx := context.Background()
+	if err := h.storage.CleanExpiredLightningChallenges(ctx); err != nil {
+		slog.Warn("lightning: clean expired challenges failed", "error", err)
 	}
-	lightningSessionsMu.Unlock()
-
+	now := time.Now()
+	if err := h.storage.CreateLightningChallenge(ctx, &storage.LightningChallenge{
+		K1:          k1,
+		SessionID:   sessionID,
+		Status:      "pending",
+		BoundUserID: boundUserID,
+		IsLink:      isLink,
+		ExpiresAt:   now.Add(lightningChallengeTTL),
+		CreatedAt:   now,
+	}); err != nil {
+		return "", "", "", fmt.Errorf("store challenge: %w", err)
+	}
 	return lnurl, k1, sessionID, nil
 }
 
@@ -159,17 +152,20 @@ func lnurlOK(w http.ResponseWriter) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "OK"})
 }
 
-// findSessionByID returns the pending session matching sessionID, or nil.
-// Caller must not hold lightningSessionsMu.
-func findSessionByID(sessionID string) *lightningPendingSession {
-	lightningSessionsMu.RLock()
-	defer lightningSessionsMu.RUnlock()
-	for _, s := range lightningSessions {
-		if s.SessionID == sessionID {
-			return s
-		}
+// claimLightningChallenge marks a pending challenge authenticated for userID,
+// exactly once across all replicas. A second callback for the same k1 fails.
+func (h *Handler) claimLightningChallenge(w http.ResponseWriter, r *http.Request, k1, userID string) bool {
+	err := h.storage.AuthenticateLightningChallenge(r.Context(), k1, userID)
+	if err == nil {
+		return true
 	}
-	return nil
+	if errors.Is(err, storage.ErrLightningChallengeNotFound) {
+		lnurlError(w, "k1 challenge already used or expired")
+		return false
+	}
+	slog.Error("lightning callback: claim challenge failed", "error", err)
+	lnurlError(w, "internal error")
+	return false
 }
 
 // ---- Handlers ----
@@ -214,19 +210,14 @@ func (h *Handler) handleLNURLAuthCallback(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	lightningSessionsMu.RLock()
-	session, ok := lightningSessions[k1]
-	lightningSessionsMu.RUnlock()
-
-	if !ok {
+	session, err := h.storage.GetLightningChallenge(r.Context(), k1)
+	if err != nil {
+		if !errors.Is(err, storage.ErrLightningChallengeNotFound) {
+			slog.Error("lightning callback: challenge lookup failed", "error", err)
+			lnurlError(w, "internal error")
+			return
+		}
 		lnurlError(w, "unknown or expired k1 challenge")
-		return
-	}
-	if time.Now().After(session.ExpiresAt) {
-		lightningSessionsMu.Lock()
-		delete(lightningSessions, k1)
-		lightningSessionsMu.Unlock()
-		lnurlError(w, "k1 challenge expired")
 		return
 	}
 
@@ -240,7 +231,11 @@ func (h *Handler) handleLNURLAuthCallback(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if session.IsLinkSession && session.BoundUserID != "" {
+	if session.IsLink && session.BoundUserID != "" {
+		// Claim the challenge first, so a replayed callback cannot link twice.
+		if !h.claimLightningChallenge(w, r, k1, session.BoundUserID) {
+			return
+		}
 		// Link mode: associate key with the bound user.
 		lk := &storage.LightningKey{
 			ID:         uuid.New().String(),
@@ -258,11 +253,6 @@ func (h *Handler) handleLNURLAuthCallback(w http.ResponseWriter, r *http.Request
 				return
 			}
 		}
-
-		lightningSessionsMu.Lock()
-		session.Status = "authenticated"
-		session.UserID = session.BoundUserID
-		lightningSessionsMu.Unlock()
 
 		slog.Info("lightning link successful", "user_id", session.BoundUserID)
 		lnurlOK(w)
@@ -286,10 +276,9 @@ func (h *Handler) handleLNURLAuthCallback(w http.ResponseWriter, r *http.Request
 		slog.Warn("lightning login: update last_used_at failed", "error", err)
 	}
 
-	lightningSessionsMu.Lock()
-	session.Status = "authenticated"
-	session.UserID = lk.UserID
-	lightningSessionsMu.Unlock()
+	if !h.claimLightningChallenge(w, r, k1, lk.UserID) {
+		return
+	}
 
 	slog.Info("lightning login callback authenticated", "user_id", lk.UserID)
 	lnurlOK(w)
@@ -309,17 +298,20 @@ func (h *Handler) handleLightningStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	session := findSessionByID(sessionID)
-	if session == nil || time.Now().After(session.ExpiresAt) {
-		if session != nil {
-			lightningSessionsMu.Lock()
-			delete(lightningSessions, session.K1)
-			lightningSessionsMu.Unlock()
-		}
+	expired := func() {
 		h.jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"success": false,
 			"status":  "expired",
 		})
+	}
+	session, err := h.storage.GetLightningChallengeBySession(r.Context(), sessionID)
+	if err != nil {
+		if !errors.Is(err, storage.ErrLightningChallengeNotFound) {
+			slog.Error("lightning status: challenge lookup failed", "error", err)
+			h.errorResponse(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		expired()
 		return
 	}
 
@@ -331,11 +323,18 @@ func (h *Handler) handleLightningStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Authenticated: issue the auth_token cookie (single-use — delete session first).
-	userID := session.UserID
-	lightningSessionsMu.Lock()
-	delete(lightningSessions, session.K1)
-	lightningSessionsMu.Unlock()
+	// Authenticated: consume the challenge (exactly once across replicas),
+	// then issue the auth_token cookie.
+	userID, err := h.storage.ConsumeLightningChallenge(r.Context(), sessionID)
+	if err != nil {
+		if !errors.Is(err, storage.ErrLightningChallengeNotFound) {
+			slog.Error("lightning status: consume challenge failed", "error", err)
+			h.errorResponse(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		expired() // another poll already turned it into a sign-in
+		return
+	}
 
 	user, err := h.storage.GetUser(r.Context(), userID)
 	if err != nil {
