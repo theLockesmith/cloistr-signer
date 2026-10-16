@@ -162,3 +162,35 @@ func TestSessionState_GetOnly(t *testing.T) {
 		t.Fatalf("POST: %d, want 405", rr.Code)
 	}
 }
+
+// Another replica holds the key (the location registry names it): this replica
+// cannot sign, but a signing request would be served there, so the answer is live.
+func TestSessionState_KeyHeldOnAnotherReplicaIsLive(t *testing.T) {
+	f := newStayFixture(t)
+	resp, _ := f.loginWith(t, f.h, "", false) // session-only: no seal to restore from
+	b := f.replica(t, f.keyfileSealer(t))
+	if err := b.SetForwarding(testForwardSecret, &staticLocator{addr: "10.0.0.1:7777"}); err != nil {
+		t.Fatal(err)
+	}
+	code, body := sessionState(t, b, resp.Token)
+	wantState(t, code, body, sessionStateLive)
+	if b.signer.IsKeyLoaded(f.key.Pubkey) {
+		t.Fatal("B loaded the key itself; the test proves nothing about the other replica")
+	}
+}
+
+// Right after a login the unlock is still running: the answer waits for it
+// instead of reporting key_locked.
+func TestSessionState_WaitsForUnlockInFlight(t *testing.T) {
+	f := newStayFixture(t)
+	resp, _ := f.loginWith(t, f.h, "", false)
+	b := f.replica(t, f.keyfileSealer(t))
+	done := b.keyLoads.begin(exportUserID)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		b.signer.RegisterKey(f.key.Pubkey, f.priv)
+		done()
+	}()
+	code, body := sessionState(t, b, resp.Token)
+	wantState(t, code, body, sessionStateLive)
+}
