@@ -32,10 +32,21 @@ build:
   extends: .kaniko-build
   stage: build
 
+# The storage package's Postgres tests run against this service. Without it
+# they skipped in every pipeline, so nothing had ever run them in CI (found
+# 2026-10-16: six had gone stale, and the shared cleanup emptied no table).
+# In CI a missing TEST_DATABASE_URL now fails those tests instead of skipping.
 test:unit:
   extends: [.go-test, .cloistr-rules]
+  services:
+    - name: postgres:16-bookworm
+      alias: postgres
+      variables:
+        POSTGRES_DB: signer_test
+        POSTGRES_PASSWORD: signer-ci
   variables:
     GO_TEST_PACKAGES: "./internal/..."
+    TEST_DATABASE_URL: "postgres://postgres:signer-ci@postgres:5432/signer_test?sslmode=disable"
 
 # UI unit tests (vitest, node environment — no browser required).
 # Runs in the same test stage as the Go suite so a failing test blocks build.

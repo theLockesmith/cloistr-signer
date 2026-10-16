@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -12,6 +14,11 @@ import (
 func getTestPostgresStorage(t *testing.T) *PostgresStorage {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
+		// CI provides a database; a skip there would hide every Postgres test
+		// again, as it did until 2026-10-16.
+		if os.Getenv("CI") != "" {
+			t.Fatal("TEST_DATABASE_URL is not set in CI; the Postgres tests must run there")
+		}
 		t.Skip("TEST_DATABASE_URL not set, skipping PostgreSQL tests")
 	}
 
@@ -26,27 +33,97 @@ func getTestPostgresStorage(t *testing.T) *PostgresStorage {
 	return ps
 }
 
-// cleanupTestDatabase removes all test data from the database
+// cleanupTestDatabase empties every signer_ table, found from the catalog so a
+// new table is covered without editing a list. (The old list named the tables
+// without their signer_ prefix and only logged the errors, so it cleared
+// nothing and every test saw the rows of the tests before it.)
+//
+// It refuses a database whose name lacks "test", so a TEST_DATABASE_URL
+// pointed at a real database by mistake is never emptied.
 func cleanupTestDatabase(t *testing.T, ps *PostgresStorage) {
-	tables := []string{
-		"bunker_secrets",
-		"user_sessions",
-		"policy_rules",
-		"tokens",
-		"pending_requests",
-		"permissions",
-		"sessions",
-		"policies",
-		"users",
-		"keys",
+	t.Helper()
+	var dbName string
+	if err := ps.db.QueryRow(`SELECT current_database()`).Scan(&dbName); err != nil {
+		t.Fatalf("cleanup: read database name: %v", err)
+	}
+	if !strings.Contains(dbName, "test") {
+		t.Fatalf("cleanup: refusing to empty database %q: its name does not contain \"test\"", dbName)
+	}
+	tables, err := signerTables(ps)
+	if err != nil {
+		t.Fatalf("cleanup: list tables: %v", err)
+	}
+	if len(tables) == 0 {
+		t.Fatal("cleanup: no signer_ tables found; the schema was not created")
+	}
+	if _, err := ps.db.Exec("TRUNCATE " + strings.Join(tables, ", ") + " CASCADE"); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+}
+
+func signerTables(ps *PostgresStorage) ([]string, error) {
+	rows, err := ps.db.Query(`SELECT quote_ident(tablename) FROM pg_tables
+		WHERE schemaname = current_schema() AND tablename LIKE 'signer\_%' ORDER BY tablename`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// The cleanup really empties the tables: rows written through the storage
+// API (an account, a key, a grant, a policy with a rule) are all gone after it,
+// and every signer_ table counts zero.
+func TestPostgresCleanup_EmptiesEverySignerTable(t *testing.T) {
+	ps := getTestPostgresStorage(t)
+	defer ps.Close()
+	ctx := context.Background()
+
+	if err := ps.CreateUser(ctx, &User{ID: "cleanup-user", Username: "cleanup-user", PasswordHash: "x", CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.CreateKey(ctx, &Key{ID: "cleanupkey", Name: "k", Pubkey: "cleanup-pubkey", OwnerID: "cleanup-user", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.SetPermission(ctx, &Permission{KeyID: "cleanup-pubkey", UserPubkey: "cleanup-client", Methods: []string{"sign_event"}}); err != nil {
+		t.Fatal(err)
+	}
+	tables, err := signerTables(ps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, ps, tables); n < 3 {
+		t.Fatalf("setup wrote %d rows, want at least 3", n)
 	}
 
+	cleanupTestDatabase(t, ps)
+
 	for _, table := range tables {
-		_, err := ps.db.Exec("DELETE FROM " + table)
-		if err != nil {
-			t.Logf("Warning: failed to clean table %s: %v", table, err)
+		if n := countRows(t, ps, []string{table}); n != 0 {
+			t.Errorf("%s still holds %d rows after cleanup", table, n)
 		}
 	}
+}
+
+func countRows(t *testing.T, ps *PostgresStorage, tables []string) int {
+	t.Helper()
+	total := 0
+	for _, table := range tables {
+		var n int
+		if err := ps.db.QueryRow("SELECT count(*) FROM " + table).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		total += n
+	}
+	return total
 }
 
 // Key Tests
@@ -191,9 +268,21 @@ func TestPostgresStorage_ListKeys(t *testing.T) {
 		t.Errorf("ListKeys() empty storage = %d keys, want 0", len(keys))
 	}
 
-	ps.CreateKey(ctx, &Key{ID: "key1", Pubkey: "pub1", EncryptedNsec: "enc1", OwnerID: owner1, CreatedAt: time.Now()})
-	ps.CreateKey(ctx, &Key{ID: "key2", Pubkey: "pub2", EncryptedNsec: "enc2", OwnerID: owner1, CreatedAt: time.Now()})
-	ps.CreateKey(ctx, &Key{ID: "key3", Pubkey: "pub3", EncryptedNsec: "enc3", OwnerID: owner2, CreatedAt: time.Now()})
+	// owner_id references signer_web_accounts, so the owners must exist.
+	for _, owner := range []string{owner1, owner2} {
+		if err := ps.CreateUser(ctx, &User{ID: owner, Username: owner, PasswordHash: "x", CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, k := range []*Key{
+		{ID: "key1", Pubkey: "pub1", EncryptedNsec: "enc1", OwnerID: owner1, CreatedAt: time.Now()},
+		{ID: "key2", Pubkey: "pub2", EncryptedNsec: "enc2", OwnerID: owner1, CreatedAt: time.Now()},
+		{ID: "key3", Pubkey: "pub3", EncryptedNsec: "enc3", OwnerID: owner2, CreatedAt: time.Now()},
+	} {
+		if err := ps.CreateKey(ctx, k); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// User 1 should only see their keys
 	keys, err = ps.ListKeys(ctx, owner1)
@@ -346,8 +435,8 @@ func TestPostgresStorage_GetPermissionExpired(t *testing.T) {
 	ps.SetPermission(ctx, perm)
 
 	_, err := ps.GetPermission(ctx, "key1", "userpub456")
-	if err != ErrNotAuthorized {
-		t.Errorf("GetPermission() expired error = %v, want %v", err, ErrNotAuthorized)
+	if !errors.Is(err, ErrPermissionExpired) {
+		t.Errorf("GetPermission() expired error = %v, want %v", err, ErrPermissionExpired)
 	}
 }
 
@@ -359,8 +448,13 @@ func TestPostgresStorage_ListPermissions(t *testing.T) {
 	key := &Key{ID: "key1", Pubkey: "keypub123", EncryptedNsec: "enc", CreatedAt: time.Now()}
 	ps.CreateKey(ctx, key)
 
-	ps.SetPermission(ctx, &Permission{KeyID: "key1", UserPubkey: "user1", Methods: []string{"ping"}})
-	ps.SetPermission(ctx, &Permission{KeyID: "key1", UserPubkey: "user2", Methods: []string{"sign_event"}})
+	// One live grant per (key, slot): two clients need two slots.
+	if err := ps.SetPermission(ctx, &Permission{KeyID: "key1", UserPubkey: "user1", Slot: SlotDefault, Methods: []string{"ping"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.SetPermission(ctx, &Permission{KeyID: "key1", UserPubkey: "user2", Slot: SlotPublisher, Methods: []string{"sign_event"}}); err != nil {
+		t.Fatal(err)
+	}
 
 	perms, err := ps.ListPermissions(ctx, "key1")
 	if err != nil {
@@ -561,7 +655,9 @@ func TestPostgresStorage_CleanExpiredSessions(t *testing.T) {
 
 	// Try to fetch expired session directly from DB (bypassing expiry check)
 	var count int
-	ps.db.QueryRow("SELECT COUNT(*) FROM sessions WHERE id = 'expired'").Scan(&count)
+	if err := ps.db.QueryRow("SELECT COUNT(*) FROM signer_sessions WHERE id = 'expired'").Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
 	if count != 0 {
 		t.Error("expired session should be cleaned up from database")
 	}
@@ -977,7 +1073,9 @@ func TestPostgresStorage_CleanExpiredRequests(t *testing.T) {
 	}
 
 	var count int
-	ps.db.QueryRow("SELECT COUNT(*) FROM pending_requests").Scan(&count)
+	if err := ps.db.QueryRow("SELECT COUNT(*) FROM signer_pending_requests").Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
 	if count != 1 {
 		t.Errorf("CleanExpiredRequests() left %d requests, want 1", count)
 	}
@@ -1463,7 +1561,9 @@ func TestPostgresStorage_CleanExpiredUserSessions(t *testing.T) {
 	}
 
 	var count int
-	ps.db.QueryRow("SELECT COUNT(*) FROM user_sessions").Scan(&count)
+	if err := ps.db.QueryRow("SELECT COUNT(*) FROM signer_web_sessions").Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
 	if count != 1 {
 		t.Errorf("CleanExpiredUserSessions() left %d sessions, want 1", count)
 	}
@@ -1609,7 +1709,9 @@ func TestPostgresStorage_CleanExpiredBunkerSecrets(t *testing.T) {
 	}
 
 	var count int
-	ps.db.QueryRow("SELECT COUNT(*) FROM bunker_secrets").Scan(&count)
+	if err := ps.db.QueryRow("SELECT COUNT(*) FROM signer_bunker_secrets").Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
 	if count != 1 {
 		t.Errorf("CleanExpiredBunkerSecrets() left %d secrets, want 1", count)
 	}
