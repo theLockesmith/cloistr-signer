@@ -781,6 +781,18 @@ func intToBoolPtr(i int) *bool {
 // Permission management
 
 func (ss *SQLiteStorage) SetPermission(ctx context.Context, perm *Permission) error {
+	return ss.setPermission(ctx, perm, true)
+}
+
+func (ss *SQLiteStorage) SetPermissionIfSlotFree(ctx context.Context, perm *Permission) error {
+	return ss.setPermission(ctx, perm, false)
+}
+
+// setPermission: with displaceLive false, only lapsed grants of other clients
+// are displaced, and a live one makes the insert hit the one-live-grant-per-slot
+// index, which is reported as ErrSlotOccupied. A concurrent winner is caught the
+// same way: the index check waits for its transaction and then fails.
+func (ss *SQLiteStorage) setPermission(ctx context.Context, perm *Permission, displaceLive bool) error {
 	if perm.Slot == "" {
 		perm.Slot = SlotDefault
 	}
@@ -804,8 +816,9 @@ func (ss *SQLiteStorage) SetPermission(ctx context.Context, perm *Permission) er
 	_, err = tx.ExecContext(ctx, `
 		UPDATE signer_permissions
 		SET revoked_at = datetime('now'), revoked_by = ?
-		WHERE key_id = ? AND user_pubkey != ? AND slot = ? AND revoked_at IS NULL`,
-		perm.UserPubkey, perm.KeyID, perm.UserPubkey, perm.Slot)
+		WHERE key_id = ? AND user_pubkey != ? AND slot = ? AND revoked_at IS NULL
+		  AND (? OR (expires_at IS NOT NULL AND datetime(expires_at) <= datetime('now')))`,
+		perm.UserPubkey, perm.KeyID, perm.UserPubkey, perm.Slot, displaceLive)
 	if err != nil {
 		return err
 	}
@@ -833,6 +846,9 @@ func (ss *SQLiteStorage) SetPermission(ctx context.Context, perm *Permission) er
 		nullStr(perm.AppName), nullStr(perm.AppURL), nullStr(perm.AppImage), nullStr(perm.CustomName),
 		formatTime(perm.CreatedAt), nullTimeStr(perm.LastUsedAt))
 	if err != nil {
+		if !displaceLive && strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrSlotOccupied
+		}
 		return err
 	}
 

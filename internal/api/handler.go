@@ -1287,20 +1287,6 @@ func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, ke
 		if slot == "" {
 			slot = storage.SlotDefault
 		}
-		// A new grant displaces any other client's grant in the same slot
-		// (one connection per slot per key). Refuse unless asked for, so a
-		// role's everyday grant is never revoked as a side effect.
-		if !req.Replace {
-			now := time.Now()
-			for _, p := range perms {
-				live := p.RevokedAt == nil && (p.ExpiresAt == nil || p.ExpiresAt.After(now))
-				if live && p.UserPubkey != req.UserPubkey && p.Slot == slot {
-					h.errorResponse(w, http.StatusConflict, fmt.Sprintf(
-						"slot %q already holds another client's grant; send replace=true to revoke it", slot))
-					return
-				}
-			}
-		}
 		perm = &storage.Permission{
 			KeyID:        key.Pubkey,
 			UserPubkey:   req.UserPubkey,
@@ -1311,7 +1297,21 @@ func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, ke
 		}
 	}
 
-	if err := h.storage.SetPermission(r.Context(), perm); err != nil {
+	// A new grant would displace any other client's live grant in the same
+	// slot (one connection per slot per key). Without replace it is stored only
+	// if the slot is free, checked atomically with the write, so a role's
+	// everyday grant is never revoked as a side effect, even by a concurrent
+	// request.
+	store := h.storage.SetPermission
+	if !req.Replace {
+		store = h.storage.SetPermissionIfSlotFree
+	}
+	if err := store(r.Context(), perm); err != nil {
+		if errors.Is(err, storage.ErrSlotOccupied) {
+			h.errorResponse(w, http.StatusConflict, fmt.Sprintf(
+				"slot %q already holds another client's grant; send replace=true to revoke it", perm.Slot))
+			return
+		}
 		h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
 		return
 	}
