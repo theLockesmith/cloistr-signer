@@ -39,7 +39,10 @@ build:
 test:unit:
   extends: [.go-test, .cloistr-rules]
   services:
-    - name: postgres:16-bookworm
+    # Pinned by digest (the tag alone floats). The alias stays: with a digest
+    # in the name the default service hostname is not guaranteed to be
+    # "postgres", which TEST_DATABASE_URL relies on.
+    - name: postgres:16-bookworm@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
       alias: postgres
       variables:
         POSTGRES_DB: signer_test

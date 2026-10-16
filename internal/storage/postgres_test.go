@@ -2,8 +2,11 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +25,7 @@ func getTestPostgresStorage(t *testing.T) *PostgresStorage {
 		t.Skip("TEST_DATABASE_URL not set, skipping PostgreSQL tests")
 	}
 
-	ps, err := NewPostgresStorage(dsn)
+	ps, err := openTestPostgres(dsn)
 	if err != nil {
 		t.Fatalf("Failed to create PostgresStorage: %v", err)
 	}
@@ -31,6 +34,37 @@ func getTestPostgresStorage(t *testing.T) *PostgresStorage {
 	cleanupTestDatabase(t, ps)
 
 	return ps
+}
+
+// testDatabaseName is the only database shape the Postgres tests will touch:
+// signer_test, or signer_test_<suffix> for a parallel copy. An exact pattern,
+// not a substring: "latest", "my-test-db" or "signer_test_prod" all contained
+// "test" and would have been migrated into and truncated.
+var testDatabaseName = regexp.MustCompile(`^signer_test(_[a-z0-9]+)?$`)
+
+func isTestDatabaseName(name string) bool {
+	return testDatabaseName.MatchString(name) && !strings.HasSuffix(name, "_prod")
+}
+
+// openTestPostgres checks the database's name BEFORE NewPostgresStorage,
+// because opening the storage runs migrate() and the user backfill: checked
+// afterwards, a refused database already had every signer_ table created in
+// it. Only a bare connection and one SELECT run against a database it refuses.
+func openTestPostgres(dsn string) (*PostgresStorage, error) {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+	var name string
+	err = db.QueryRow(`SELECT current_database()`).Scan(&name)
+	db.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read database name: %w", err)
+	}
+	if !isTestDatabaseName(name) {
+		return nil, fmt.Errorf("refusing to run the Postgres tests against database %q: only signer_test or signer_test_<suffix> is allowed (the tests migrate and truncate it)", name)
+	}
+	return NewPostgresStorage(dsn)
 }
 
 // cleanupTestDatabase empties every signer_ table, found from the catalog so a
@@ -46,8 +80,8 @@ func cleanupTestDatabase(t *testing.T, ps *PostgresStorage) {
 	if err := ps.db.QueryRow(`SELECT current_database()`).Scan(&dbName); err != nil {
 		t.Fatalf("cleanup: read database name: %v", err)
 	}
-	if !strings.Contains(dbName, "test") {
-		t.Fatalf("cleanup: refusing to empty database %q: its name does not contain \"test\"", dbName)
+	if !isTestDatabaseName(dbName) {
+		t.Fatalf("cleanup: refusing to empty database %q: not a test database name", dbName)
 	}
 	tables, err := signerTables(ps)
 	if err != nil {
