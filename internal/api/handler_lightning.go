@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/audit"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/auth"
 	"git.aegis-hq.xyz/coldforge/cloistr-signer/internal/storage"
 	"github.com/btcsuite/btcd/btcutil/bech32"
@@ -63,7 +64,13 @@ func (h *Handler) generateLightningChallenge(boundUserID string, isLink bool) (l
 	}
 
 	domain := h.config.Lightning.Domain
-	callbackURL := fmt.Sprintf("https://%s/api/v1/lnurl-auth/callback?tag=login&k1=%s", domain, k1)
+	// LUD-04 action: wallets show "link" for a link challenge rather than
+	// "log in", so a swapped link QR reads differently to the person scanning.
+	action := "login"
+	if isLink {
+		action = "link"
+	}
+	callbackURL := fmt.Sprintf("https://%s/api/v1/lnurl-auth/callback?tag=login&k1=%s&action=%s", domain, k1, action)
 
 	encoded, err := bech32.EncodeFromBase256("lnurl", []byte(callbackURL))
 	if err != nil {
@@ -154,8 +161,8 @@ func lnurlOK(w http.ResponseWriter) {
 
 // claimLightningChallenge marks a pending challenge authenticated for userID,
 // exactly once across all replicas. A second callback for the same k1 fails.
-func (h *Handler) claimLightningChallenge(w http.ResponseWriter, r *http.Request, k1, userID string) bool {
-	err := h.storage.AuthenticateLightningChallenge(r.Context(), k1, userID)
+func (h *Handler) claimLightningChallenge(w http.ResponseWriter, r *http.Request, k1, userID, linkingKey string) bool {
+	err := h.storage.AuthenticateLightningChallenge(r.Context(), k1, userID, linkingKey)
 	if err == nil {
 		return true
 	}
@@ -263,11 +270,12 @@ func (h *Handler) handleLNURLAuthCallback(w http.ResponseWriter, r *http.Request
 				return
 			}
 		}
-		if !h.claimLightningChallenge(w, r, k1, session.BoundUserID) {
+		if !h.claimLightningChallenge(w, r, k1, session.BoundUserID, "") {
 			return
 		}
 
 		slog.Info("lightning link successful", "user_id", session.BoundUserID)
+		h.auditLightningKey(r, audit.EventLightningKeyLinked, session.BoundUserID, key, "linked a Lightning wallet key")
 		lnurlOK(w)
 		return
 	}
@@ -289,7 +297,7 @@ func (h *Handler) handleLNURLAuthCallback(w http.ResponseWriter, r *http.Request
 		slog.Warn("lightning login: update last_used_at failed", "error", err)
 	}
 
-	if !h.claimLightningChallenge(w, r, k1, lk.UserID) {
+	if !h.claimLightningChallenge(w, r, k1, lk.UserID, key) {
 		return
 	}
 
@@ -336,8 +344,50 @@ func (h *Handler) handleLightningStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Authenticated: consume the challenge (exactly once across replicas),
-	// then issue the auth_token cookie.
+	// A key's first login, when confirmation is on: show which account it
+	// opens and wait for POST /lightning/confirm. Nothing is consumed and no
+	// cookie is set here.
+	if !session.IsLink && h.config.Lightning.ConfirmFirstLogin {
+		if _, ok := h.unconfirmedLightningKey(r, session); ok {
+			user, err := h.storage.GetUser(r.Context(), session.UserID)
+			if err != nil {
+				h.errorResponse(w, http.StatusInternalServerError, "user not found")
+				return
+			}
+			h.jsonResponse(w, http.StatusOK, map[string]interface{}{
+				"success":  false,
+				"status":   "confirm_account",
+				"username": user.Username,
+			})
+			return
+		}
+	}
+
+	h.completeLightningLogin(w, r, sessionID)
+}
+
+// unconfirmedLightningKey returns the key that signed an authenticated login
+// challenge when its owner has not yet confirmed it.
+func (h *Handler) unconfirmedLightningKey(r *http.Request, c *storage.LightningChallenge) (*storage.LightningKey, bool) {
+	if c.LinkingKey == "" {
+		return nil, false
+	}
+	lk, err := h.storage.GetLightningKeyByLinkingKey(r.Context(), c.LinkingKey)
+	if err != nil || lk.ConfirmedAt != nil || lk.UserID != c.UserID {
+		return nil, false
+	}
+	return lk, true
+}
+
+// completeLightningLogin consumes an authenticated challenge (exactly once
+// across replicas) and issues the auth_token cookie.
+func (h *Handler) completeLightningLogin(w http.ResponseWriter, r *http.Request, sessionID string) {
+	expired := func() {
+		h.jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"status":  "expired",
+		})
+	}
 	userID, err := h.storage.ConsumeLightningChallenge(r.Context(), sessionID)
 	if err != nil {
 		if !errors.Is(err, storage.ErrLightningChallengeNotFound) {
@@ -385,6 +435,99 @@ func (h *Handler) handleLightningStatus(w http.ResponseWriter, r *http.Request) 
 		"success":  true,
 		"username": user.Username,
 	})
+}
+
+// POST /api/v1/users/lightning/confirm  {"session_id": "...", "confirm": true|false}
+// NO AUTH: the session_id is the login browser's own secret (from the
+// challenge response). Answers a "confirm_account" status:
+//
+//	confirm=true:  the key is marked confirmed and the login completes exactly
+//	               as a status poll does (200 {success:true, username} + cookie).
+//	confirm=false: "not my account": the key is unlinked from that account and
+//	               an audit event recorded; no cookie (200 {success:false, status:"unlinked"}).
+//
+// 400 {success:false, status:"expired"}: unknown, expired or already used.
+// 409 {success:false, status:"pending"|"not_required"}: the wallet has not
+// signed yet, or this login needs no confirmation (poll status instead).
+func (h *Handler) handleLightningConfirm(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+		Confirm   *bool  `json:"confirm"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" || req.Confirm == nil {
+		h.errorResponse(w, http.StatusBadRequest, "session_id and confirm are required")
+		return
+	}
+	reply := func(code int, status string) {
+		h.jsonResponse(w, code, map[string]interface{}{"success": false, "status": status})
+	}
+	c, err := h.storage.GetLightningChallengeBySession(r.Context(), req.SessionID)
+	if err != nil {
+		if !errors.Is(err, storage.ErrLightningChallengeNotFound) {
+			slog.Error("lightning confirm: challenge lookup failed", "error", err)
+			h.errorResponse(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		reply(http.StatusBadRequest, "expired")
+		return
+	}
+	if c.IsLink {
+		reply(http.StatusConflict, "not_required")
+		return
+	}
+	if c.Status != "authenticated" {
+		reply(http.StatusConflict, "pending")
+		return
+	}
+	lk, ok := h.unconfirmedLightningKey(r, c)
+	if !ok {
+		reply(http.StatusConflict, "not_required")
+		return
+	}
+
+	if !*req.Confirm {
+		// Consume first, so this login can never be completed afterwards.
+		if _, err := h.storage.ConsumeLightningChallenge(r.Context(), req.SessionID); err != nil {
+			reply(http.StatusBadRequest, "expired")
+			return
+		}
+		if err := h.storage.DeleteLightningKey(r.Context(), lk.ID); err != nil {
+			slog.Error("lightning confirm: unlink failed", "key_id", lk.ID, "error", err)
+			h.errorResponse(w, http.StatusInternalServerError, "could not unlink the key")
+			return
+		}
+		slog.Warn("lightning key rejected at first login: unlinked", "user_id", lk.UserID, "key_id", lk.ID)
+		h.auditLightningKey(r, audit.EventLightningKeyRejected, lk.UserID, lk.LinkingKey,
+			"wallet holder said the account this key opened is not theirs; key unlinked")
+		reply(http.StatusOK, "unlinked")
+		return
+	}
+
+	if err := h.storage.ConfirmLightningKey(r.Context(), lk.ID); err != nil {
+		slog.Error("lightning confirm: mark confirmed failed", "key_id", lk.ID, "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	h.auditLightningKey(r, audit.EventLightningKeyConfirmed, lk.UserID, lk.LinkingKey, "confirmed the account at first Lightning login")
+	h.completeLightningLogin(w, r, req.SessionID)
+}
+
+func (h *Handler) auditLightningKey(r *http.Request, typ audit.EventType, userID, linkingKey, action string) {
+	logger := h.signer.AuditLogger()
+	if logger == nil {
+		return
+	}
+	ev := &audit.Event{
+		Type: typ, Actor: userID, ActorType: "user",
+		Target: linkingKey, TargetType: "lightning_key", Action: action, Success: true,
+	}
+	if err := logger.Log(r.Context(), ev); err != nil {
+		slog.Warn("failed to log lightning key audit event", "error", err)
+	}
 }
 
 // POST /api/v1/users/lightning/link/challenge

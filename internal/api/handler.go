@@ -373,6 +373,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/users/lightning/challenge", h.handleLightningChallenge)
 	mux.HandleFunc("/api/v1/lnurl-auth/callback", h.handleLNURLAuthCallback)
 	mux.HandleFunc("/api/v1/users/lightning/status", h.handleLightningStatus)
+	mux.HandleFunc("/api/v1/users/lightning/confirm", h.handleLightningConfirm)
 	mux.HandleFunc("/api/v1/users/lightning/link/challenge", h.handleLightningLinkChallenge)
 	mux.HandleFunc("/api/v1/users/lightning/keys", h.handleLightningKeys)
 	mux.HandleFunc("/api/v1/users/lightning/keys/", h.handleLightningKeyByID)

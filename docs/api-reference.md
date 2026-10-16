@@ -664,3 +664,29 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
 Obtain a token via `POST /api/v1/users/login`.
 
 Some endpoints (like health checks and NIP-05) are public.
+
+
+### Lightning (LNURL-auth) login confirmation
+
+With `LIGHTNING_CONFIRM_FIRST_LOGIN=true`, a linking key's first Lightning login
+does not sign in straight away. This defends against link-mode login CSRF: an
+attacker links the victim's wallet key to the attacker's own account, and the
+victim's later logins open the attacker's account.
+
+`GET /api/v1/users/lightning/status?session_id=` then answers, for a key not yet
+confirmed, `200 {"success": false, "status": "confirm_account", "username": "<account>"}`
+and sets no cookie. Show "You are signing in as <username>. Is this your account?"
+
+`POST /api/v1/users/lightning/confirm` `{"session_id": "...", "confirm": true|false}` (no auth;
+the session_id from the challenge response is the proof):
+
+| Result | Body |
+|---|---|
+| confirm=true | `200 {"success": true, "username"}` + auth cookie, exactly as a status poll; the key is confirmed and later logins sign in directly |
+| confirm=false | `200 {"success": false, "status": "unlinked"}`, no cookie; the key is unlinked from that account (audit `lightning_key.rejected`) |
+| unknown / expired / used | `400 {"success": false, "status": "expired"}` |
+| wallet not signed yet | `409 {"success": false, "status": "pending"}` |
+| no confirmation needed (a link challenge, or the key is already confirmed) | `409 {"success": false, "status": "not_required"}`; poll status instead |
+
+Link challenges carry LUD-04 `action=link` (login challenges `action=login`), so
+wallets show "link" rather than "log in". Every link records `lightning_key.linked`.

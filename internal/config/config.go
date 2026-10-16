@@ -125,6 +125,14 @@ type LightningConfig struct {
 	// Domain is used as the callback domain in LNURL-auth URLs.
 	// Defaults to "signer.cloistr.xyz". Override with LNURL_AUTH_DOMAIN env var.
 	Domain string `yaml:"domain"`
+	// ConfirmFirstLogin: a linking key's first Lightning login stops at "you
+	// are signing in as <username>, is this your account?" and sets no cookie
+	// until the user confirms (POST /api/v1/users/lightning/confirm). Defends
+	// against link-mode login CSRF: an attacker links the victim's wallet key
+	// to the attacker's own account (a swapped link QR), and the victim's
+	// honest logins then open the attacker's account. Off by default until
+	// the login UI handles the prompt. LIGHTNING_CONFIRM_FIRST_LOGIN=true.
+	ConfirmFirstLogin bool `yaml:"confirm_first_login"`
 }
 
 // TorConfig holds Tor egress configuration.
@@ -548,6 +556,9 @@ func Load() (*Config, error) {
 	// Lightning / LNURL-auth configuration
 	if domain := os.Getenv("LNURL_AUTH_DOMAIN"); domain != "" {
 		cfg.Lightning.Domain = domain
+	}
+	if v := os.Getenv("LIGHTNING_CONFIRM_FIRST_LOGIN"); v != "" {
+		cfg.Lightning.ConfirmFirstLogin = v == "true" || v == "1"
 	}
 
 	// Recovery rate-limiting configuration

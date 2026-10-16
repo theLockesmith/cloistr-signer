@@ -478,6 +478,12 @@ func (ps *PostgresStorage) migrate() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_lightning_challenges_expires ON signer_lightning_challenges(expires_at);
 
+	-- Lightning login confirmation (link-mode login CSRF defence): a key is
+	-- unconfirmed until its owner confirms, at a login, that the account it
+	-- opens is theirs; the challenge records which key signed it.
+	ALTER TABLE signer_lightning_keys       ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;
+	ALTER TABLE signer_lightning_challenges ADD COLUMN IF NOT EXISTS linking_key  TEXT;
+
 	-- "Stay signed in" session seals: a sealed copy of a decrypted user key, so any
 	-- replica can restore it after a deploy. sealed is opaque (internal/seal); it
 	-- cannot be opened from the DB alone. Deleting the key or the account drops it.
@@ -2939,16 +2945,19 @@ func (ps *PostgresStorage) CreateLightningKey(ctx context.Context, key *Lightnin
 
 func (ps *PostgresStorage) GetLightningKeyByLinkingKey(ctx context.Context, linkingKey string) (*LightningKey, error) {
 	k := &LightningKey{}
-	var lastUsedAt sql.NullTime
+	var lastUsedAt, confirmedAt sql.NullTime
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, user_id, linking_key, name, created_at, last_used_at
+		SELECT id, user_id, linking_key, name, created_at, last_used_at, confirmed_at
 		FROM signer_lightning_keys WHERE linking_key = $1`, linkingKey).
-		Scan(&k.ID, &k.UserID, &k.LinkingKey, &k.Name, &k.CreatedAt, &lastUsedAt)
+		Scan(&k.ID, &k.UserID, &k.LinkingKey, &k.Name, &k.CreatedAt, &lastUsedAt, &confirmedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrLightningKeyNotFound
 		}
 		return nil, fmt.Errorf("get lightning key: %w", err)
+	}
+	if confirmedAt.Valid {
+		k.ConfirmedAt = &confirmedAt.Time
 	}
 	if lastUsedAt.Valid {
 		k.LastUsedAt = &lastUsedAt.Time
@@ -2985,6 +2994,18 @@ func (ps *PostgresStorage) UpdateLightningKeyLastUsed(ctx context.Context, id st
 		`UPDATE signer_lightning_keys SET last_used_at = NOW() WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("update lightning key last_used_at: %w", err)
+	}
+	return nil
+}
+
+func (ps *PostgresStorage) ConfirmLightningKey(ctx context.Context, id string) error {
+	res, err := ps.db.ExecContext(ctx,
+		`UPDATE signer_lightning_keys SET confirmed_at = COALESCE(confirmed_at, NOW()) WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("confirm lightning key: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrLightningKeyNotFound
 	}
 	return nil
 }
@@ -3047,18 +3068,18 @@ func (ps *PostgresStorage) CreateLightningChallenge(ctx context.Context, c *Ligh
 
 func (ps *PostgresStorage) getLightningChallenge(ctx context.Context, where string, arg string) (*LightningChallenge, error) {
 	c := &LightningChallenge{}
-	var userID, bound sql.NullString
+	var userID, bound, linkingKey sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT k1, session_id, status, user_id, bound_user_id, is_link, expires_at, created_at
+		SELECT k1, session_id, status, user_id, bound_user_id, is_link, linking_key, expires_at, created_at
 		FROM signer_lightning_challenges WHERE `+where+` = $1 AND expires_at > NOW()`, arg).
-		Scan(&c.K1, &c.SessionID, &c.Status, &userID, &bound, &c.IsLink, &c.ExpiresAt, &c.CreatedAt)
+		Scan(&c.K1, &c.SessionID, &c.Status, &userID, &bound, &c.IsLink, &linkingKey, &c.ExpiresAt, &c.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, ErrLightningChallengeNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	c.UserID, c.BoundUserID = userID.String, bound.String
+	c.UserID, c.BoundUserID, c.LinkingKey = userID.String, bound.String, linkingKey.String
 	return c, nil
 }
 
@@ -3072,10 +3093,10 @@ func (ps *PostgresStorage) GetLightningChallengeBySession(ctx context.Context, s
 
 // AuthenticateLightningChallenge is one conditional UPDATE, so two callbacks
 // for the same k1 (on any replicas) cannot both succeed.
-func (ps *PostgresStorage) AuthenticateLightningChallenge(ctx context.Context, k1, userID string) error {
+func (ps *PostgresStorage) AuthenticateLightningChallenge(ctx context.Context, k1, userID, linkingKey string) error {
 	res, err := ps.db.ExecContext(ctx, `
-		UPDATE signer_lightning_challenges SET status = 'authenticated', user_id = $2
-		WHERE k1 = $1 AND status = 'pending' AND expires_at > NOW()`, k1, userID)
+		UPDATE signer_lightning_challenges SET status = 'authenticated', user_id = $2, linking_key = $3
+		WHERE k1 = $1 AND status = 'pending' AND expires_at > NOW()`, k1, userID, nullString(linkingKey))
 	if err != nil {
 		return err
 	}

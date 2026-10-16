@@ -44,10 +44,10 @@ func TestLightningChallenge_Lifecycle(t *testing.T) {
 			if _, err := s.ConsumeLightningChallenge(ctx, "sid-life"); !errors.Is(err, ErrLightningChallengeNotFound) {
 				t.Fatalf("consume while pending: %v, want not found", err)
 			}
-			if err := s.AuthenticateLightningChallenge(ctx, "k1-life", "user-1"); err != nil {
+			if err := s.AuthenticateLightningChallenge(ctx, "k1-life", "user-1", ""); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.AuthenticateLightningChallenge(ctx, "k1-life", "user-2"); !errors.Is(err, ErrLightningChallengeNotFound) {
+			if err := s.AuthenticateLightningChallenge(ctx, "k1-life", "user-2", ""); !errors.Is(err, ErrLightningChallengeNotFound) {
 				t.Fatalf("second authenticate: %v, want not found", err)
 			}
 			if got, _ := s.GetLightningChallenge(ctx, "k1-life"); got == nil || got.Status != "authenticated" || got.UserID != "user-1" {
@@ -81,7 +81,7 @@ func TestLightningChallenge_Expiry(t *testing.T) {
 			if _, err := s.GetLightningChallengeBySession(ctx, "sid-old"); !errors.Is(err, ErrLightningChallengeNotFound) {
 				t.Fatalf("get expired by session: %v", err)
 			}
-			if err := s.AuthenticateLightningChallenge(ctx, "k1-old", "u"); !errors.Is(err, ErrLightningChallengeNotFound) {
+			if err := s.AuthenticateLightningChallenge(ctx, "k1-old", "u", ""); !errors.Is(err, ErrLightningChallengeNotFound) {
 				t.Fatalf("authenticate expired: %v", err)
 			}
 			if err := s.CleanExpiredLightningChallenges(ctx); err != nil {
@@ -128,7 +128,7 @@ func TestLightningChallenge_ConcurrentSingleUse(t *testing.T) {
 				wg.Wait()
 				return won
 			}
-			if n := race(func() error { return s.AuthenticateLightningChallenge(ctx, "k1-race", "u") }); n != 1 {
+			if n := race(func() error { return s.AuthenticateLightningChallenge(ctx, "k1-race", "u", "") }); n != 1 {
 				t.Fatalf("%d callbacks authenticated the challenge, want 1", n)
 			}
 			if n := race(func() error { _, err := s.ConsumeLightningChallenge(ctx, "sid-race"); return err }); n != 1 {
