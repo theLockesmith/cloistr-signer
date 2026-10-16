@@ -333,6 +333,19 @@ func (ss *SQLiteStorage) initSchema() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_user    ON signer_session_seals(user_id);
 	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_expires ON signer_session_seals(expires_at);
+
+	-- LNURL-auth linking keys (see postgres.go). Until 2026-10-16 the SQLite
+	-- backend had no table and refused to store them, so Lightning login
+	-- could never work on a SQLite install.
+	CREATE TABLE IF NOT EXISTS signer_lightning_keys (
+		id           TEXT PRIMARY KEY,
+		user_id      TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
+		linking_key  TEXT UNIQUE NOT NULL,
+		name         TEXT,
+		created_at   TEXT NOT NULL,
+		last_used_at TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_lightning_keys_user ON signer_lightning_keys(user_id);
 	`
 
 	_, err := ss.db.Exec(schema)
@@ -2669,23 +2682,81 @@ func (ss *SQLiteStorage) DeleteExpiredRecoveryChallenges(ctx context.Context) (i
 // the interface for SQLite (dev/test).
 
 func (ss *SQLiteStorage) CreateLightningKey(ctx context.Context, key *LightningKey) error {
-	return fmt.Errorf("lightning key storage requires postgres storage")
+	_, err := ss.db.ExecContext(ctx, `
+		INSERT INTO signer_lightning_keys (id, user_id, linking_key, name, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		key.ID, key.UserID, key.LinkingKey, nullStr(key.Name), formatTime(key.CreatedAt.UTC()))
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrLightningKeyExists
+		}
+		return fmt.Errorf("create lightning key: %w", err)
+	}
+	return nil
+}
+
+func scanSQLiteLightningKey(scan func(...any) error) (*LightningKey, error) {
+	k := &LightningKey{}
+	var name, lastUsed sql.NullString
+	var created string
+	if err := scan(&k.ID, &k.UserID, &k.LinkingKey, &name, &created, &lastUsed); err != nil {
+		return nil, err
+	}
+	k.Name, k.CreatedAt = name.String, parseTime(created)
+	if lastUsed.Valid && lastUsed.String != "" {
+		t := parseTime(lastUsed.String)
+		k.LastUsedAt = &t
+	}
+	return k, nil
 }
 
 func (ss *SQLiteStorage) GetLightningKeyByLinkingKey(ctx context.Context, linkingKey string) (*LightningKey, error) {
-	return nil, ErrLightningKeyNotFound
+	k, err := scanSQLiteLightningKey(ss.db.QueryRowContext(ctx, `
+		SELECT id, user_id, linking_key, name, created_at, last_used_at
+		FROM signer_lightning_keys WHERE linking_key = ?`, linkingKey).Scan)
+	if err == sql.ErrNoRows {
+		return nil, ErrLightningKeyNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get lightning key: %w", err)
+	}
+	return k, nil
 }
 
 func (ss *SQLiteStorage) ListLightningKeys(ctx context.Context, userID string) ([]*LightningKey, error) {
-	return nil, nil
+	rows, err := ss.db.QueryContext(ctx, `
+		SELECT id, user_id, linking_key, name, created_at, last_used_at
+		FROM signer_lightning_keys WHERE user_id = ? ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list lightning keys: %w", err)
+	}
+	defer rows.Close()
+	var result []*LightningKey
+	for rows.Next() {
+		k, err := scanSQLiteLightningKey(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("scan lightning key: %w", err)
+		}
+		result = append(result, k)
+	}
+	return result, rows.Err()
 }
 
 func (ss *SQLiteStorage) UpdateLightningKeyLastUsed(ctx context.Context, id string) error {
-	return fmt.Errorf("lightning key storage requires postgres storage")
+	_, err := ss.db.ExecContext(ctx,
+		`UPDATE signer_lightning_keys SET last_used_at = ? WHERE id = ?`, formatTime(time.Now().UTC()), id)
+	if err != nil {
+		return fmt.Errorf("update lightning key last_used_at: %w", err)
+	}
+	return nil
 }
 
 func (ss *SQLiteStorage) DeleteLightningKey(ctx context.Context, id string) error {
-	return fmt.Errorf("lightning key storage requires postgres storage")
+	_, err := ss.db.ExecContext(ctx, `DELETE FROM signer_lightning_keys WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete lightning key: %w", err)
+	}
+	return nil
 }
 
 func (ss *SQLiteStorage) RecordRetainedDeletion(ctx context.Context, userID, object, reason string) error {
