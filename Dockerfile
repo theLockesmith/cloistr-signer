@@ -2,10 +2,13 @@
 # same pinned toolchain and path remapping as CI (ui/frost-wasm/build.sh), so
 # the module in the image is byte-identical to test:frost-wasm's build.
 FROM rust:1.99.0-slim-bookworm AS wasm
+# wasm-pack, wasm-bindgen and wasm-opt come pinned and checksummed from this
+# project's package registry (install-tools.sh), so the build fetches nothing
+# from github.com.
+COPY ui/frost-wasm/install-tools.sh /tmp/install-tools.sh
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl >/dev/null \
  && rustup target add wasm32-unknown-unknown \
- && curl -sSfL https://github.com/rustwasm/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-x86_64-unknown-linux-musl.tar.gz \
-    | tar xz -C /usr/local/bin --strip-components=1 wasm-pack-v0.15.0-x86_64-unknown-linux-musl/wasm-pack
+ && sh /tmp/install-tools.sh /usr/local/bin
 COPY ui/frost-wasm /src/ui/frost-wasm
 RUN /src/ui/frost-wasm/build.sh
 
