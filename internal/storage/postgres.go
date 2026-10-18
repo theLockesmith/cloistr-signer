@@ -463,6 +463,21 @@ func (ps *PostgresStorage) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_signer_lightning_keys_user        ON signer_lightning_keys(user_id);
 	CREATE INDEX IF NOT EXISTS idx_signer_lightning_keys_linking_key ON signer_lightning_keys(linking_key);
 
+	-- In-flight LNURL-auth challenges. Stored here, not in a pod's memory: the
+	-- challenge, the wallet callback and the status poll each reach whichever
+	-- replica the load balancer picks.
+	CREATE TABLE IF NOT EXISTS signer_lightning_challenges (
+		k1            TEXT PRIMARY KEY,
+		session_id    TEXT UNIQUE NOT NULL,
+		status        TEXT NOT NULL DEFAULT 'pending',
+		user_id       TEXT,
+		bound_user_id TEXT,
+		is_link       BOOLEAN NOT NULL DEFAULT FALSE,
+		expires_at    TIMESTAMPTZ NOT NULL,
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_lightning_challenges_expires ON signer_lightning_challenges(expires_at);
+
 	-- "Stay signed in" session seals: a sealed copy of a decrypted user key, so any
 	-- replica can restore it after a deploy. sealed is opaque (internal/seal); it
 	-- cannot be opened from the DB alone. Deleting the key or the account drops it.
@@ -3013,5 +3028,78 @@ func (ps *PostgresStorage) ListRetainedDeletions(ctx context.Context) ([]*Retain
 
 func (ps *PostgresStorage) ClearRetainedDeletion(ctx context.Context, userID, object string) error {
 	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_account_deletion_retained WHERE user_id = $1 AND object = $2`, userID, object)
+	return err
+}
+
+// ---- LNURL-auth challenges ----
+
+func (ps *PostgresStorage) CreateLightningChallenge(ctx context.Context, c *LightningChallenge) error {
+	status := c.Status
+	if status == "" {
+		status = "pending"
+	}
+	_, err := ps.db.ExecContext(ctx, `
+		INSERT INTO signer_lightning_challenges (k1, session_id, status, user_id, bound_user_id, is_link, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		c.K1, c.SessionID, status, nullString(c.UserID), nullString(c.BoundUserID), c.IsLink, c.ExpiresAt, c.CreatedAt)
+	return err
+}
+
+func (ps *PostgresStorage) getLightningChallenge(ctx context.Context, where string, arg string) (*LightningChallenge, error) {
+	c := &LightningChallenge{}
+	var userID, bound sql.NullString
+	err := ps.db.QueryRowContext(ctx, `
+		SELECT k1, session_id, status, user_id, bound_user_id, is_link, expires_at, created_at
+		FROM signer_lightning_challenges WHERE `+where+` = $1 AND expires_at > NOW()`, arg).
+		Scan(&c.K1, &c.SessionID, &c.Status, &userID, &bound, &c.IsLink, &c.ExpiresAt, &c.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, ErrLightningChallengeNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.UserID, c.BoundUserID = userID.String, bound.String
+	return c, nil
+}
+
+func (ps *PostgresStorage) GetLightningChallenge(ctx context.Context, k1 string) (*LightningChallenge, error) {
+	return ps.getLightningChallenge(ctx, "k1", k1)
+}
+
+func (ps *PostgresStorage) GetLightningChallengeBySession(ctx context.Context, sessionID string) (*LightningChallenge, error) {
+	return ps.getLightningChallenge(ctx, "session_id", sessionID)
+}
+
+// AuthenticateLightningChallenge is one conditional UPDATE, so two callbacks
+// for the same k1 (on any replicas) cannot both succeed.
+func (ps *PostgresStorage) AuthenticateLightningChallenge(ctx context.Context, k1, userID string) error {
+	res, err := ps.db.ExecContext(ctx, `
+		UPDATE signer_lightning_challenges SET status = 'authenticated', user_id = $2
+		WHERE k1 = $1 AND status = 'pending' AND expires_at > NOW()`, k1, userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrLightningChallengeNotFound
+	}
+	return nil
+}
+
+// ConsumeLightningChallenge is one conditional DELETE ... RETURNING, so an
+// authenticated challenge yields a sign-in exactly once.
+func (ps *PostgresStorage) ConsumeLightningChallenge(ctx context.Context, sessionID string) (string, error) {
+	var userID sql.NullString
+	err := ps.db.QueryRowContext(ctx, `
+		DELETE FROM signer_lightning_challenges
+		WHERE session_id = $1 AND status = 'authenticated' AND expires_at > NOW()
+		RETURNING user_id`, sessionID).Scan(&userID)
+	if err == sql.ErrNoRows {
+		return "", ErrLightningChallengeNotFound
+	}
+	return userID.String, err
+}
+
+func (ps *PostgresStorage) CleanExpiredLightningChallenges(ctx context.Context) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM signer_lightning_challenges WHERE expires_at <= NOW()`)
 	return err
 }

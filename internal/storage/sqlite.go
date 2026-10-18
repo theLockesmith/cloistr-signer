@@ -336,6 +336,19 @@ func (ss *SQLiteStorage) initSchema() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_user    ON signer_session_seals(user_id);
 	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_expires ON signer_session_seals(expires_at);
+
+	-- In-flight LNURL-auth challenges (see postgres.go).
+	CREATE TABLE IF NOT EXISTS signer_lightning_challenges (
+		k1            TEXT PRIMARY KEY,
+		session_id    TEXT UNIQUE NOT NULL,
+		status        TEXT NOT NULL DEFAULT 'pending',
+		user_id       TEXT,
+		bound_user_id TEXT,
+		is_link       INTEGER NOT NULL DEFAULT 0,
+		expires_at    TEXT NOT NULL,
+		created_at    TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_lightning_challenges_expires ON signer_lightning_challenges(expires_at);
 	`
 
 	// A database made by an older version keeps its old tables: CREATE TABLE
@@ -3149,5 +3162,80 @@ func (ss *SQLiteStorage) ListRetainedDeletions(ctx context.Context) ([]*Retained
 
 func (ss *SQLiteStorage) ClearRetainedDeletion(ctx context.Context, userID, object string) error {
 	_, err := ss.db.ExecContext(ctx, `DELETE FROM signer_account_deletion_retained WHERE user_id = ? AND object = ?`, userID, object)
+	return err
+}
+
+// ---- LNURL-auth challenges ----
+//
+// Times are compared with datetime() on both sides, so the stored RFC 3339
+// text compares correctly whatever its zone.
+
+func (ss *SQLiteStorage) CreateLightningChallenge(ctx context.Context, c *LightningChallenge) error {
+	status := c.Status
+	if status == "" {
+		status = "pending"
+	}
+	_, err := ss.db.ExecContext(ctx, `
+		INSERT INTO signer_lightning_challenges (k1, session_id, status, user_id, bound_user_id, is_link, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.K1, c.SessionID, status, nullStr(c.UserID), nullStr(c.BoundUserID), c.IsLink,
+		formatTime(c.ExpiresAt.UTC()), formatTime(c.CreatedAt.UTC()))
+	return err
+}
+
+func (ss *SQLiteStorage) getLightningChallenge(ctx context.Context, where string, arg string) (*LightningChallenge, error) {
+	c := &LightningChallenge{}
+	var userID, bound sql.NullString
+	var expires, created string
+	err := ss.db.QueryRowContext(ctx, `
+		SELECT k1, session_id, status, user_id, bound_user_id, is_link, expires_at, created_at
+		FROM signer_lightning_challenges WHERE `+where+` = ? AND datetime(expires_at) > datetime('now')`, arg).
+		Scan(&c.K1, &c.SessionID, &c.Status, &userID, &bound, &c.IsLink, &expires, &created)
+	if err == sql.ErrNoRows {
+		return nil, ErrLightningChallengeNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.UserID, c.BoundUserID = userID.String, bound.String
+	c.ExpiresAt, c.CreatedAt = parseTime(expires), parseTime(created)
+	return c, nil
+}
+
+func (ss *SQLiteStorage) GetLightningChallenge(ctx context.Context, k1 string) (*LightningChallenge, error) {
+	return ss.getLightningChallenge(ctx, "k1", k1)
+}
+
+func (ss *SQLiteStorage) GetLightningChallengeBySession(ctx context.Context, sessionID string) (*LightningChallenge, error) {
+	return ss.getLightningChallenge(ctx, "session_id", sessionID)
+}
+
+func (ss *SQLiteStorage) AuthenticateLightningChallenge(ctx context.Context, k1, userID string) error {
+	res, err := ss.db.ExecContext(ctx, `
+		UPDATE signer_lightning_challenges SET status = 'authenticated', user_id = ?
+		WHERE k1 = ? AND status = 'pending' AND datetime(expires_at) > datetime('now')`, userID, k1)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrLightningChallengeNotFound
+	}
+	return nil
+}
+
+func (ss *SQLiteStorage) ConsumeLightningChallenge(ctx context.Context, sessionID string) (string, error) {
+	var userID sql.NullString
+	err := ss.db.QueryRowContext(ctx, `
+		DELETE FROM signer_lightning_challenges
+		WHERE session_id = ? AND status = 'authenticated' AND datetime(expires_at) > datetime('now')
+		RETURNING user_id`, sessionID).Scan(&userID)
+	if err == sql.ErrNoRows {
+		return "", ErrLightningChallengeNotFound
+	}
+	return userID.String, err
+}
+
+func (ss *SQLiteStorage) CleanExpiredLightningChallenges(ctx context.Context) error {
+	_, err := ss.db.ExecContext(ctx, `DELETE FROM signer_lightning_challenges WHERE datetime(expires_at) <= datetime('now')`)
 	return err
 }
