@@ -1591,8 +1591,9 @@ func TestHandleAuditLogs(t *testing.T) {
 
 	h.handleAuditLogs(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Errorf("handleAuditLogs() status = %d, want %d", rr.Code, http.StatusOK)
+	// Sign-in required (see audit_auth_test.go).
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("handleAuditLogs() unauthenticated status = %d, want %d", rr.Code, http.StatusUnauthorized)
 	}
 }
 

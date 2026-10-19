@@ -567,14 +567,19 @@ NIP-05 identifier verification.
 
 ### GET /api/v1/audit
 
-Query audit logs.
+Query audit logs. **Requires sign-in** (`401` otherwise). An admin sees every
+event. Anyone else sees only their own: events they performed, events about
+their account, and events about their signing keys or Lightning wallet keys.
+The filters narrow that set and never widen it, so `?actor=<someone else>`
+returns nothing to a non-admin.
+
+Events live in each pod's memory (newest first, at most 100 per response), so
+a response covers only that pod, and only since its last restart.
 
 **Query Parameters:**
 - `type` - Event type filter
-- `actor` - Actor pubkey filter
+- `actor` - Actor filter (user ID or client pubkey)
 - `target` - Target filter
-- `limit` - Max results (default 100)
-- `offset` - Pagination offset
 
 **Response:**
 ```json
