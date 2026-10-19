@@ -1199,6 +1199,10 @@ func (h *Handler) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 		h.jsonError(w, http.StatusBadRequest, "Username must be at least 3 characters")
 		return
 	}
+	if strings.Contains(req.Username, ":") {
+		h.jsonError(w, http.StatusBadRequest, "Username may not contain ':'")
+		return
+	}
 	if len(req.Password) < 8 {
 		h.jsonError(w, http.StatusBadRequest, "Password must be at least 8 characters")
 		return
@@ -1516,8 +1520,9 @@ func (h *Handler) getCurrentUser(r *http.Request) *storage.User {
 		return nil
 	}
 
-	// Check if this is a config-based admin login (NIP-07 via AdminPubkeys)
-	if strings.HasPrefix(claims.Username, "admin:") {
+	// Check if this is a config-based admin login (NIP-07 via AdminPubkeys).
+	// The pubkey decides, never the "admin:" username prefix.
+	if h.config.Auth.IsAdminPubkey(claims.UserID) {
 		return &storage.User{
 			ID:       claims.UserID,
 			Username: claims.Username,

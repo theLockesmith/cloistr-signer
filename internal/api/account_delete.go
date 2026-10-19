@@ -235,10 +235,10 @@ func (h *Handler) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request, 
 	h.jsonResponse(w, http.StatusOK, map[string]interface{}{"deleted": true, "retained": res.Retained})
 }
 
-// isAdminClaims reports whether the caller is an admin (config-based admin
-// usernames carry the "admin:" prefix; otherwise the stored role decides).
+// isAdminClaims reports whether the caller is an admin: a configured admin
+// pubkey, or the stored admin role. Never the username (see IsAdminPubkey).
 func (h *Handler) isAdminClaims(ctx context.Context, claims *auth.JWTClaims) bool {
-	if len(claims.Username) > 6 && claims.Username[:6] == "admin:" {
+	if h.config.Auth.IsAdminPubkey(claims.UserID) {
 		return true
 	}
 	user, err := h.storage.GetUser(ctx, claims.UserID)

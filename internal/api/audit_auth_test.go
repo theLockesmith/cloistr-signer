@@ -100,12 +100,20 @@ func TestAuditLogs_OnlyCallersOwnEvents(t *testing.T) {
 
 func TestAuditLogs_AdminSeesAll(t *testing.T) {
 	h := auditFixture(t)
-	tok, _, err := auth.GenerateJWT(h.authConfig, "admin-1", "admin:abcd1234")
+	// A real config admin: the token's user id is a configured admin pubkey.
+	// The "admin:" username alone proves nothing (see admin_prefix_test.go).
+	const adminPK = "ad00000000000000000000000000000000000000000000000000000000000009"
+	h.config.Auth.AdminPubkeys = []string{adminPK}
+	tok, _, err := auth.GenerateJWT(h.authConfig, adminPK, "admin:"+adminPK[:8])
 	if err != nil {
 		t.Fatal(err)
 	}
 	if code, got := auditGet(t, h, "", tok); code != http.StatusOK || len(got) != 5 {
 		t.Fatalf("admin: %d %v, want 200 and all 5 events", code, got)
+	}
+	forged, _, _ := auth.GenerateJWT(h.authConfig, "admin-1", "admin:abcd1234")
+	if code, got := auditGet(t, h, "", forged); code != http.StatusOK || len(got) != 0 {
+		t.Fatalf("forged admin: username: %d %v, want only its own (no) events", code, got)
 	}
 	if code, got := auditGet(t, h, "?actor="+auditOtherUser, tok); code != http.StatusOK || len(got) != 2 {
 		t.Fatalf("admin ?actor=other: %d %v, want 2 events", code, got)
