@@ -15,6 +15,8 @@ func TestTestDatabaseName(t *testing.T) {
 		"signer_test_prod": false, "latest": false, "my-test-db": false, "test": false,
 		"signer": false, "cloistr": false, "postgres": false, "signer_testing": false,
 		"SIGNER_TEST": false, "signer_test_": false, "x_signer_test": false, "": false,
+		// Any suffix naming production is refused, not only exactly "_prod".
+		"signer_test_production": false, "signer_test_prod2": false, "signer_test_preprod": false,
 	} {
 		if got := isTestDatabaseName(name); got != want {
 			t.Errorf("isTestDatabaseName(%q) = %v, want %v", name, got, want)

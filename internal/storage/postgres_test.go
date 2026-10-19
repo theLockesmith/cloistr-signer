@@ -39,11 +39,14 @@ func getTestPostgresStorage(t *testing.T) *PostgresStorage {
 // testDatabaseName is the only database shape the Postgres tests will touch:
 // signer_test, or signer_test_<suffix> for a parallel copy. An exact pattern,
 // not a substring: "latest", "my-test-db" or "signer_test_prod" all contained
-// "test" and would have been migrated into and truncated.
-var testDatabaseName = regexp.MustCompile(`^signer_test(_[a-z0-9]+)?$`)
+// "test" and would have been migrated into and truncated. A suffix that
+// mentions production anywhere (signer_test_production, signer_test_prod2,
+// signer_test_preprod) is refused too.
+var testDatabaseName = regexp.MustCompile(`^signer_test(?:_([a-z0-9]+))?$`)
 
 func isTestDatabaseName(name string) bool {
-	return testDatabaseName.MatchString(name) && !strings.HasSuffix(name, "_prod")
+	m := testDatabaseName.FindStringSubmatch(name)
+	return m != nil && !strings.Contains(m[1], "prod")
 }
 
 // openTestPostgres checks the database's name BEFORE NewPostgresStorage,
@@ -72,8 +75,11 @@ func openTestPostgres(dsn string) (*PostgresStorage, error) {
 // without their signer_ prefix and only logged the errors, so it cleared
 // nothing and every test saw the rows of the tests before it.)
 //
-// It refuses a database whose name lacks "test", so a TEST_DATABASE_URL
-// pointed at a real database by mistake is never emptied.
+// It refuses any database whose name isTestDatabaseName rejects (only
+// signer_test or signer_test_<suffix>, never a production-looking suffix), so
+// a TEST_DATABASE_URL pointed at a real database by mistake is never emptied.
+// openTestPostgres has already refused such a database before migrations;
+// this is the second check, right before the TRUNCATE.
 func cleanupTestDatabase(t *testing.T, ps *PostgresStorage) {
 	t.Helper()
 	var dbName string
