@@ -2357,6 +2357,10 @@ func (h *Handler) handleUserRegister(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusBadRequest, "username must be at least 3 characters")
 		return
 	}
+	if strings.Contains(req.Username, ":") {
+		h.errorResponse(w, http.StatusBadRequest, "username may not contain ':'")
+		return
+	}
 	if req.Password == "" || len(req.Password) < 8 {
 		h.errorResponse(w, http.StatusBadRequest, "password must be at least 8 characters")
 		return
@@ -5436,7 +5440,7 @@ func (h *Handler) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check admin role (get user from storage if not config-based admin)
-	if !strings.HasPrefix(claims.Username, "admin:") {
+	if !h.config.Auth.IsAdminPubkey(claims.UserID) {
 		user, err := h.storage.GetUser(r.Context(), claims.UserID)
 		if err != nil || !user.IsAdmin() {
 			h.errorResponse(w, http.StatusForbidden, "admin access required")
@@ -5482,7 +5486,7 @@ func (h *Handler) handleAdminUserByPubkey(w http.ResponseWriter, r *http.Request
 	}
 
 	// Check admin role
-	if !strings.HasPrefix(claims.Username, "admin:") {
+	if !h.config.Auth.IsAdminPubkey(claims.UserID) {
 		user, err := h.storage.GetUser(r.Context(), claims.UserID)
 		if err != nil || !user.IsAdmin() {
 			h.errorResponse(w, http.StatusForbidden, "admin access required")
@@ -5570,7 +5574,7 @@ func (h *Handler) handleAdminServices(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check admin role
-	if !strings.HasPrefix(claims.Username, "admin:") {
+	if !h.config.Auth.IsAdminPubkey(claims.UserID) {
 		user, err := h.storage.GetUser(r.Context(), claims.UserID)
 		if err != nil || !user.IsAdmin() {
 			h.errorResponse(w, http.StatusForbidden, "admin access required")

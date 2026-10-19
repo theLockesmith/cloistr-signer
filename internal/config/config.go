@@ -188,6 +188,22 @@ type StorageConfig struct {
 	EncryptionKey string `yaml:"encryption_key"` // 32-byte hex key for AES-256-GCM encryption
 }
 
+// IsAdminPubkey reports whether id is one of the configured admin pubkeys.
+// This, or the stored admin role, is the only admin test: a username's
+// "admin:" prefix is a label of the config-admin login and proves nothing
+// (anyone could register "admin:mallory").
+func (a *AuthConfig) IsAdminPubkey(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, pk := range a.AdminPubkeys {
+		if strings.TrimSpace(pk) == id {
+			return true
+		}
+	}
+	return false
+}
+
 // AuthConfig holds authentication configuration
 type AuthConfig struct {
 	AdminPubkeys             []string `yaml:"admin_pubkeys"`
