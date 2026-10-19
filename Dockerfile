@@ -1,7 +1,7 @@
 # frost WASM stage: the browser-side FROST module, built from source with the
 # same pinned toolchain and path remapping as CI (ui/frost-wasm/build.sh), so
 # the module in the image is byte-identical to test:frost-wasm's build.
-FROM rust:1.99.0-slim-bookworm AS wasm
+FROM rust:1.99.1-slim-bookworm AS wasm
 # wasm-pack, wasm-bindgen and wasm-opt come pinned and checksummed from this
 # project's package registry (install-tools.sh), so the build fetches nothing
 # from github.com.
