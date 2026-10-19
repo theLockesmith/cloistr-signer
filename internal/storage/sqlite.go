@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,7 +17,19 @@ import (
 
 // SQLiteStorage implements Storage using SQLite
 type SQLiteStorage struct {
-	db *sql.DB
+	db       *sql.DB
+	path     string // database file; the upgrade backup is written beside it
+	backedUp bool   // this process already took its pre-upgrade backup
+}
+
+// schemaBusyRetryFor bounds how long startup waits out another process that
+// holds the database (typically one upgrading it at the same moment).
+var schemaBusyRetryFor = 2 * time.Minute
+
+// vacuumInto writes the backup; a variable so a test can make it fail.
+var vacuumInto = func(db *sql.DB, path string) error {
+	_, err := db.Exec(`VACUUM INTO ?`, path)
+	return err
 }
 
 // NewSQLiteStorage creates a new SQLite-backed storage
@@ -30,15 +45,16 @@ func NewSQLiteStorage(path string) (*SQLiteStorage, error) {
 	// Limit connections to 1 for SQLite (it handles concurrency via locking)
 	db.SetMaxOpenConns(1)
 
-	// Test connection
-	if err := db.Ping(); err != nil {
+	// Test connection. Opening an older database switches it to WAL, which
+	// needs the lock too, so this waits out a concurrent start the same way.
+	if err := retryBusy(db.Ping); err != nil {
 		return nil, fmt.Errorf("failed to ping sqlite database: %w", err)
 	}
 
-	ss := &SQLiteStorage{db: db}
+	ss := &SQLiteStorage{db: db, path: path}
 
 	// Initialize schema
-	if err := ss.initSchema(); err != nil {
+	if err := retryBusy(ss.initSchema); err != nil {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
@@ -47,6 +63,33 @@ func NewSQLiteStorage(path string) (*SQLiteStorage, error) {
 
 func (ss *SQLiteStorage) Close() error {
 	return ss.db.Close()
+}
+
+// retryBusy runs fn, retrying while another process holds the database.
+// Two signers starting at once on an older database both try to upgrade it;
+// one gets SQLITE_BUSY mid-upgrade (busy_timeout does not cover a read
+// transaction that must become a write one). Every upgrade step is one
+// transaction and safe to repeat, and a retry re-checks what is still needed,
+// so the second process ends up finding the first one's work done.
+func retryBusy(fn func() error) error {
+	deadline := time.Now().Add(schemaBusyRetryFor)
+	wait := 50 * time.Millisecond
+	for {
+		err := fn()
+		if err == nil || !isSQLiteBusy(err) || time.Now().After(deadline) {
+			return err
+		}
+		slog.Info("sqlite: database busy during startup, retrying", "error", err, "wait", wait)
+		time.Sleep(wait)
+		if wait < time.Second {
+			wait *= 2
+		}
+	}
+}
+
+func isSQLiteBusy(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "database is locked")
 }
 
 func (ss *SQLiteStorage) initSchema() error {
@@ -334,6 +377,19 @@ func (ss *SQLiteStorage) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_user    ON signer_session_seals(user_id);
 	CREATE INDEX IF NOT EXISTS idx_signer_session_seals_expires ON signer_session_seals(expires_at);
 
+	-- LNURL-auth linking keys (see postgres.go). Until 2026-10-16 the SQLite
+	-- backend had no table and refused to store them, so Lightning login
+	-- could never work on a SQLite install.
+	CREATE TABLE IF NOT EXISTS signer_lightning_keys (
+		id           TEXT PRIMARY KEY,
+		user_id      TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE,
+		linking_key  TEXT UNIQUE NOT NULL,
+		name         TEXT,
+		created_at   TEXT NOT NULL,
+		last_used_at TEXT
+	);
+	CREATE INDEX IF NOT EXISTS idx_signer_lightning_keys_user ON signer_lightning_keys(user_id);
+
 	-- In-flight LNURL-auth challenges (see postgres.go).
 	CREATE TABLE IF NOT EXISTS signer_lightning_challenges (
 		k1            TEXT PRIMARY KEY,
@@ -349,8 +405,442 @@ func (ss *SQLiteStorage) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_signer_lightning_challenges_expires ON signer_lightning_challenges(expires_at);
 	`
 
+	// A database made by an older version keeps its old tables: CREATE TABLE
+	// IF NOT EXISTS skips them, so columns added since would be missing, and
+	// the indexes below would fail on them and stop startup. Bring those tables
+	// up to this schema first.
+	if err := ss.upgradeTables(schema); err != nil {
+		return fmt.Errorf("upgrade tables from an older version: %w", err)
+	}
 	_, err := ss.db.Exec(schema)
 	return err
+}
+
+// upgradeTables adds to each existing table the columns the schema declares
+// and the table lacks, taking each column's type, NOT NULL and default from the
+// schema itself (built in a scratch in-memory database), so a column added to
+// the schema later is covered without a hand-written ALTER. SQLite cannot add a
+// primary-key column, or a NOT NULL one without a constant default: such a
+// column is reported as an error rather than added in a weaker form.
+//
+// It then revokes all but the most recently used live grant per (key, slot),
+// as postgres.go does, so the one-live-grant-per-slot index can be built on
+// data written before slots existed. Idempotent: once the index exists there
+// is never more than one live grant per slot, so later startups revoke nothing.
+func (ss *SQLiteStorage) upgradeTables(schema string) error {
+	want, err := schemaColumns(schema)
+	if err != nil {
+		return err
+	}
+	needed, err := ss.upgradeNeeded(schema, want)
+	if err != nil {
+		return err
+	}
+	if !needed {
+		return nil
+	}
+	// The upgrade drops grants naming no key and retires surplus ones, which
+	// cannot be undone in place: keep the database as it was first.
+	if err := ss.backupBeforeUpgrade(); err != nil {
+		return err
+	}
+	if err := ss.rebuildChangedTables(schema); err != nil {
+		return err
+	}
+	tx, err := ss.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for table, cols := range want {
+		have, err := tableColumns(tx, table)
+		if err != nil {
+			return err
+		}
+		if len(have) == 0 {
+			continue // new table: the schema creates it whole
+		}
+		for _, c := range cols {
+			if have[c.name] {
+				continue
+			}
+			if c.pk {
+				return fmt.Errorf("%s.%s: cannot add a primary-key column to an existing table", table, c.name)
+			}
+			def := fmt.Sprintf("ALTER TABLE %q ADD COLUMN %q %s", table, c.name, c.typ)
+			if c.notNull {
+				if !c.dflt.Valid {
+					return fmt.Errorf("%s.%s: NOT NULL with no default cannot be added to an existing table", table, c.name)
+				}
+				def += " NOT NULL"
+			}
+			if c.dflt.Valid {
+				def += " DEFAULT " + c.dflt.String
+			}
+			if _, err := tx.Exec(def); err != nil {
+				return fmt.Errorf("%s: %w", def, err)
+			}
+			slog.Info("sqlite: added column from a newer schema", "table", table, "column", c.name)
+		}
+	}
+
+	if have, err := tableColumns(tx, "signer_permissions"); err != nil {
+		return err
+	} else if len(have) > 0 {
+		surplus := `SELECT rowid FROM (
+					SELECT rowid, ROW_NUMBER() OVER (
+						PARTITION BY key_id, slot ORDER BY COALESCE(last_used_at, created_at) DESC) AS rn
+					FROM signer_permissions WHERE revoked_at IS NULL)
+				WHERE rn > 1`
+		if err := logGrants(tx, "sqlite upgrade: retired surplus grant (an older live grant in the same slot)",
+			`SELECT key_id, slot, user_pubkey FROM signer_permissions WHERE rowid IN (`+surplus+`)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE signer_permissions SET revoked_at = datetime('now'), revoked_by = 'schema-migration'
+			WHERE rowid IN (` + surplus + `)`); err != nil {
+			return fmt.Errorf("revoke surplus grants per slot: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// rebuildChangedTables recreates each existing table whose foreign keys
+// differ from the schema's: SQLite cannot ALTER a constraint, so the table is
+// rebuilt from the schema's own CREATE statement and its rows copied over
+// (columns both versions have; new ones take their defaults).
+//
+// The case this exists for: until 2026-09-03 signer_permissions.key_id
+// referenced signer_keys(id), while every writer stored the key's pubkey, so
+// with foreign keys on, no grant could be stored. Rows are carried over with
+// key_id resolved to the key's pubkey (whether it held the id or the pubkey);
+// a row naming no existing key is dropped and counted in the log.
+func (ss *SQLiteStorage) rebuildChangedTables(schema string) error {
+	scratch, err := scratchSchema(schema)
+	if err != nil {
+		return err
+	}
+	defer scratch.Close()
+	changed, err := ss.fkChangedTables(scratch)
+	if err != nil || len(changed) == 0 {
+		return err
+	}
+
+	// Foreign keys must be off while a table is dropped and renamed (the
+	// documented SQLite procedure); the pragma cannot change inside a
+	// transaction. The pool holds one connection, so it applies to the tx.
+	if _, err := ss.db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer ss.db.Exec(`PRAGMA foreign_keys = ON`)
+
+	tx, err := ss.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, table := range changed {
+		var create string
+		if err := scratch.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&create); err != nil {
+			return err
+		}
+		tmp := table + "__upgrade"
+		i := strings.Index(create, table)
+		if i < 0 {
+			return fmt.Errorf("%s: table name not found in its CREATE statement", table)
+		}
+		if _, err := tx.Exec(create[:i] + tmp + create[i+len(table):]); err != nil {
+			return fmt.Errorf("%s: create replacement: %w", table, err)
+		}
+		oldCols, err := tableColumns(tx, table)
+		if err != nil {
+			return err
+		}
+		newCols, err := tableColumns(tx, tmp)
+		if err != nil {
+			return err
+		}
+		type pair struct{ col, sel string }
+		var pairs []pair
+		for c := range newCols {
+			if !oldCols[c] {
+				continue
+			}
+			sel := fmt.Sprintf("o.%q", c)
+			if table == "signer_permissions" && c == "key_id" {
+				sel = `(SELECT k.pubkey FROM signer_keys k WHERE k.pubkey = o.key_id OR k.id = o.key_id LIMIT 1)`
+			}
+			pairs = append(pairs, pair{fmt.Sprintf("%q", c), sel})
+		}
+		sort.Slice(pairs, func(a, b int) bool { return pairs[a].col < pairs[b].col })
+		var cols, sel []string
+		for _, p := range pairs {
+			cols, sel = append(cols, p.col), append(sel, p.sel)
+		}
+		where := ""
+		if table == "signer_permissions" {
+			where = ` WHERE EXISTS (SELECT 1 FROM signer_keys k WHERE k.pubkey = o.key_id OR k.id = o.key_id)`
+			if err := logGrants(tx, "sqlite upgrade: dropped grant naming no key",
+				`SELECT o.key_id, '', o.user_pubkey FROM signer_permissions o
+				WHERE NOT EXISTS (SELECT 1 FROM signer_keys k WHERE k.pubkey = o.key_id OR k.id = o.key_id)`); err != nil {
+				return err
+			}
+		}
+		res, err := tx.Exec(fmt.Sprintf("INSERT INTO %q (%s) SELECT %s FROM %q o%s",
+			tmp, strings.Join(cols, ", "), strings.Join(sel, ", "), table, where))
+		if err != nil {
+			return fmt.Errorf("%s: copy rows: %w", table, err)
+		}
+		var before int64
+		if err := tx.QueryRow(fmt.Sprintf("SELECT count(*) FROM %q", table)).Scan(&before); err != nil {
+			return err
+		}
+		copied, _ := res.RowsAffected()
+		if _, err := tx.Exec(fmt.Sprintf("DROP TABLE %q", table)); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(fmt.Sprintf("ALTER TABLE %q RENAME TO %q", tmp, table)); err != nil {
+			return err
+		}
+		slog.Info("sqlite: rebuilt table whose foreign keys changed", "table", table,
+			"rows_copied", copied, "rows_dropped", before-copied)
+	}
+	return tx.Commit()
+}
+
+// fkChangedTables lists the existing tables whose foreign keys differ from
+// the schema (built in scratch).
+func (ss *SQLiteStorage) fkChangedTables(scratch *sql.DB) ([]string, error) {
+	tables, err := tableNames(scratch)
+	if err != nil {
+		return nil, err
+	}
+	var changed []string
+	for _, table := range tables {
+		have, err := foreignKeys(ss.db, table)
+		if err != nil {
+			return nil, err
+		}
+		if have == nil {
+			continue // not in this database yet
+		}
+		want, err := foreignKeys(scratch, table)
+		if err != nil {
+			return nil, err
+		}
+		if have.String() != want.String() {
+			changed = append(changed, table)
+		}
+	}
+	return changed, nil
+}
+
+// upgradeNeeded: an existing table lacks a column or has other foreign keys
+// than the schema, or a slot holds more than one live grant. A database this
+// version made, or already upgraded, needs nothing, so no backup is taken.
+func (ss *SQLiteStorage) upgradeNeeded(schema string, want map[string][]schemaColumn) (bool, error) {
+	for table, cols := range want {
+		have, err := tableColumns(ss.db, table)
+		if err != nil {
+			return false, err
+		}
+		if len(have) == 0 {
+			continue
+		}
+		for _, c := range cols {
+			if !have[c.name] {
+				return true, nil
+			}
+		}
+	}
+	scratch, err := scratchSchema(schema)
+	if err != nil {
+		return false, err
+	}
+	defer scratch.Close()
+	if changed, err := ss.fkChangedTables(scratch); err != nil || len(changed) > 0 {
+		return len(changed) > 0, err
+	}
+	if have, err := tableColumns(ss.db, "signer_permissions"); err != nil || len(have) == 0 {
+		return false, err
+	}
+	var surplus int
+	err = ss.db.QueryRow(`SELECT count(*) FROM (SELECT 1 FROM signer_permissions WHERE revoked_at IS NULL
+		GROUP BY key_id, slot HAVING count(*) > 1)`).Scan(&surplus)
+	return surplus > 0, err
+}
+
+// backupBeforeUpgrade copies the database beside itself, as it is before the
+// upgrade, with VACUUM INTO (a consistent copy of the open database). An
+// in-memory database has no file to keep and is not copied. If the copy
+// fails the upgrade does not run.
+func (ss *SQLiteStorage) backupBeforeUpgrade() error {
+	if ss.backedUp || ss.path == "" || ss.path == ":memory:" || strings.HasPrefix(ss.path, "file::memory:") {
+		return nil // a retried start keeps its first backup: the database as it was
+	}
+	// Nanoseconds in the name: a start that fails after the backup and is
+	// retried at once must not find its own earlier backup in the way
+	// (VACUUM INTO refuses an existing file, which would block startup).
+	backup := ss.path + ".pre-upgrade-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".bak"
+	if err := vacuumInto(ss.db, backup); err != nil {
+		// A failed copy (a full disk) can leave a partial or empty file that
+		// looks like a backup. Remove it so nobody restores from it.
+		if rmErr := os.Remove(backup); rmErr != nil && !os.IsNotExist(rmErr) {
+			slog.Warn("sqlite upgrade: could not remove the failed backup", "backup", backup, "error", rmErr)
+		}
+		return fmt.Errorf("back up the database before upgrading it (to %s): %w", backup, err)
+	}
+	ss.backedUp = true
+	slog.Info("sqlite upgrade: database backed up before upgrading", "backup", backup)
+	return nil
+}
+
+// logGrants logs one line per grant query returns (key, slot, client), so
+// anything the upgrade drops or retires can be found and restored from the
+// backup.
+func logGrants(q queryer, msg, query string) error {
+	rows, err := q.Query(query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, slot, client string
+		if err := rows.Scan(&key, &slot, &client); err != nil {
+			return err
+		}
+		slog.Warn(msg, "key_id", key, "slot", slot, "client_pubkey", client)
+	}
+	return rows.Err()
+}
+
+type queryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+type schemaColumn struct {
+	name, typ string
+	notNull   bool
+	dflt      sql.NullString
+	pk        bool
+}
+
+// schemaColumns builds schema in a scratch in-memory database and returns each
+// table's columns in declaration order.
+func schemaColumns(schema string) (map[string][]schemaColumn, error) {
+	scratch, err := scratchSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	defer scratch.Close()
+	tables, err := tableNames(scratch)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]schemaColumn, len(tables))
+	for _, table := range tables {
+		info, err := scratch.Query(fmt.Sprintf("PRAGMA table_info(%q)", table))
+		if err != nil {
+			return nil, err
+		}
+		for info.Next() {
+			var cid, notNull, pk int
+			var c schemaColumn
+			if err := info.Scan(&cid, &c.name, &c.typ, &notNull, &c.dflt, &pk); err != nil {
+				info.Close()
+				return nil, err
+			}
+			c.notNull, c.pk = notNull == 1, pk > 0
+			out[table] = append(out[table], c)
+		}
+		info.Close()
+	}
+	return out, nil
+}
+
+// scratchSchema builds schema in a fresh in-memory database.
+func scratchSchema(schema string) (*sql.DB, error) {
+	scratch, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return nil, err
+	}
+	scratch.SetMaxOpenConns(1) // one connection: each one has its own :memory: database
+	if _, err := scratch.Exec(schema); err != nil {
+		scratch.Close()
+		return nil, fmt.Errorf("build schema in scratch database: %w", err)
+	}
+	return scratch, nil
+}
+
+func tableNames(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// fkSet is a table's foreign keys as sorted "from->table(to) on-delete" lines.
+type fkSet []string
+
+func (f fkSet) String() string { return strings.Join(f, "; ") }
+
+// foreignKeys returns table's foreign keys, or nil if the table does not exist.
+func foreignKeys(db *sql.DB, table string) (fkSet, error) {
+	var exists int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if exists == 0 {
+		return nil, nil
+	}
+	rows, err := db.Query(fmt.Sprintf("PRAGMA foreign_key_list(%q)", table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := fkSet{}
+	for rows.Next() {
+		var id, seq int
+		var ref, from string
+		var to sql.NullString
+		var onUpdate, onDelete, match string
+		if err := rows.Scan(&id, &seq, &ref, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			return nil, err
+		}
+		out = append(out, fmt.Sprintf("%s->%s(%s) on delete %s", from, ref, to.String, onDelete))
+	}
+	sort.Strings(out)
+	return out, rows.Err()
+}
+
+// tableColumns returns the column names table has now; empty if it does not exist.
+func tableColumns(q queryer, table string) (map[string]bool, error) {
+	rows, err := q.Query(fmt.Sprintf("PRAGMA table_info(%q)", table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	have := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		have[name] = true
+	}
+	return have, rows.Err()
 }
 
 // Helper functions for JSON encoding/decoding arrays
@@ -2683,19 +3173,73 @@ func (ss *SQLiteStorage) DeleteExpiredRecoveryChallenges(ctx context.Context) (i
 // the interface for SQLite (dev/test).
 
 func (ss *SQLiteStorage) CreateLightningKey(ctx context.Context, key *LightningKey) error {
-	return fmt.Errorf("lightning key storage requires postgres storage")
+	_, err := ss.db.ExecContext(ctx, `
+		INSERT INTO signer_lightning_keys (id, user_id, linking_key, name, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		key.ID, key.UserID, key.LinkingKey, nullStr(key.Name), formatTime(key.CreatedAt.UTC()))
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrLightningKeyExists
+		}
+		return fmt.Errorf("create lightning key: %w", err)
+	}
+	return nil
+}
+
+func scanSQLiteLightningKey(scan func(...any) error) (*LightningKey, error) {
+	k := &LightningKey{}
+	var name, lastUsed sql.NullString
+	var created string
+	if err := scan(&k.ID, &k.UserID, &k.LinkingKey, &name, &created, &lastUsed); err != nil {
+		return nil, err
+	}
+	k.Name, k.CreatedAt = name.String, parseTime(created)
+	if lastUsed.Valid && lastUsed.String != "" {
+		t := parseTime(lastUsed.String)
+		k.LastUsedAt = &t
+	}
+	return k, nil
 }
 
 func (ss *SQLiteStorage) GetLightningKeyByLinkingKey(ctx context.Context, linkingKey string) (*LightningKey, error) {
-	return nil, ErrLightningKeyNotFound
+	k, err := scanSQLiteLightningKey(ss.db.QueryRowContext(ctx, `
+		SELECT id, user_id, linking_key, name, created_at, last_used_at
+		FROM signer_lightning_keys WHERE linking_key = ?`, linkingKey).Scan)
+	if err == sql.ErrNoRows {
+		return nil, ErrLightningKeyNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get lightning key: %w", err)
+	}
+	return k, nil
 }
 
 func (ss *SQLiteStorage) ListLightningKeys(ctx context.Context, userID string) ([]*LightningKey, error) {
-	return nil, nil
+	rows, err := ss.db.QueryContext(ctx, `
+		SELECT id, user_id, linking_key, name, created_at, last_used_at
+		FROM signer_lightning_keys WHERE user_id = ? ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list lightning keys: %w", err)
+	}
+	defer rows.Close()
+	var result []*LightningKey
+	for rows.Next() {
+		k, err := scanSQLiteLightningKey(rows.Scan)
+		if err != nil {
+			return nil, fmt.Errorf("scan lightning key: %w", err)
+		}
+		result = append(result, k)
+	}
+	return result, rows.Err()
 }
 
 func (ss *SQLiteStorage) UpdateLightningKeyLastUsed(ctx context.Context, id string) error {
-	return fmt.Errorf("lightning key storage requires postgres storage")
+	_, err := ss.db.ExecContext(ctx,
+		`UPDATE signer_lightning_keys SET last_used_at = ? WHERE id = ?`, formatTime(time.Now().UTC()), id)
+	if err != nil {
+		return fmt.Errorf("update lightning key last_used_at: %w", err)
+	}
+	return nil
 }
 
 func (ss *SQLiteStorage) ConfirmLightningKey(ctx context.Context, id string) error {
@@ -2703,7 +3247,11 @@ func (ss *SQLiteStorage) ConfirmLightningKey(ctx context.Context, id string) err
 }
 
 func (ss *SQLiteStorage) DeleteLightningKey(ctx context.Context, id string) error {
-	return fmt.Errorf("lightning key storage requires postgres storage")
+	_, err := ss.db.ExecContext(ctx, `DELETE FROM signer_lightning_keys WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete lightning key: %w", err)
+	}
+	return nil
 }
 
 func (ss *SQLiteStorage) RecordRetainedDeletion(ctx context.Context, userID, object, reason string) error {
