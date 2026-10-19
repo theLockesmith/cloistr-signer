@@ -386,7 +386,8 @@ func (ss *SQLiteStorage) initSchema() error {
 		linking_key  TEXT UNIQUE NOT NULL,
 		name         TEXT,
 		created_at   TEXT NOT NULL,
-		last_used_at TEXT
+		last_used_at TEXT,
+		confirmed_at TEXT -- the owner confirmed the account at a Lightning login (see postgres.go)
 	);
 	CREATE INDEX IF NOT EXISTS idx_signer_lightning_keys_user ON signer_lightning_keys(user_id);
 
@@ -3204,9 +3205,9 @@ func (ss *SQLiteStorage) CreateLightningKey(ctx context.Context, key *LightningK
 
 func scanSQLiteLightningKey(scan func(...any) error) (*LightningKey, error) {
 	k := &LightningKey{}
-	var name, lastUsed sql.NullString
+	var name, lastUsed, confirmed sql.NullString
 	var created string
-	if err := scan(&k.ID, &k.UserID, &k.LinkingKey, &name, &created, &lastUsed); err != nil {
+	if err := scan(&k.ID, &k.UserID, &k.LinkingKey, &name, &created, &lastUsed, &confirmed); err != nil {
 		return nil, err
 	}
 	k.Name, k.CreatedAt = name.String, parseTime(created)
@@ -3214,12 +3215,16 @@ func scanSQLiteLightningKey(scan func(...any) error) (*LightningKey, error) {
 		t := parseTime(lastUsed.String)
 		k.LastUsedAt = &t
 	}
+	if confirmed.Valid && confirmed.String != "" {
+		t := parseTime(confirmed.String)
+		k.ConfirmedAt = &t
+	}
 	return k, nil
 }
 
 func (ss *SQLiteStorage) GetLightningKeyByLinkingKey(ctx context.Context, linkingKey string) (*LightningKey, error) {
 	k, err := scanSQLiteLightningKey(ss.db.QueryRowContext(ctx, `
-		SELECT id, user_id, linking_key, name, created_at, last_used_at
+		SELECT id, user_id, linking_key, name, created_at, last_used_at, confirmed_at
 		FROM signer_lightning_keys WHERE linking_key = ?`, linkingKey).Scan)
 	if err == sql.ErrNoRows {
 		return nil, ErrLightningKeyNotFound
@@ -3232,7 +3237,7 @@ func (ss *SQLiteStorage) GetLightningKeyByLinkingKey(ctx context.Context, linkin
 
 func (ss *SQLiteStorage) ListLightningKeys(ctx context.Context, userID string) ([]*LightningKey, error) {
 	rows, err := ss.db.QueryContext(ctx, `
-		SELECT id, user_id, linking_key, name, created_at, last_used_at
+		SELECT id, user_id, linking_key, name, created_at, last_used_at, confirmed_at
 		FROM signer_lightning_keys WHERE user_id = ? ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list lightning keys: %w", err)
@@ -3258,8 +3263,19 @@ func (ss *SQLiteStorage) UpdateLightningKeyLastUsed(ctx context.Context, id stri
 	return nil
 }
 
+// ConfirmLightningKey records the first confirmation only; confirming again
+// leaves the original time.
 func (ss *SQLiteStorage) ConfirmLightningKey(ctx context.Context, id string) error {
-	return fmt.Errorf("lightning key storage requires postgres storage")
+	res, err := ss.db.ExecContext(ctx,
+		`UPDATE signer_lightning_keys SET confirmed_at = COALESCE(confirmed_at, ?) WHERE id = ?`,
+		formatTime(time.Now().UTC()), id)
+	if err != nil {
+		return fmt.Errorf("confirm lightning key: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrLightningKeyNotFound
+	}
+	return nil
 }
 
 func (ss *SQLiteStorage) DeleteLightningKey(ctx context.Context, id string) error {

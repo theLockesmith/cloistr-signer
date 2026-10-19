@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -84,5 +85,44 @@ func TestSQLiteLightning_LinkThenLogin(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &body)
 	if rr.Code != http.StatusOK || body["success"] != true || len(rr.Result().Cookies()) == 0 {
 		t.Fatalf("lightning login on SQLite: %d %v, want a sign-in", rr.Code, body)
+	}
+}
+
+// With confirmation on, a SQLite install stops a key's first login at the
+// account check, and "yes" completes it.
+func TestSQLiteLightning_ConfirmFirstLogin(t *testing.T) {
+	base, _ := testHandler(t)
+	store, err := storage.NewSQLiteStorage(filepath.Join(t.TempDir(), "signer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	h := NewHandler(base.config, signer.New(base.config, store, nil, nil, nil, nil, nil), store, nil, nil)
+	h.config.Lightning.ConfirmFirstLogin = true
+	ctx := context.Background()
+	if err := store.CreateUser(ctx, &storage.User{ID: testUserID, Username: "sqlite-ln", PasswordHash: "x", CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	priv, _ := secp256k1.GeneratePrivateKey()
+	linkReq := httptest.NewRequest(http.MethodPost, "/api/v1/users/lightning/link/challenge", nil)
+	addAuthHeader(t, h, linkReq)
+	k1, _ := sqliteLNChallenge(t, h, linkReq, h.handleLightningLinkChallenge)
+	sqliteLNCallback(t, h, priv, k1)
+
+	k1, sid := sqliteLNChallenge(t, h, httptest.NewRequest(http.MethodPost, "/api/v1/users/lightning/challenge", nil), h.handleLightningChallenge)
+	sqliteLNCallback(t, h, priv, k1)
+	rr := httptest.NewRecorder()
+	h.handleLightningStatus(rr, httptest.NewRequest(http.MethodGet, "/api/v1/users/lightning/status?session_id="+sid, nil))
+	var body map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &body)
+	if body["status"] != "confirm_account" || body["username"] != "sqlite-ln" || len(rr.Result().Cookies()) != 0 {
+		t.Fatalf("first login on SQLite: %d %v, want confirm_account for sqlite-ln and no cookie", rr.Code, body)
+	}
+	b, _ := json.Marshal(map[string]any{"session_id": sid, "confirm": true})
+	rr = httptest.NewRecorder()
+	h.handleLightningConfirm(rr, httptest.NewRequest(http.MethodPost, "/api/v1/users/lightning/confirm", bytes.NewReader(b)))
+	_ = json.Unmarshal(rr.Body.Bytes(), &body)
+	if rr.Code != http.StatusOK || body["success"] != true || len(rr.Result().Cookies()) == 0 {
+		t.Fatalf("confirm on SQLite: %d %v, want a sign-in", rr.Code, body)
 	}
 }
