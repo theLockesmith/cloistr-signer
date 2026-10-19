@@ -10,6 +10,10 @@ config.yaml
 # survived because they were tracked before the rule was added).
 /signer
 
+# Python
+__pycache__/
+*.pyc
+
 # Node
 node_modules/
 ui/node_modules/
