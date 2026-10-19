@@ -398,6 +398,7 @@ func (ss *SQLiteStorage) initSchema() error {
 		user_id       TEXT,
 		bound_user_id TEXT,
 		is_link       INTEGER NOT NULL DEFAULT 0,
+		linking_key   TEXT,
 		expires_at    TEXT NOT NULL,
 		created_at    TEXT NOT NULL
 	);
@@ -3241,6 +3242,10 @@ func (ss *SQLiteStorage) UpdateLightningKeyLastUsed(ctx context.Context, id stri
 	return nil
 }
 
+func (ss *SQLiteStorage) ConfirmLightningKey(ctx context.Context, id string) error {
+	return fmt.Errorf("lightning key storage requires postgres storage")
+}
+
 func (ss *SQLiteStorage) DeleteLightningKey(ctx context.Context, id string) error {
 	_, err := ss.db.ExecContext(ctx, `DELETE FROM signer_lightning_keys WHERE id = ?`, id)
 	if err != nil {
@@ -3302,19 +3307,19 @@ func (ss *SQLiteStorage) CreateLightningChallenge(ctx context.Context, c *Lightn
 
 func (ss *SQLiteStorage) getLightningChallenge(ctx context.Context, where string, arg string) (*LightningChallenge, error) {
 	c := &LightningChallenge{}
-	var userID, bound sql.NullString
+	var userID, bound, linkingKey sql.NullString
 	var expires, created string
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT k1, session_id, status, user_id, bound_user_id, is_link, expires_at, created_at
+		SELECT k1, session_id, status, user_id, bound_user_id, is_link, linking_key, expires_at, created_at
 		FROM signer_lightning_challenges WHERE `+where+` = ? AND datetime(expires_at) > datetime('now')`, arg).
-		Scan(&c.K1, &c.SessionID, &c.Status, &userID, &bound, &c.IsLink, &expires, &created)
+		Scan(&c.K1, &c.SessionID, &c.Status, &userID, &bound, &c.IsLink, &linkingKey, &expires, &created)
 	if err == sql.ErrNoRows {
 		return nil, ErrLightningChallengeNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	c.UserID, c.BoundUserID = userID.String, bound.String
+	c.UserID, c.BoundUserID, c.LinkingKey = userID.String, bound.String, linkingKey.String
 	c.ExpiresAt, c.CreatedAt = parseTime(expires), parseTime(created)
 	return c, nil
 }
@@ -3327,10 +3332,10 @@ func (ss *SQLiteStorage) GetLightningChallengeBySession(ctx context.Context, ses
 	return ss.getLightningChallenge(ctx, "session_id", sessionID)
 }
 
-func (ss *SQLiteStorage) AuthenticateLightningChallenge(ctx context.Context, k1, userID string) error {
+func (ss *SQLiteStorage) AuthenticateLightningChallenge(ctx context.Context, k1, userID, linkingKey string) error {
 	res, err := ss.db.ExecContext(ctx, `
-		UPDATE signer_lightning_challenges SET status = 'authenticated', user_id = ?
-		WHERE k1 = ? AND status = 'pending' AND datetime(expires_at) > datetime('now')`, userID, k1)
+		UPDATE signer_lightning_challenges SET status = 'authenticated', user_id = ?, linking_key = ?
+		WHERE k1 = ? AND status = 'pending' AND datetime(expires_at) > datetime('now')`, userID, nullStr(linkingKey), k1)
 	if err != nil {
 		return err
 	}

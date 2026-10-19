@@ -27,6 +27,11 @@ const (
 	EventSignFailed    EventType = "sign.failed"
 	EventKeyExported   EventType = "key.exported"
 
+	// Lightning (LNURL-auth) linking keys.
+	EventLightningKeyLinked    EventType = "lightning_key.linked"
+	EventLightningKeyConfirmed EventType = "lightning_key.confirmed"
+	EventLightningKeyRejected  EventType = "lightning_key.rejected" // "not my account" at first login; key unlinked
+
 	// Auth events
 	EventUserLogin       EventType = "user.login"
 	EventUserLoginFailed EventType = "user.login_failed"

@@ -367,6 +367,10 @@ type LightningKey struct {
 	Name       string     `json:"name,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	// ConfirmedAt: when the owner confirmed, at a Lightning login, that the
+	// account this key opens is theirs. Nil until then (every key linked
+	// before 2026-10-16 starts unconfirmed).
+	ConfirmedAt *time.Time `json:"confirmed_at,omitempty"`
 }
 
 // LightningChallenge is an in-flight LNURL-auth (LUD-04) login or link. It is
@@ -380,6 +384,7 @@ type LightningChallenge struct {
 	UserID      string    // set when authenticated
 	BoundUserID string    // link challenges: the signed-in user the key is linked to
 	IsLink      bool
+	LinkingKey  string // login challenges: the wallet key that signed it, set when authenticated
 	ExpiresAt   time.Time
 	CreatedAt   time.Time
 }
@@ -673,6 +678,7 @@ type Storage interface {
 	ListLightningKeys(ctx context.Context, userID string) ([]*LightningKey, error)
 	UpdateLightningKeyLastUsed(ctx context.Context, id string) error
 	DeleteLightningKey(ctx context.Context, id string) error
+	ConfirmLightningKey(ctx context.Context, id string) error
 
 	// LNURL-auth challenges, shared by every replica. Get* return only
 	// unexpired challenges. AuthenticateLightningChallenge moves a pending
@@ -683,7 +689,7 @@ type Storage interface {
 	CreateLightningChallenge(ctx context.Context, c *LightningChallenge) error
 	GetLightningChallenge(ctx context.Context, k1 string) (*LightningChallenge, error)
 	GetLightningChallengeBySession(ctx context.Context, sessionID string) (*LightningChallenge, error)
-	AuthenticateLightningChallenge(ctx context.Context, k1, userID string) error
+	AuthenticateLightningChallenge(ctx context.Context, k1, userID, linkingKey string) error
 	ConsumeLightningChallenge(ctx context.Context, sessionID string) (userID string, err error)
 	CleanExpiredLightningChallenges(ctx context.Context) error
 
@@ -2437,6 +2443,20 @@ func (m *MemoryStorage) DeleteLightningKey(ctx context.Context, id string) error
 	return nil
 }
 
+func (m *MemoryStorage) ConfirmLightningKey(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k, ok := m.lightningKeys[id]
+	if !ok {
+		return ErrLightningKeyNotFound
+	}
+	if k.ConfirmedAt == nil {
+		now := time.Now()
+		k.ConfirmedAt = &now
+	}
+	return nil
+}
+
 func (m *MemoryStorage) CreateLightningChallenge(ctx context.Context, c *LightningChallenge) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2481,14 +2501,14 @@ func (m *MemoryStorage) GetLightningChallengeBySession(ctx context.Context, sess
 	return nil, ErrLightningChallengeNotFound
 }
 
-func (m *MemoryStorage) AuthenticateLightningChallenge(ctx context.Context, k1, userID string) error {
+func (m *MemoryStorage) AuthenticateLightningChallenge(ctx context.Context, k1, userID, linkingKey string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	c := m.liveLightningChallenge(func(c *LightningChallenge) bool { return c.K1 == k1 && c.Status == "pending" })
 	if c == nil {
 		return ErrLightningChallengeNotFound
 	}
-	c.Status, c.UserID = "authenticated", userID
+	c.Status, c.UserID, c.LinkingKey = "authenticated", userID, linkingKey
 	return nil
 }
 

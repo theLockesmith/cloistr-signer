@@ -784,9 +784,18 @@ function LightningCard() {
       {/* QR / pending flow */}
       {phase === 'pending' && lnurl ? (
         <div style={{ marginTop: '8px' }}>
+          <p
+            data-testid="lightning-link-warning"
+            style={{ fontWeight: 600, marginBottom: '8px', fontSize: '14px' }}
+          >
+            LINK a wallet to your account on {window.location.hostname}
+          </p>
           <p style={{ color: 'var(--signer-text-muted)', marginBottom: '12px', fontSize: '13px' }}>
-            Open the link below in your Lightning wallet, or copy the LNURL code
-            and paste it into your wallet. This request expires after a few minutes.
+            Open the link below in YOUR OWN Lightning wallet, or copy the LNURL code
+            and paste it into your wallet. Your wallet should say it is linking, not
+            logging in. Never scan a link code someone else sends you: whoever's
+            wallet signs it can afterwards sign in to this account. This request
+            expires after a few minutes.
           </p>
 
           {/* LNURL code (selectable / paste into wallet) */}
