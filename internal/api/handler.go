@@ -4699,11 +4699,24 @@ type AuditLogEntry struct {
 	Details   map[string]interface{} `json:"details,omitempty"`
 }
 
+// auditLogLimit caps the entries one GET /api/v1/audit returns.
+const auditLogLimit = 100
+
+// handleAuditLogs: GET /api/v1/audit. Requires sign-in. An admin sees every
+// event; anyone else sees only their own (see auditEventOwner). The actor,
+// target and type query filters narrow that further and never widen it.
 func (h *Handler) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		h.errorResponse(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	isAdmin := h.isAdminClaims(r.Context(), claims)
 
 	// Get audit logger from signer
 	logger := h.signer.AuditLogger()
@@ -4715,7 +4728,10 @@ func (h *Handler) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	// Parse query parameters for filtering
 	query := r.URL.Query()
 	filter := &audit.Filter{
-		Limit: 100, // Default limit
+		Limit: auditLogLimit,
+	}
+	if !isAdmin {
+		filter.Limit = 0 // the caller's own events are picked out below, then capped
 	}
 
 	if actor := query.Get("actor"); actor != "" {
@@ -4735,6 +4751,24 @@ func (h *Handler) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 		h.errorResponse(w, http.StatusInternalServerError, "failed to query audit logs")
 		return
 	}
+	if !isAdmin {
+		owns, err := h.auditEventOwner(r.Context(), claims.UserID)
+		if err != nil {
+			slog.Error("audit logs: caller's keys lookup failed", "user_id", claims.UserID, "error", err)
+			h.errorResponse(w, http.StatusInternalServerError, "failed to query audit logs")
+			return
+		}
+		own := make([]*audit.Event, 0, len(events))
+		for _, ev := range events {
+			if owns(ev) {
+				own = append(own, ev)
+				if len(own) == auditLogLimit {
+					break
+				}
+			}
+		}
+		events = own
+	}
 
 	// Convert to response format
 	entries := make([]AuditLogEntry, 0, len(events))
@@ -4752,6 +4786,31 @@ func (h *Handler) handleAuditLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.jsonResponse(w, http.StatusOK, entries)
+}
+
+// auditEventOwner returns a test for whether an audit event belongs to
+// userID: the user acted (Actor), the user is the subject (Target), or the
+// event is about one of the user's signing keys or Lightning wallet keys
+// (Target holds the key's pubkey; sign events have the client as Actor).
+func (h *Handler) auditEventOwner(ctx context.Context, userID string) (func(*audit.Event) bool, error) {
+	mine := map[string]bool{}
+	keys, err := h.storage.ListKeys(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range keys {
+		mine[k.Pubkey] = true
+	}
+	lnKeys, err := h.storage.ListLightningKeys(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range lnKeys {
+		mine[k.LinkingKey] = true
+	}
+	return func(ev *audit.Event) bool {
+		return ev.Actor == userID || ev.Target == userID || (ev.Target != "" && mine[ev.Target])
+	}, nil
 }
 
 // FROST threshold signing handlers
