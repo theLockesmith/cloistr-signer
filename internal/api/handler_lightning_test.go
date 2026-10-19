@@ -79,10 +79,15 @@ func lnCallback(t *testing.T, h *Handler, query string) map[string]string {
 	return body
 }
 
-func lnStatus(t *testing.T, h *Handler, sessionID string) (int, map[string]any, []*http.Cookie) {
+// lnStatus polls from a browser holding the given cookies (none by default).
+func lnStatus(t *testing.T, h *Handler, sessionID string, browser ...*http.Cookie) (int, map[string]any, []*http.Cookie) {
 	t.Helper()
 	rr := httptest.NewRecorder()
-	h.handleLightningStatus(rr, httptest.NewRequest(http.MethodGet, "/api/v1/users/lightning/status?session_id="+sessionID, nil))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/lightning/status?session_id="+sessionID, nil)
+	for _, c := range browser {
+		req.AddCookie(c)
+	}
+	h.handleLightningStatus(rr, req)
 	var body map[string]any
 	_ = json.Unmarshal(rr.Body.Bytes(), &body)
 	return rr.Code, body, rr.Result().Cookies()
