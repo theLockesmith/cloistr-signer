@@ -72,14 +72,27 @@ func csrfBound(t *testing.T, confirmOn bool) (*Handler, *storage.MemoryStorage, 
 	return a, store, victim
 }
 
-func lnLoginUntilStatus(t *testing.T, h *Handler, w lnWallet) (sid string, code int, body map[string]any, cookies []*http.Cookie) {
+// lnLoginUntilStatus runs a login up to the first status poll, from a browser
+// holding the given cookies (none by default).
+func lnLoginUntilStatus(t *testing.T, h *Handler, w lnWallet, browser ...*http.Cookie) (sid string, code int, body map[string]any, cookies []*http.Cookie) {
 	t.Helper()
 	k1, sid := lnChallenge(t, h)
 	if cb := lnCallback(t, h, w.callbackQuery(t, k1)); cb["status"] != "OK" {
 		t.Fatalf("login callback: %v", cb)
 	}
-	code, body, cookies = lnStatus(t, h, sid)
+	code, body, cookies = lnStatus(t, h, sid, browser...)
 	return sid, code, body, cookies
+}
+
+// lnMarkers keeps the confirmation markers from a response's cookies.
+func lnMarkers(cookies []*http.Cookie) []*http.Cookie {
+	var out []*http.Cookie
+	for _, c := range cookies {
+		if strings.HasPrefix(c.Name, lightningConfirmCookiePrefix) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func lnConfirm(t *testing.T, h *Handler, sid string, yes bool) (int, map[string]any, []*http.Cookie) {
@@ -126,8 +139,9 @@ func TestLightningLink_CSRFVictimSaysNoUnlinks(t *testing.T) {
 	}
 }
 
-// "Yes": the login completes with a cookie, and the key's later logins no
-// longer ask (it is confirmed once, not every time).
+// "Yes": the login completes with a cookie, and the key's later logins in the
+// same browser no longer ask (once per browser, not every time). A browser
+// that never answered still asks.
 func TestLightningLink_ConfirmYesOnceThenDirect(t *testing.T) {
 	a, _, _, wallet := lightningReplicas(t) // ln-user's own key, linked before confirmation existed
 	a.config.Lightning.ConfirmFirstLogin = true
@@ -139,12 +153,73 @@ func TestLightningLink_ConfirmYesOnceThenDirect(t *testing.T) {
 	if code != http.StatusOK || body["success"] != true || len(cookies) == 0 {
 		t.Fatalf("confirm=true: %d %v cookies=%d, want a sign-in", code, body, len(cookies))
 	}
+	browser := lnMarkers(cookies)
+	if len(browser) != 1 {
+		t.Fatalf("confirm=true set %d confirmation markers, want 1", len(browser))
+	}
 	if code, body, _ := lnConfirm(t, a, sid, true); code != http.StatusBadRequest || body["status"] != "expired" {
 		t.Fatalf("second confirm: %d %v, want 400 expired", code, body)
 	}
-	_, code, body, cookies = lnLoginUntilStatus(t, a, wallet)
+	_, code, body, cookies = lnLoginUntilStatus(t, a, wallet, browser...)
 	if code != http.StatusOK || body["success"] != true || len(cookies) == 0 {
-		t.Fatalf("login after confirming: %d %v, want a direct sign-in", code, body)
+		t.Fatalf("login after confirming, same browser: %d %v, want a direct sign-in", code, body)
+	}
+	_, code, body, cookies = lnLoginUntilStatus(t, a, wallet)
+	if code != http.StatusOK || body["status"] != "confirm_account" || len(cookies) != 0 {
+		t.Fatalf("login after confirming, another browser: %d %v cookies=%d, want confirm_account", code, body, len(cookies))
+	}
+}
+
+// The marker is HttpOnly, Secure, SameSite=Strict, host-only, and sent only to
+// the Lightning endpoints.
+func TestLightningConfirm_MarkerCookieAttributes(t *testing.T) {
+	a, _, _, wallet := lightningReplicas(t)
+	a.config.Lightning.ConfirmFirstLogin = true
+	a.config.Auth.CookieDomain = ".example.test"
+	sid, _, _, _ := lnLoginUntilStatus(t, a, wallet)
+	_, _, cookies := lnConfirm(t, a, sid, true)
+	m := lnMarkers(cookies)
+	if len(m) != 1 {
+		t.Fatalf("markers = %d, want 1", len(m))
+	}
+	c := m[0]
+	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode || c.Path != lightningConfirmCookiePath || c.Domain != "" || c.MaxAge <= 0 {
+		t.Fatalf("marker cookie = %+v, want HttpOnly Secure Strict host-only path %s with a max age", c, lightningConfirmCookiePath)
+	}
+}
+
+// A marker covers the key AND the account it opened when the browser said
+// yes: if the same key now opens another account, or the marker is altered,
+// the browser is asked again.
+func TestLightningConfirm_MarkerBoundToAccount(t *testing.T) {
+	a, _, store, wallet := lightningReplicas(t)
+	a.config.Lightning.ConfirmFirstLogin = true
+	ctx := context.Background()
+	sid, _, _, _ := lnLoginUntilStatus(t, a, wallet)
+	_, _, cookies := lnConfirm(t, a, sid, true)
+	browser := lnMarkers(cookies)
+
+	tampered := *browser[0]
+	tampered.Value = "A" + tampered.Value[1:]
+	if tampered.Value == browser[0].Value {
+		tampered.Value = "B" + tampered.Value[1:]
+	}
+	if _, code, body, _ := lnLoginUntilStatus(t, a, wallet, &tampered); body["status"] != "confirm_account" {
+		t.Fatalf("altered marker: %d %v, want confirm_account", code, body)
+	}
+
+	// Same key id and wallet key, now on the attacker's account.
+	if err := store.CreateUser(ctx, &storage.User{ID: testUserID, Username: "attacker-b", PasswordHash: "x", CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteLightningKey(ctx, "lk1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateLightningKey(ctx, &storage.LightningKey{ID: "lk1", UserID: testUserID, LinkingKey: wallet.key(), CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, code, body, cookies := lnLoginUntilStatus(t, a, wallet, browser...); body["status"] != "confirm_account" || body["username"] != "attacker-b" || len(cookies) != 0 {
+		t.Fatalf("marker for ln-user, key now opens attacker-b: %d %v cookies=%d, want confirm_account for attacker-b", code, body, len(cookies))
 	}
 }
 
@@ -220,5 +295,28 @@ func TestLightningLink_AuditEvents(t *testing.T) {
 		if len(evs) != 1 || evs[0].Actor != testUserID || evs[0].Target != victim.key() {
 			t.Fatalf("%s events = %+v, want one for %s / the victim's key", typ, evs, testUserID)
 		}
+	}
+}
+
+// Review !241 (cloistr-pr): the attacker gets the victim's wallet to sign one
+// attacker-started LOGIN challenge too, answers "yes" in the attacker's own
+// browser, and the key is confirmed. The victim's later honest login, from
+// the victim's own browser, must still stop at the account check: a "yes" only
+// covers the browser that gave it.
+func TestReview241_AttackerPreConfirmsVictimKey(t *testing.T) {
+	h, _, victim := csrfBound(t, true)
+	sid, _, body, _ := lnLoginUntilStatus(t, h, victim) // attacker's login challenge, victim's wallet signs
+	if body["status"] != "confirm_account" {
+		t.Fatalf("attacker's login: %v", body)
+	}
+	if code, body, _ := lnConfirm(t, h, sid, true); code != http.StatusOK || body["success"] != true {
+		t.Fatalf("attacker confirm: %d %v", code, body)
+	}
+	_, code, body, cookies := lnLoginUntilStatus(t, h, victim) // victim, later, honestly
+	if body["success"] == true || len(cookies) != 0 {
+		t.Fatalf("BYPASS: victim's honest login after the attacker's pre-confirm: %d %v cookies=%d, want it stopped at the account check", code, body, len(cookies))
+	}
+	if code != http.StatusOK || body["status"] != "confirm_account" || body["username"] != "attacker-b" {
+		t.Fatalf("victim's login: %d %v, want 200 status=confirm_account username=attacker-b", code, body)
 	}
 }

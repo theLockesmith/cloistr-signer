@@ -344,11 +344,11 @@ func (h *Handler) handleLightningStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// A key's first login, when confirmation is on: show which account it
-	// opens and wait for POST /lightning/confirm. Nothing is consumed and no
-	// cookie is set here.
+	// When confirmation is on, a key's first login in each browser shows which
+	// account it opens and waits for POST /lightning/confirm. Nothing is
+	// consumed and no cookie is set here.
 	if !session.IsLink && h.config.Lightning.ConfirmFirstLogin {
-		if _, ok := h.unconfirmedLightningKey(r, session); ok {
+		if _, ok := h.lightningKeyNeedsConfirm(r, session); ok {
 			user, err := h.storage.GetUser(r.Context(), session.UserID)
 			if err != nil {
 				h.errorResponse(w, http.StatusInternalServerError, "user not found")
@@ -366,22 +366,25 @@ func (h *Handler) handleLightningStatus(w http.ResponseWriter, r *http.Request) 
 	h.completeLightningLogin(w, r, sessionID)
 }
 
-// unconfirmedLightningKey returns the key that signed an authenticated login
-// challenge when its owner has not yet confirmed it.
-func (h *Handler) unconfirmedLightningKey(r *http.Request, c *storage.LightningChallenge) (*storage.LightningKey, bool) {
+// lightningKeyNeedsConfirm returns the key that signed an authenticated login
+// challenge when this browser has not confirmed the account it opens. The
+// key's confirmed_at never suppresses the prompt: it may have been set from
+// an attacker's browser (see lightning_confirm_cookie.go).
+func (h *Handler) lightningKeyNeedsConfirm(r *http.Request, c *storage.LightningChallenge) (*storage.LightningKey, bool) {
 	if c.LinkingKey == "" {
 		return nil, false
 	}
 	lk, err := h.storage.GetLightningKeyByLinkingKey(r.Context(), c.LinkingKey)
-	if err != nil || lk.ConfirmedAt != nil || lk.UserID != c.UserID {
+	if err != nil || lk.UserID != c.UserID || h.lightningBrowserConfirmed(r, lk) {
 		return nil, false
 	}
 	return lk, true
 }
 
 // completeLightningLogin consumes an authenticated challenge (exactly once
-// across replicas) and issues the auth_token cookie.
-func (h *Handler) completeLightningLogin(w http.ResponseWriter, r *http.Request, sessionID string) {
+// across replicas) and issues the auth_token cookie, plus any extra cookies
+// (the browser's confirmation marker) only when the sign-in succeeds.
+func (h *Handler) completeLightningLogin(w http.ResponseWriter, r *http.Request, sessionID string, extra ...*http.Cookie) {
 	expired := func() {
 		h.jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"success": false,
@@ -430,6 +433,11 @@ func (h *Handler) completeLightningLogin(w http.ResponseWriter, r *http.Request,
 
 	slog.Info("lightning login successful", "user_id", user.ID, "username", user.Username)
 
+	for _, c := range extra {
+		if c != nil {
+			http.SetCookie(w, c)
+		}
+	}
 	http.SetCookie(w, h.newAuthCookie(token, expiresAt))
 	h.jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"success":  true,
@@ -441,8 +449,11 @@ func (h *Handler) completeLightningLogin(w http.ResponseWriter, r *http.Request,
 // NO AUTH: the session_id is the login browser's own secret (from the
 // challenge response). Answers a "confirm_account" status:
 //
-//	confirm=true:  the key is marked confirmed and the login completes exactly
-//	               as a status poll does (200 {success:true, username} + cookie).
+//	confirm=true:  the login completes exactly as a status poll does
+//	               (200 {success:true, username} + cookie), and this browser
+//	               gets an HttpOnly marker for the key and account, so its later
+//	               logins with the key skip the prompt. Other browsers still ask.
+//	               The key's confirmed_at is set for the record only.
 //	confirm=false: "not my account": the key is unlinked from that account and
 //	               an audit event recorded; no cookie (200 {success:false, status:"unlinked"}).
 //
@@ -483,7 +494,7 @@ func (h *Handler) handleLightningConfirm(w http.ResponseWriter, r *http.Request)
 		reply(http.StatusConflict, "pending")
 		return
 	}
-	lk, ok := h.unconfirmedLightningKey(r, c)
+	lk, ok := h.lightningKeyNeedsConfirm(r, c)
 	if !ok {
 		reply(http.StatusConflict, "not_required")
 		return
@@ -513,7 +524,7 @@ func (h *Handler) handleLightningConfirm(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	h.auditLightningKey(r, audit.EventLightningKeyConfirmed, lk.UserID, lk.LinkingKey, "confirmed the account at first Lightning login")
-	h.completeLightningLogin(w, r, req.SessionID)
+	h.completeLightningLogin(w, r, req.SessionID, h.lightningConfirmCookie(lk))
 }
 
 func (h *Handler) auditLightningKey(r *http.Request, typ audit.EventType, userID, linkingKey, action string) {
