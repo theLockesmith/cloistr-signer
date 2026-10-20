@@ -1291,20 +1291,6 @@ func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, ke
 		if slot == "" {
 			slot = storage.SlotDefault
 		}
-		// A new grant displaces any other client's grant in the same slot
-		// (one connection per slot per key). Refuse unless asked for, so a
-		// role's everyday grant is never revoked as a side effect.
-		if !req.Replace {
-			now := time.Now()
-			for _, p := range perms {
-				live := p.RevokedAt == nil && (p.ExpiresAt == nil || p.ExpiresAt.After(now))
-				if live && p.UserPubkey != req.UserPubkey && p.Slot == slot {
-					h.errorResponse(w, http.StatusConflict, fmt.Sprintf(
-						"slot %q already holds another client's grant; send replace=true to revoke it", slot))
-					return
-				}
-			}
-		}
 		perm = &storage.Permission{
 			KeyID:        key.Pubkey,
 			UserPubkey:   req.UserPubkey,
@@ -1315,8 +1301,22 @@ func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, ke
 		}
 	}
 
-	if err := h.storage.SetPermission(r.Context(), perm); err != nil {
-		h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+	// A new grant would displace any other client's live grant in the same
+	// slot (one connection per slot per key). Without replace it is stored only
+	// if the slot is free, checked atomically with the write, so a role's
+	// everyday grant is never revoked as a side effect, even by a concurrent
+	// request.
+	store := h.storage.SetPermission
+	if !req.Replace {
+		store = h.storage.SetPermissionIfSlotFree
+	}
+	if err := store(r.Context(), perm); err != nil {
+		if errors.Is(err, storage.ErrSlotOccupied) {
+			h.errorResponse(w, http.StatusConflict, fmt.Sprintf(
+				"slot %q already holds another client's grant; send replace=true to revoke it", perm.Slot))
+			return
+		}
+		h.setPermissionFailed(w, perm.KeyID, perm.UserPubkey, err)
 		return
 	}
 
@@ -1923,7 +1923,7 @@ func (h *Handler) handleRedeemToken(w http.ResponseWriter, r *http.Request, toke
 	}
 
 	if err := h.storage.SetPermission(r.Context(), perm); err != nil {
-		h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+		h.setPermissionFailed(w, perm.KeyID, perm.UserPubkey, err)
 		return
 	}
 
@@ -2212,7 +2212,7 @@ func (h *Handler) handleApproveRequest(w http.ResponseWriter, r *http.Request, r
 		}
 
 		if err := h.storage.SetPermission(r.Context(), perm); err != nil {
-			h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+			h.setPermissionFailed(w, perm.KeyID, perm.UserPubkey, err)
 			return
 		}
 	}
@@ -4345,7 +4345,7 @@ func (h *Handler) handleNostrConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.approveNostrConnect(r.Context(), key, clientPubkey, relay, secret, appName, appURL, appImage); err != nil {
-		h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+		h.setPermissionFailed(w, key.Pubkey, clientPubkey, err)
 		return
 	}
 
@@ -4530,7 +4530,7 @@ func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Reque
 	case hasConsent:
 		// Silent re-auth: prior consent exists, approve immediately.
 		if err := h.approveNostrConnect(r.Context(), key, clientPubkey, relay, secret, appName, appURL, appImage); err != nil {
-			h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+			h.setPermissionFailed(w, key.Pubkey, clientPubkey, err)
 			return
 		}
 		slog.Info("nostrconnect auto-approved (prior consent)",
@@ -4550,7 +4550,7 @@ func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Reque
 			// Non-fatal: approve anyway so the user is not blocked.
 		}
 		if err := h.approveNostrConnect(r.Context(), key, clientPubkey, relay, secret, appName, appURL, appImage); err != nil {
-			h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+			h.setPermissionFailed(w, key.Pubkey, clientPubkey, err)
 			return
 		}
 		slog.Info("nostrconnect approved with first-time consent",
@@ -4633,7 +4633,7 @@ func (h *Handler) handleNostrConnectSession(w http.ResponseWriter, r *http.Reque
 			// Non-fatal: approve anyway so the user is not blocked.
 		}
 		if err := h.approveNostrConnect(r.Context(), key, clientPubkey, relay, secret, appName, appURL, appImage); err != nil {
-			h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
+			h.setPermissionFailed(w, key.Pubkey, clientPubkey, err)
 			return
 		}
 		slog.Info("nostrconnect auto-approved (opt-out default)",
@@ -5996,4 +5996,11 @@ func (h *Handler) errorResponseCode(w http.ResponseWriter, status int, code, mes
 
 func (h *Handler) errorResponse(w http.ResponseWriter, status int, message string) {
 	h.jsonResponse(w, status, map[string]string{"error": message})
+}
+
+// setPermissionFailed answers a grant write that failed with a 500, and logs
+// the cause: the client only ever sees "failed to set permission".
+func (h *Handler) setPermissionFailed(w http.ResponseWriter, keyPubkey, client string, err error) {
+	slog.Error("failed to set permission", "key", shortPK(keyPubkey), "client", shortPK(client), "error", err)
+	h.errorResponse(w, http.StatusInternalServerError, "failed to set permission")
 }

@@ -811,6 +811,18 @@ func (ps *PostgresStorage) SetPrimaryKey(ctx context.Context, ownerID, keyID str
 // Permission management
 
 func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) error {
+	return ps.setPermission(ctx, perm, true)
+}
+
+func (ps *PostgresStorage) SetPermissionIfSlotFree(ctx context.Context, perm *Permission) error {
+	return ps.setPermission(ctx, perm, false)
+}
+
+// setPermission: with displaceLive false, only lapsed grants of other clients
+// are displaced, and a live one makes the insert hit the one-live-grant-per-slot
+// index, which is reported as ErrSlotOccupied. A concurrent winner is caught the
+// same way: the index check waits for its transaction and then fails.
+func (ps *PostgresStorage) setPermission(ctx context.Context, perm *Permission, displaceLive bool) error {
 	if perm.Slot == "" {
 		perm.Slot = SlotDefault
 	}
@@ -831,12 +843,21 @@ func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) 
 	}
 	defer tx.Rollback()
 
-	// Displace all other active grants on this key in the SAME slot.
+	// Writers to one (key, slot) take turns. Without this, a writer whose
+	// displace step waited on another's transaction cannot see the grant that
+	// transaction inserted, and its own insert then breaks the one-live-grant
+	// index (concurrent sign-ins got a 500). The lock is released at commit.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || '/' || $2, 0))`, perm.KeyID, perm.Slot); err != nil {
+		return err
+	}
+
+	// Displace other active grants on this key in the SAME slot.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE signer_permissions
 		SET revoked_at = NOW(), revoked_by = $2
-		WHERE key_id = $1 AND user_pubkey != $2 AND slot = $3 AND revoked_at IS NULL`,
-		perm.KeyID, perm.UserPubkey, perm.Slot)
+		WHERE key_id = $1 AND user_pubkey != $2 AND slot = $3 AND revoked_at IS NULL
+		  AND ($4 OR (expires_at IS NOT NULL AND expires_at <= NOW()))`,
+		perm.KeyID, perm.UserPubkey, perm.Slot, displaceLive)
 	if err != nil {
 		return err
 	}
@@ -862,6 +883,9 @@ func (ps *PostgresStorage) SetPermission(ctx context.Context, perm *Permission) 
 		perm.KeyID, perm.UserPubkey, perm.Slot, pq.Array(perm.Methods), intArrayToInt64(perm.AllowedKinds), perm.ExpiresAt, perm.PolicyID, perm.RequireApproval,
 		nullString(perm.AppName), nullString(perm.AppURL), nullString(perm.AppImage), nullString(perm.CustomName), perm.CreatedAt, perm.LastUsedAt)
 	if err != nil {
+		if !displaceLive && isDuplicateError(err) {
+			return ErrSlotOccupied
+		}
 		return err
 	}
 

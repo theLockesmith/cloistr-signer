@@ -48,6 +48,10 @@ var (
 	ErrLightningKeyExists   = errors.New("lightning key already exists")
 )
 
+// ErrSlotOccupied: SetPermissionIfSlotFree found another client's live grant in
+// the slot (or lost a race for it) and stored nothing.
+var ErrSlotOccupied = errors.New("slot already holds another client's live grant")
+
 // KeyType represents the type of key storage
 const (
 	KeyTypeLocal     = "local"      // Key is stored locally (has EncryptedNsec)
@@ -498,6 +502,12 @@ type Storage interface {
 
 	// Permission management
 	SetPermission(ctx context.Context, perm *Permission) error
+	// SetPermissionIfSlotFree stores perm like SetPermission, but only when no
+	// other client holds a live grant in its slot; otherwise ErrSlotOccupied and
+	// nothing is written. Lapsed grants of other clients are still displaced.
+	// The check and the write are one atomic step (the one-live-grant-per-slot
+	// index in SQL backends), so two concurrent callers cannot both win.
+	SetPermissionIfSlotFree(ctx context.Context, perm *Permission) error
 	GetPermission(ctx context.Context, keyID, userPubkey string) (*Permission, error)
 	ListPermissions(ctx context.Context, keyID string) ([]*Permission, error)
 	DeletePermission(ctx context.Context, keyID, userPubkey string) error
@@ -960,6 +970,14 @@ func (m *MemoryStorage) SetPrimaryKey(ctx context.Context, ownerID, keyID string
 }
 
 func (m *MemoryStorage) SetPermission(ctx context.Context, perm *Permission) error {
+	return m.setPermission(perm, true)
+}
+
+func (m *MemoryStorage) SetPermissionIfSlotFree(ctx context.Context, perm *Permission) error {
+	return m.setPermission(perm, false)
+}
+
+func (m *MemoryStorage) setPermission(perm *Permission, displaceLive bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -986,6 +1004,14 @@ func (m *MemoryStorage) SetPermission(ctx context.Context, perm *Permission) err
 
 	// Displace all other active grants on this key in the SAME slot.
 	now := time.Now()
+	if !displaceLive {
+		for pubkey, existing := range m.permissions[perm.KeyID] {
+			lapsed := existing.ExpiresAt != nil && !existing.ExpiresAt.After(now)
+			if pubkey != perm.UserPubkey && existing.RevokedAt == nil && existing.Slot == perm.Slot && !lapsed {
+				return ErrSlotOccupied
+			}
+		}
+	}
 	for pubkey, existing := range m.permissions[perm.KeyID] {
 		if pubkey != perm.UserPubkey && existing.RevokedAt == nil && existing.Slot == perm.Slot {
 			existing.RevokedAt = &now
