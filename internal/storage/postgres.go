@@ -843,7 +843,15 @@ func (ps *PostgresStorage) setPermission(ctx context.Context, perm *Permission, 
 	}
 	defer tx.Rollback()
 
-	// Displace all other active grants on this key in the SAME slot.
+	// Writers to one (key, slot) take turns. Without this, a writer whose
+	// displace step waited on another's transaction cannot see the grant that
+	// transaction inserted, and its own insert then breaks the one-live-grant
+	// index (concurrent sign-ins got a 500). The lock is released at commit.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || '/' || $2, 0))`, perm.KeyID, perm.Slot); err != nil {
+		return err
+	}
+
+	// Displace other active grants on this key in the SAME slot.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE signer_permissions
 		SET revoked_at = NOW(), revoked_by = $2

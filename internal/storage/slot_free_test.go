@@ -150,3 +150,40 @@ func TestSetPermissionIfSlotFree_ConcurrentRaceHasOneWinner(t *testing.T) {
 		})
 	}
 }
+
+// Takeover (SetPermission, the nostrconnect sign-in path) displaces any live
+// holder. Many clients taking over one slot at once must all succeed, last
+// writer wins, and one live grant remains. Without serialising the takeovers,
+// a racer's displace step misses a grant committed while it waited, and its
+// insert breaks the one-live-grant index: a 500 at sign-in.
+func TestSetPermission_ConcurrentTakeoverNeverFails(t *testing.T) {
+	for _, b := range slotFreeBackends(t) {
+		t.Run(b.name, func(t *testing.T) {
+			s, ctx := b.newFn(t), context.Background()
+			key := "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+			createTestKey(t, s, key)
+			const n = 8
+			var wg sync.WaitGroup
+			start := make(chan struct{})
+			errs := make([]error, n)
+			for i := 0; i < n; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					<-start
+					errs[i] = s.SetPermission(ctx, &Permission{KeyID: key, UserPubkey: fmt.Sprintf("taker-%02d", i), Slot: SlotDefault, Methods: []string{"connect", "sign_event"}})
+				}(i)
+			}
+			close(start)
+			wg.Wait()
+			for i, err := range errs {
+				if err != nil {
+					t.Errorf("taker %d: %v", i, err)
+				}
+			}
+			if got := liveIn(t, s, key, SlotDefault); len(got) != 1 {
+				t.Fatalf("live default grants = %v, want exactly one", got)
+			}
+		})
+	}
+}
