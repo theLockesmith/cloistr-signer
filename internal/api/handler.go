@@ -1132,6 +1132,15 @@ type SetPermissionRequest struct {
 	UserPubkey   string   `json:"user_pubkey"`
 	Methods      []string `json:"methods"`
 	AllowedKinds []int    `json:"allowed_kinds,omitempty"`
+	// Slot is the connection the grant belongs to (default or publisher).
+	// Empty keeps an existing grant's slot, or means default for a new one.
+	Slot string `json:"slot,omitempty"`
+	// ExpiresAt empty keeps an existing grant's expiry; a new grant without
+	// one never expires.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// Replace must be true to displace another client's active grant in the
+	// same slot. Without it the request is refused, never applied silently.
+	Replace bool `json:"replace,omitempty"`
 }
 
 type PermissionResponse struct {
@@ -1204,7 +1213,7 @@ func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, ke
 	}
 
 	// Validate pubkey format
-	if len(req.UserPubkey) != 64 {
+	if len(req.UserPubkey) != 64 || !isLowerHex(req.UserPubkey) {
 		h.errorResponse(w, http.StatusBadRequest, "invalid pubkey format")
 		return
 	}
@@ -1226,11 +1235,84 @@ func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, ke
 		return
 	}
 
-	perm := &storage.Permission{
-		KeyID:        key.Pubkey,
-		UserPubkey:   req.UserPubkey,
-		Methods:      req.Methods,
-		AllowedKinds: req.AllowedKinds,
+	if req.Slot != "" {
+		if err := storage.ValidateSlot(req.Slot); err != nil {
+			h.errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.ExpiresAt != nil && !req.ExpiresAt.After(time.Now()) {
+		h.errorResponse(w, http.StatusBadRequest, "expires_at is in the past")
+		return
+	}
+
+	var perm *storage.Permission
+	existing, err := h.storage.GetPermission(r.Context(), key.Pubkey, req.UserPubkey)
+	if err != nil && !errors.Is(err, storage.ErrNotAuthorized) {
+		// ErrPermissionExpired wraps ErrNotAuthorized: a lapsed grant is
+		// re-granted below. Anything else is a storage failure, never "no grant".
+		h.errorResponse(w, http.StatusInternalServerError, "failed to get permission")
+		return
+	}
+	if err == nil {
+		// Amend this client's live grant in place: its slot, expiry and app
+		// metadata stay unless the request names them.
+		if req.Slot != "" && req.Slot != existing.Slot {
+			h.errorResponse(w, http.StatusConflict, fmt.Sprintf(
+				"this client's grant is in slot %q; revoke it before granting it slot %q", existing.Slot, req.Slot))
+			return
+		}
+		amended := *existing
+		amended.Methods = req.Methods
+		amended.AllowedKinds = req.AllowedKinds
+		if req.ExpiresAt != nil {
+			amended.ExpiresAt = req.ExpiresAt
+		}
+		perm = &amended
+	} else {
+		perms, err := h.storage.ListPermissions(r.Context(), key.Pubkey)
+		if err != nil {
+			h.errorResponse(w, http.StatusInternalServerError, "failed to list permissions")
+			return
+		}
+		// A lapsed grant for this client keeps its slot when re-granted; the
+		// upsert would otherwise move it to whatever this request implies.
+		slot := req.Slot
+		for _, p := range perms {
+			if p.UserPubkey == req.UserPubkey {
+				if slot != "" && slot != p.Slot {
+					h.errorResponse(w, http.StatusConflict, fmt.Sprintf(
+						"this client's grant is in slot %q; revoke it before granting it slot %q", p.Slot, slot))
+					return
+				}
+				slot = p.Slot
+			}
+		}
+		if slot == "" {
+			slot = storage.SlotDefault
+		}
+		// A new grant displaces any other client's grant in the same slot
+		// (one connection per slot per key). Refuse unless asked for, so a
+		// role's everyday grant is never revoked as a side effect.
+		if !req.Replace {
+			now := time.Now()
+			for _, p := range perms {
+				live := p.RevokedAt == nil && (p.ExpiresAt == nil || p.ExpiresAt.After(now))
+				if live && p.UserPubkey != req.UserPubkey && p.Slot == slot {
+					h.errorResponse(w, http.StatusConflict, fmt.Sprintf(
+						"slot %q already holds another client's grant; send replace=true to revoke it", slot))
+					return
+				}
+			}
+		}
+		perm = &storage.Permission{
+			KeyID:        key.Pubkey,
+			UserPubkey:   req.UserPubkey,
+			Slot:         slot,
+			Methods:      req.Methods,
+			AllowedKinds: req.AllowedKinds,
+			ExpiresAt:    req.ExpiresAt,
+		}
 	}
 
 	if err := h.storage.SetPermission(r.Context(), perm); err != nil {
@@ -1250,6 +1332,7 @@ func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, ke
 		Methods:      perm.Methods,
 		AllowedKinds: perm.AllowedKinds,
 		PolicyID:     perm.PolicyID,
+		Slot:         perm.Slot,
 	})
 }
 
@@ -3387,7 +3470,7 @@ func (h *Handler) validateAuthHeader(r *http.Request) (*auth.JWTClaims, error) {
 
 // ensureSessionLive rejects a JWT whose server-side session has been deleted.
 //
-// WHY THIS EXISTS
+// # WHY THIS EXISTS
 //
 // JWT validation is stateless: signature plus expiry, nothing else. So until
 // this check existed, SIGNING OUT DID NOT REVOKE ANYTHING. handleUserLogout
