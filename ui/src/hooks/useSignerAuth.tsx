@@ -53,8 +53,10 @@ export interface SignerAuthContextValue extends SignerAuthState {
   loginWithPassword: (data: LoginRequest) => Promise<void>;
   /** Register new account with username/password */
   register: (data: RegisterRequest) => Promise<void>;
-  /** Logout and clear session */
+  /** Sign out of this session only and clear local state */
   logout: () => Promise<void>;
+  /** Sign out of every session of the account and clear local state */
+  logoutEverywhere: () => Promise<void>;
   /** Whether user is authenticated with signer backend */
   isAuthenticated: boolean;
   /** Clear error state */
@@ -195,9 +197,9 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     }
   }, [saveAuthState]);
 
-  const logout = useCallback(async () => {
+  const signOut = useCallback(async (everywhere: boolean) => {
     try {
-      await apiClient.logout();
+      await (everywhere ? apiClient.logoutEverywhere() : apiClient.logout());
     } catch {
       // Ignore logout errors
     }
@@ -206,6 +208,8 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     lockShareStorage();
     clearAuthState();
   }, [clearAuthState]);
+  const logout = useCallback(() => signOut(false), [signOut]);
+  const logoutEverywhere = useCallback(() => signOut(true), [signOut]);
 
   const clearError = useCallback(() => {
     setError(null);
@@ -376,6 +380,7 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     loginWithPassword,
     register,
     logout,
+    logoutEverywhere,
     isAuthenticated: (!!token || sessionMode) && !!user,
     clearError,
     showLoginModal,
@@ -393,6 +398,7 @@ export function SignerAuthProvider({ children }: SignerAuthProviderProps) {
     loginWithPassword,
     register,
     logout,
+    logoutEverywhere,
     clearError,
     showLoginModal,
     hideLoginModal,

@@ -405,11 +405,26 @@ Log in to get a JWT token.
 
 ### POST /api/v1/users/logout
 
-Log out and revoke session.
+Sign out **everywhere**: ends every session of the account (and revokes their
+Vault tokens), drops every stay-signed-in seal, unloads the account's keys and
+revokes every app consent. Clears this browser's cookies.
 
 **Headers:** `Authorization: Bearer <token>`
 
 **Response:** `200 OK`
+
+### POST /api/v1/users/session/logout
+
+Sign out of **this session only**: ends the session the presented token
+belongs to, revokes its Vault token, deletes its own stay-signed-in seals, and
+clears this browser's auth and split-half cookies. Other sessions, their
+seals, loaded keys and app consents are untouched. Idempotent: no token, an
+already-ended session or a session-less token still returns `200`. The web
+UI's "Log Out" uses this; "Sign Out Everywhere" uses `/users/logout`.
+
+**Headers:** `Authorization: Bearer <token>` (or the `auth_token` cookie)
+
+**Response:** `200 {"message": "signed out of this session"}`
 
 ### GET /api/v1/users/me
 

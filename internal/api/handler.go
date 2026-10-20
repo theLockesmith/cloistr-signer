@@ -338,7 +338,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// User management
 	mux.HandleFunc("/api/v1/users/register", h.handleUserRegister)
 	mux.HandleFunc("/api/v1/users/login", h.handleUserLogin)
-	mux.HandleFunc("/api/v1/users/logout", h.handleUserLogout)
+	mux.HandleFunc("/api/v1/users/logout", h.handleUserLogout) // sign out everywhere
+	mux.HandleFunc("/api/v1/users/session/logout", h.handleSessionLogout)
 	mux.HandleFunc("/api/v1/users/stay-signed-in/options", h.handleStaySignedInOptions)
 	mux.HandleFunc("/api/v1/users/stay-signed-in", h.handleStaySignedIn)
 	mux.HandleFunc("/api/v1/users/session/unseal", h.handleSessionUnseal)
@@ -2718,6 +2719,10 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 	// via ensureNostrConnectKeyLoaded if the pre-load hasn't finished yet.
 }
 
+// handleUserLogout: POST /api/v1/users/logout signs the account out
+// EVERYWHERE: every session and its Vault token, every seal, the loaded keys
+// and every app consent. To end only the caller's own login, use
+// POST /api/v1/users/session/logout (handleSessionLogout).
 func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -2765,6 +2770,48 @@ func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 	h.storage.RevokeAllAppConsents(r.Context(), claims.UserID)
 
 	h.jsonResponse(w, http.StatusOK, map[string]string{"message": "logged out successfully"})
+}
+
+// handleSessionLogout: POST /api/v1/users/session/logout ends only the session
+// the presented token belongs to: its row, its Vault token and its own
+// stay-signed-in seals, plus this browser's auth and split-half cookies.
+// Other sessions, their seals, the loaded keys and app consents are left
+// alone. Idempotent: no token, a dead token or a session-less token (config
+// admin) still answers 200 and clears the cookies.
+func (h *Handler) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	http.SetCookie(w, h.clearAuthCookie())
+	http.SetCookie(w, clearSplitHalfCookie())
+
+	done := func() { h.jsonResponse(w, http.StatusOK, map[string]string{"message": "signed out of this session"}) }
+	claims, err := h.validateAuthHeader(r)
+	if err != nil || claims.SessionID == "" {
+		done()
+		return
+	}
+	sess, err := h.storage.GetUserSession(r.Context(), claims.SessionID)
+	if err != nil || sess.UserID != claims.UserID {
+		done()
+		return
+	}
+	if sess.VaultToken != "" && h.vaultClient != nil && h.config.Vault.Enabled {
+		if err := h.vaultClient.RevokeToken(r.Context(), sess.VaultToken); err != nil {
+			slog.Warn("failed to revoke vault token", "error", err, "session_id", sess.ID)
+		}
+	}
+	if _, err := h.storage.DeleteSessionSealsBySession(r.Context(), sess.ID); err != nil {
+		slog.Warn("session logout: delete seals", "session_id", sess.ID, "error", err)
+	}
+	if err := h.storage.DeleteUserSession(r.Context(), sess.ID); err != nil {
+		slog.Error("session logout: delete session", "user_id", claims.UserID, "session_id", sess.ID, "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "could not end the session")
+		return
+	}
+	slog.Info("signed out of one session", "user_id", claims.UserID, "session_id", sess.ID)
+	done()
 }
 
 // resolveSigningPubkey returns the user's canonical signing pubkey under the
