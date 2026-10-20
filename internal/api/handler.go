@@ -345,6 +345,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/users/session/unseal", h.handleSessionUnseal)
 	mux.HandleFunc("/api/v1/users/session/refresh", h.handleSessionRefresh)
 	mux.HandleFunc("/api/v1/users/session", h.handleSessionState)
+	mux.HandleFunc("/api/v1/session", h.handleSessionProbe) // signed-in probe for the shared login UI
 	mux.HandleFunc("/api/v1/users/me", h.handleUserMe)
 	mux.HandleFunc("/api/v1/users/password", h.handleUserChangePassword)
 
