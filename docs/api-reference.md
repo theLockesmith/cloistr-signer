@@ -418,7 +418,9 @@ revokes every app consent. Clears this browser's cookies.
 Sign out of **this session only**: ends the session the presented token
 belongs to, revokes its Vault token, deletes its own stay-signed-in seals, and
 clears this browser's auth and split-half cookies. Other sessions, their
-seals, loaded keys and app consents are untouched. Idempotent: no token, an
+seals and app consents are untouched. Loaded keys are untouched too, unless
+this was the account's last unexpired session: then its keys are unloaded and
+locked, as with signing out everywhere. Idempotent: no token, an
 already-ended session or a session-less token still returns `200`. The web
 UI's "Log Out" uses this; "Sign Out Everywhere" uses `/users/logout`.
 

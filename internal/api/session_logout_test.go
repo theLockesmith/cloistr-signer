@@ -53,8 +53,15 @@ func newTwoSessions(t *testing.T) *twoSessions {
 	if err := store.RecordAppConsent(ctx, testUserID, "app-pubkey", "Some App"); err != nil {
 		t.Fatal(err)
 	}
+	// A Vault-encrypted key, unlocked in the signer runtime.
+	if err := store.CreateKey(ctx, &storage.Key{ID: "k-vault", Pubkey: sessionLogoutKey, OwnerID: testUserID, EncryptedNsec: "vault:v1:abc", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	h.signer.RegisterKey(sessionLogoutKey, "0000000000000000000000000000000000000000000000000000000000000001")
 	return f
 }
+
+const sessionLogoutKey = "cc00000000000000000000000000000000000000000000000000000000000003"
 
 func (f *twoSessions) call(method, path, token string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, nil)
@@ -86,6 +93,39 @@ func TestSessionLogout_EndsOnlyThisSession(t *testing.T) {
 	}
 	if ok, _ := f.store.HasAppConsent(ctx, testUserID, "app-pubkey"); !ok {
 		t.Fatalf("one-session sign-out revoked app consents")
+	}
+	if !f.h.signer.IsKeyLoaded(sessionLogoutKey) {
+		t.Fatalf("one-session sign-out unloaded the key while another session is live")
+	}
+}
+
+// Ending the account's LAST live session unloads its keys from the signer
+// runtime, as signing out everywhere does.
+func TestSessionLogout_LastSessionUnloadsKeys(t *testing.T) {
+	f := newTwoSessions(t)
+	f.call(http.MethodPost, "/api/v1/users/session/logout", f.tokA)
+	if !f.h.signer.IsKeyLoaded(sessionLogoutKey) {
+		t.Fatalf("key unloaded after the first of two sessions ended")
+	}
+	if rr := f.call(http.MethodPost, "/api/v1/users/session/logout", f.tokB); rr.Code != http.StatusOK {
+		t.Fatalf("last session logout: %d", rr.Code)
+	}
+	if f.h.signer.IsKeyLoaded(sessionLogoutKey) {
+		t.Fatalf("key still unlocked after the account's last session ended")
+	}
+}
+
+// An expired session row does not count as live: ending the only live
+// session still unloads the keys.
+func TestSessionLogout_ExpiredSessionsDoNotKeepKeysLoaded(t *testing.T) {
+	f := newTwoSessions(t)
+	if err := f.store.CreateUserSession(context.Background(), &storage.UserSession{ID: "sess-old", UserID: testUserID, ExpiresAt: time.Now().Add(-time.Hour), CreatedAt: time.Now().Add(-48 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	f.call(http.MethodPost, "/api/v1/users/session/logout", f.tokA)
+	f.call(http.MethodPost, "/api/v1/users/session/logout", f.tokB)
+	if f.h.signer.IsKeyLoaded(sessionLogoutKey) {
+		t.Fatalf("an expired session kept the key unlocked")
 	}
 }
 

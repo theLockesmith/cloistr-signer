@@ -2775,8 +2775,9 @@ func (h *Handler) handleUserLogout(w http.ResponseWriter, r *http.Request) {
 // handleSessionLogout: POST /api/v1/users/session/logout ends only the session
 // the presented token belongs to: its row, its Vault token and its own
 // stay-signed-in seals, plus this browser's auth and split-half cookies.
-// Other sessions, their seals, the loaded keys and app consents are left
-// alone. Idempotent: no token, a dead token or a session-less token (config
+// Other sessions, their seals and app consents are left alone, and so are the
+// loaded keys, unless this was the account's last live session: then the keys
+// are unloaded and locked as signing out everywhere does. Idempotent: no token, a dead token or a session-less token (config
 // admin) still answers 200 and clears the cookies.
 func (h *Handler) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -2811,7 +2812,30 @@ func (h *Handler) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	slog.Info("signed out of one session", "user_id", claims.UserID, "session_id", sess.ID)
+	if !h.hasLiveSession(r.Context(), claims.UserID) {
+		h.unloadUserVaultKeys(r.Context(), claims.UserID)
+		h.revokeUserSeals(r.Context(), claims.UserID, "last session signed out")
+		slog.Info("last session signed out: keys unloaded", "user_id", claims.UserID)
+	}
 	done()
+}
+
+// hasLiveSession reports whether userID still has an unexpired sign-in
+// session. A lookup failure counts as none, so keys are unloaded rather than
+// left unlocked; another live session reloads them on demand.
+func (h *Handler) hasLiveSession(ctx context.Context, userID string) bool {
+	sessions, err := h.storage.ListUserSessions(ctx, userID)
+	if err != nil {
+		slog.Warn("session logout: list remaining sessions", "user_id", userID, "error", err)
+		return false
+	}
+	now := time.Now()
+	for _, s := range sessions {
+		if s.ExpiresAt.After(now) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveSigningPubkey returns the user's canonical signing pubkey under the
