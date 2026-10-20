@@ -428,6 +428,19 @@ UI's "Log Out" uses this; "Sign Out Everywhere" uses `/users/logout`.
 
 **Response:** `200 {"message": "signed out of this session"}`
 
+### GET /api/v1/session
+
+"Am I signed in, and as whom?" for the shared login UI. Accepts the
+`auth_token` cookie or a bearer token. No side effects: it never loads or
+unlocks a key and never touches the session (for "can this sign-in still
+sign?" use `GET /api/v1/users/session`). `Cache-Control: no-store`.
+
+**Response:** always `200`
+- signed out (no token, an invalid or expired token, or an ended session): `{"authenticated": false}`
+- signed in: `{"authenticated": true, "pubkey": "<hex>"}`, the signing pubkey, else the account's platform pubkey
+
+No keys are listed.
+
 ### GET /api/v1/users/me
 
 Get current user info.

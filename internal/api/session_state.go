@@ -131,3 +131,41 @@ func (h *Handler) sessionHasSplitSeal(r *http.Request, sessionID string) bool {
 	}
 	return false
 }
+
+// GET /api/v1/session answers only "is this browser signed in, and as whom?"
+// for the shared login UI, cookie or bearer:
+//
+//	200 {"authenticated": false}
+//	200 {"authenticated": true, "pubkey": "<hex>"}
+//
+// Signed out is a normal answer, not a 401, so a signed-out page does not log
+// an error. No side effects: it never loads or unlocks a key and never touches
+// the session (use GET /api/v1/users/session for "can it still sign?"). pubkey
+// is the signing pubkey, else the account's platform pubkey, else, for a
+// config-admin login, the admin pubkey itself.
+func (h *Handler) handleSessionProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		h.errorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	signedOut := func() { h.jsonResponse(w, http.StatusOK, map[string]bool{"authenticated": false}) }
+
+	claims, err := h.validateAuthHeader(r)
+	if err != nil {
+		signedOut()
+		return
+	}
+	pubkey, ok := h.resolveSigningPubkey(r.Context(), claims.UserID)
+	if !ok {
+		if user, err := h.storage.GetUser(r.Context(), claims.UserID); err == nil && user.Pubkey != "" {
+			pubkey = user.Pubkey
+		} else if h.config.Auth.IsAdminPubkey(claims.UserID) {
+			pubkey = claims.UserID
+		} else {
+			signedOut() // no account behind the token
+			return
+		}
+	}
+	h.jsonResponse(w, http.StatusOK, map[string]interface{}{"authenticated": true, "pubkey": pubkey})
+}
