@@ -5,7 +5,7 @@ import apiClient from '../api/client';
 import type { PasskeyRegistrationFinishRequest, LightningKey } from '../types/api';
 
 export function SettingsPage() {
-  const { user, logout } = useSignerAuth();
+  const { user, logout, logoutEverywhere } = useSignerAuth();
 
   return (
     <div>
@@ -74,11 +74,17 @@ export function SettingsPage() {
             Danger Zone
           </h2>
           <p style={{ color: 'var(--signer-text-muted)', marginBottom: '16px' }}>
-            Logging out will end your session. You'll need to sign in again to access your keys.
+            Log Out ends this session only; your other devices stay signed in. Sign Out
+            Everywhere ends every session, locks your keys and revokes every app's access.
           </p>
-          <button className="btn btn-danger" onClick={logout}>
-            Log Out
-          </button>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <button className="btn btn-danger" onClick={logout}>
+              Log Out
+            </button>
+            <button className="btn btn-danger" onClick={logoutEverywhere} data-testid="logout-everywhere">
+              Sign Out Everywhere
+            </button>
+          </div>
         </div>
 
         {/* Export a key */}

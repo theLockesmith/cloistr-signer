@@ -103,7 +103,13 @@ class ApiClient {
     });
   }
 
+  /** Sign out of this session only; other devices stay signed in. */
   async logout(): Promise<void> {
+    return this.fetch('/users/session/logout', { method: 'POST' });
+  }
+
+  /** Sign out everywhere: every session, loaded keys, seals and app consents. */
+  async logoutEverywhere(): Promise<void> {
     return this.fetch('/users/logout', { method: 'POST' });
   }
 
