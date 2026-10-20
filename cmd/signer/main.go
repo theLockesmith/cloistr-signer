@@ -263,8 +263,19 @@ func main() {
 	apiHandler.RegisterRoutes(mux)
 	webHandler.RegisterRoutes(mux)
 
-	// Add Prometheus metrics endpoint
-	mux.Handle("/metrics", metrics.Handler())
+	// Prometheus metrics: on a separate in-cluster listener when
+	// METRICS_ADDRESS is set, otherwise on the public mux (legacy).
+	metricsServer := metrics.Setup(mux, cfg.Server.MetricsAddress)
+	if metricsServer != nil {
+		go func() {
+			slog.Info("metrics listener enabled", "address", metricsServer.Addr)
+			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("metrics listener error", "error", err)
+			}
+		}()
+	} else {
+		slog.Warn("metrics served on the public port; set METRICS_ADDRESS to keep them in-cluster")
+	}
 
 	// Wrap with metrics middleware, then with CORS middleware for
 	// cross-subdomain SSO (unified-auth-design §5). CORS wraps metrics so that
@@ -526,6 +537,15 @@ func main() {
 			defer closing.Done()
 			if err := forwardServer.Shutdown(shutdownCtx); err != nil {
 				slog.Error("forward server shutdown error", "error", err)
+			}
+		}()
+	}
+	if metricsServer != nil {
+		closing.Add(1)
+		go func() {
+			defer closing.Done()
+			if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+				slog.Error("metrics server shutdown error", "error", err)
 			}
 		}()
 	}

@@ -421,3 +421,14 @@ func TestSealKeyfileBesideDB(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadMetricsAddress(t *testing.T) {
+	t.Setenv("METRICS_ADDRESS", ":9100")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.MetricsAddress != ":9100" {
+		t.Fatalf("Server.MetricsAddress = %q, want :9100", cfg.Server.MetricsAddress)
+	}
+}

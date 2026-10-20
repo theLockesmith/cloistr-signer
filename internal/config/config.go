@@ -178,6 +178,9 @@ type ProxyConfig struct {
 // ServerConfig holds HTTP server configuration
 type ServerConfig struct {
 	Address string `yaml:"address"`
+	// MetricsAddress (METRICS_ADDRESS, e.g. ":9100"): serve /metrics only on
+	// this separate in-cluster listener. Empty keeps it on the public port.
+	MetricsAddress string `yaml:"metrics_address"`
 }
 
 // StorageConfig holds storage backend configuration
@@ -364,6 +367,7 @@ func Load() (*Config, error) {
 	if addr := os.Getenv("SERVER_ADDRESS"); addr != "" {
 		cfg.Server.Address = addr
 	}
+	cfg.Server.MetricsAddress = os.Getenv("METRICS_ADDRESS")
 
 	if relays := os.Getenv("RELAYS"); relays != "" {
 		cfg.Relays = strings.Split(relays, ",")
