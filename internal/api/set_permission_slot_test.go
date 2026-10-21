@@ -203,3 +203,25 @@ func TestSetPermission_LookupFailureIsServerErrorNoWrite(t *testing.T) {
 		t.Fatalf("grant changed after a failed lookup: %v", p.AllowedKinds)
 	}
 }
+
+// Amending a sliding grant keeps it sliding; naming an expiry fixes it.
+func TestSetPermission_AmendSlidingGrant(t *testing.T) {
+	h, store, _ := slottedRoleKey(t)
+	soon := time.Now().Add(10 * 24 * time.Hour)
+	if err := store.SetPermission(context.Background(), &storage.Permission{KeyID: slotKeyPub, UserPubkey: everydayCli, Methods: []string{"sign_event"}, ExpiresAt: &soon, SlidingExpiry: true}); err != nil {
+		t.Fatal(err)
+	}
+	if rr := postPermission(t, h, `{"user_pubkey":"`+everydayCli+`","methods":["sign_event","nip44_encrypt"]}`); rr.Code != http.StatusOK {
+		t.Fatalf("amend: %d %s", rr.Code, rr.Body.String())
+	}
+	if p := mustLive(t, store, everydayCli); !p.SlidingExpiry {
+		t.Fatal("amend without an expiry stopped the grant sliding")
+	}
+	later := time.Now().Add(40 * 24 * time.Hour).UTC().Truncate(time.Second)
+	if rr := postPermission(t, h, `{"user_pubkey":"`+everydayCli+`","methods":["sign_event"],"expires_at":"`+later.Format(time.RFC3339)+`"}`); rr.Code != http.StatusOK {
+		t.Fatalf("amend with expiry: %d %s", rr.Code, rr.Body.String())
+	}
+	if p := mustLive(t, store, everydayCli); p.SlidingExpiry || !p.ExpiresAt.Equal(later) {
+		t.Fatalf("after naming an expiry: sliding %v expires %v, want fixed at %v", p.SlidingExpiry, p.ExpiresAt, later)
+	}
+}

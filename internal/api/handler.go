@@ -1278,7 +1278,9 @@ func (h *Handler) handleSetPermission(w http.ResponseWriter, r *http.Request, ke
 		amended.Methods = req.Methods
 		amended.AllowedKinds = req.AllowedKinds
 		if req.ExpiresAt != nil {
+			// A named expiry is fixed: it no longer slides with use.
 			amended.ExpiresAt = req.ExpiresAt
+			amended.SlidingExpiry = false
 		}
 		perm = &amended
 	} else {
