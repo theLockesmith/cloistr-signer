@@ -2166,6 +2166,36 @@ func TestHandleCreateKey_SetsOwner(t *testing.T) {
 	}
 }
 
+// single_grant is taken at creation and reported back; it defaults to false.
+func TestHandleCreateKey_SingleGrant(t *testing.T) {
+	h, store := testHandler(t)
+	token, _, _ := auth.GenerateJWT(h.authConfig, "fleet-user", "fleet")
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{"name": "arbiter:role", "single_grant": true}`, true},
+		{`{"name": "everyday"}`, false},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/keys", strings.NewReader(tc.body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		h.handleKeys(rr, req)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("%s: status %d %s", tc.body, rr.Code, rr.Body.String())
+		}
+		var resp KeyResponse
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		key, err := store.GetKey(context.Background(), resp.ID)
+		if err != nil || key.SingleGrant != tc.want || resp.SingleGrant != tc.want {
+			t.Fatalf("%s: stored %+v (%v), response single_grant %v; want %v", tc.body, key, err, resp.SingleGrant, tc.want)
+		}
+	}
+}
+
 // Session and Vault token tests
 
 func TestHandleUserLogin_CreatesSession(t *testing.T) {

@@ -256,3 +256,24 @@ func TestSlidingGrant_UseSlidesExpiryAtMostDaily(t *testing.T) {
 		})
 	}
 }
+
+// A user-key grant stored with no expiry gets a sliding SlidingGrantTTL; a
+// single-grant key's grant keeps the no-expiry it was given.
+func TestUserKey_GrantWithNoExpiryGetsSlidingExpiry(t *testing.T) {
+	for _, b := range slotFreeBackends(t) {
+		t.Run(b.name, func(t *testing.T) {
+			s, ctx := b.newFn(t), context.Background()
+			createGrantTestKey(t, s, userGrantKey, false)
+			createGrantTestKey(t, s, singleGrantKey, true)
+			signIn(t, s, userGrantKey, "mail")
+			signIn(t, s, singleGrantKey, "agent")
+			p, err := s.GetPermission(ctx, userGrantKey, "mail")
+			if err != nil || !p.SlidingExpiry || p.ExpiresAt == nil || !near(*p.ExpiresAt, time.Now().Add(SlidingGrantTTL)) {
+				t.Fatalf("user grant = %+v, %v; want sliding, expiring in ~%v", p, err, SlidingGrantTTL)
+			}
+			if p, err := s.GetPermission(ctx, singleGrantKey, "agent"); err != nil || p.ExpiresAt != nil || p.SlidingExpiry {
+				t.Fatalf("single-grant key's grant = %+v, %v; want no expiry, not sliding", p, err)
+			}
+		})
+	}
+}
