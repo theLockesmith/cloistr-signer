@@ -537,6 +537,10 @@ type CreateKeyRequest struct {
 	PrivateKey string `json:"private_key,omitempty"` // Optional - generate if not provided (for local keys)
 	BunkerURI  string `json:"bunker_uri,omitempty"`  // For proxy keys - bunker:// URI to upstream signer
 	KeyType    string `json:"key_type,omitempty"`    // "local" or "proxy" (default: local)
+	// SingleGrant: one live grant per slot, a new client displacing the
+	// previous one (the fleet's role keys). Default false: one grant per app.
+	// Fixed at creation. See storage.Key.SingleGrant.
+	SingleGrant bool `json:"single_grant,omitempty"`
 }
 
 type KeyResponse struct {
@@ -552,6 +556,7 @@ type KeyResponse struct {
 	Relays          []string  `json:"relays,omitempty"` // Custom relays for this key
 	CreatedAt       time.Time `json:"created_at"`
 	IsPrimary       bool      `json:"is_primary"`
+	SingleGrant     bool      `json:"single_grant"`
 }
 
 func (h *Handler) handleKeys(w http.ResponseWriter, r *http.Request) {
@@ -675,6 +680,7 @@ func (h *Handler) handleListKeys(w http.ResponseWriter, r *http.Request) {
 			Relays:          key.Relays,
 			CreatedAt:       key.CreatedAt,
 			IsPrimary:       key.IsPrimary,
+			SingleGrant:     key.SingleGrant,
 		}
 	}
 
@@ -771,6 +777,7 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		EncryptionMethod: encryptionMethod,
 		CreatedAt:        time.Now(),
 		OwnerID:          claims.UserID,
+		SingleGrant:      req.SingleGrant,
 	}
 
 	if err := h.storage.CreateKey(r.Context(), key); err != nil {
@@ -799,6 +806,7 @@ func (h *Handler) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 		IsPrimary:       key.IsPrimary,
+		SingleGrant:     key.SingleGrant,
 	})
 }
 
@@ -868,6 +876,7 @@ func (h *Handler) handleCreateProxyKey(w http.ResponseWriter, r *http.Request, r
 		UpstreamPubkey:   uri.SignerPubkey, // The upstream signer's pubkey
 		CreatedAt:        time.Now(),
 		OwnerID:          claims.UserID,
+		SingleGrant:      req.SingleGrant,
 	}
 
 	if err := h.storage.CreateKey(r.Context(), key); err != nil {
@@ -901,6 +910,7 @@ func (h *Handler) handleCreateProxyKey(w http.ResponseWriter, r *http.Request, r
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 		IsPrimary:       key.IsPrimary,
+		SingleGrant:     key.SingleGrant,
 	})
 }
 
@@ -941,6 +951,7 @@ func (h *Handler) handleGetKey(w http.ResponseWriter, r *http.Request, id string
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 		IsPrimary:       key.IsPrimary,
+		SingleGrant:     key.SingleGrant,
 	})
 }
 
@@ -1023,6 +1034,7 @@ func (h *Handler) handleUpdateKey(w http.ResponseWriter, r *http.Request, id str
 		Relays:          key.Relays,
 		CreatedAt:       key.CreatedAt,
 		IsPrimary:       key.IsPrimary,
+		SingleGrant:     key.SingleGrant,
 	})
 }
 

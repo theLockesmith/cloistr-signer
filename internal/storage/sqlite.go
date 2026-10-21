@@ -146,6 +146,8 @@ func (ss *SQLiteStorage) initSchema() error {
 		-- The account's identity key, as an attribute rather than an inference
 		-- from Name == "Primary". See storage.Key.IsPrimary.
 		is_primary INTEGER NOT NULL DEFAULT 0,
+		-- See storage.Key.SingleGrant. Set at creation only.
+		single_grant INTEGER NOT NULL DEFAULT 0,
 		relays TEXT,  -- JSON array
 		created_at TEXT NOT NULL DEFAULT (datetime('now')),
 		created_by TEXT,
@@ -189,12 +191,19 @@ func (ss *SQLiteStorage) initSchema() error {
 		last_used_at TEXT,
 		revoked_at TEXT,
 		revoked_by TEXT,
+		-- Copied from the key's single_grant when the grant is written (the
+		-- key's flag never changes), so the index below can cover it.
+		single_grant INTEGER NOT NULL DEFAULT 0,
+		sliding_expiry INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (key_id, user_pubkey),
 		FOREIGN KEY (key_id) REFERENCES signer_keys(pubkey) ON DELETE CASCADE
 	);
 
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_grant_per_key_slot
-		ON signer_permissions(key_id, slot) WHERE revoked_at IS NULL;
+	-- One live grant per (key, slot) on a single-grant key only: a user key
+	-- holds one grant per signed-in app side by side.
+	DROP INDEX IF EXISTS idx_one_active_grant_per_key_slot;
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_single_grant_per_key_slot
+		ON signer_permissions(key_id, slot) WHERE revoked_at IS NULL AND single_grant = 1;
 
 	-- Pending requests
 	CREATE TABLE IF NOT EXISTS signer_pending_requests (
@@ -454,6 +463,12 @@ func (ss *SQLiteStorage) upgradeTables(schema string) error {
 	}
 	defer tx.Rollback()
 
+	keyCols, err := tableColumns(tx, "signer_keys")
+	if err != nil {
+		return err
+	}
+	backfillSingleGrant := len(keyCols) > 0 && !keyCols["single_grant"]
+
 	for table, cols := range want {
 		have, err := tableColumns(tx, table)
 		if err != nil {
@@ -486,13 +501,19 @@ func (ss *SQLiteStorage) upgradeTables(schema string) error {
 		}
 	}
 
+	if backfillSingleGrant {
+		if err := backfillSingleGrantSQLite(tx); err != nil {
+			return err
+		}
+	}
+
 	if have, err := tableColumns(tx, "signer_permissions"); err != nil {
 		return err
 	} else if len(have) > 0 {
 		surplus := `SELECT rowid FROM (
 					SELECT rowid, ROW_NUMBER() OVER (
 						PARTITION BY key_id, slot ORDER BY COALESCE(last_used_at, created_at) DESC) AS rn
-					FROM signer_permissions WHERE revoked_at IS NULL)
+					FROM signer_permissions WHERE revoked_at IS NULL AND single_grant = 1)
 				WHERE rn > 1`
 		if err := logGrants(tx, "sqlite upgrade: retired surplus grant (an older live grant in the same slot)",
 			`SELECT key_id, slot, user_pubkey FROM signer_permissions WHERE rowid IN (`+surplus+`)`); err != nil {
@@ -504,6 +525,31 @@ func (ss *SQLiteStorage) upgradeTables(schema string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// backfillSingleGrantSQLite runs once, when single_grant is first added: the
+// fleet account's keys become single-grant, every grant copies its key's flag
+// (a grant naming no key keeps the old one-per-slot rule), and a live user-key
+// grant with no expiry gets a full sliding SlidingGrantTTL, so nobody is signed
+// out by the upgrade. Mirrors the Postgres migration.
+func backfillSingleGrantSQLite(tx *sql.Tx) error {
+	now := time.Now()
+	for _, q := range []struct {
+		sql  string
+		args []any
+	}{
+		{`UPDATE signer_keys SET single_grant = 1
+			WHERE owner_id IN (SELECT id FROM signer_web_accounts WHERE username = ?)`, []any{FleetAccountUsername}},
+		{`UPDATE signer_permissions SET single_grant = NOT EXISTS (
+			SELECT 1 FROM signer_keys k WHERE k.pubkey = signer_permissions.key_id AND k.single_grant = 0)`, nil},
+		{`UPDATE signer_permissions SET expires_at = ?, sliding_expiry = 1
+			WHERE single_grant = 0 AND revoked_at IS NULL AND expires_at IS NULL`, []any{formatTime(now.Add(SlidingGrantTTL))}},
+	} {
+		if _, err := tx.Exec(q.sql, q.args...); err != nil {
+			return fmt.Errorf("backfill single_grant: %w", err)
+		}
+	}
+	return nil
 }
 
 // rebuildChangedTables recreates each existing table whose foreign keys
@@ -921,12 +967,12 @@ func (ss *SQLiteStorage) CreateKey(ctx context.Context, key *Key) error {
 	}
 
 	_, err := ss.db.ExecContext(ctx, `
-		INSERT INTO signer_keys (id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO signer_keys (id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, single_grant)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		key.ID, nullStr(key.Name), key.Pubkey, keyType, nullStr(key.EncryptedNsec), encryptionMethod,
 		nullStr(key.BunkerURI), nullStr(key.UpstreamPubkey), boolToInt(key.RequireApproval),
 		boolToInt(key.DisposableMode), boolToInt(key.CoverTraffic), boolToInt(key.TorEgress),
-		stringsToJSONArray(key.Relays), formatTime(key.CreatedAt), nullStr(key.CreatedBy), nullStr(key.OwnerID))
+		stringsToJSONArray(key.Relays), formatTime(key.CreatedAt), nullStr(key.CreatedBy), nullStr(key.OwnerID), boolToInt(key.SingleGrant))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrKeyExists
@@ -942,10 +988,10 @@ func (ss *SQLiteStorage) GetKey(ctx context.Context, id string) (*Key, error) {
 	var requireApproval, disposableMode, coverTraffic, torEgress int
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary, single_grant
 		FROM signer_keys WHERE id = ?`, id).
 		Scan(&key.ID, &name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary)
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary, &key.SingleGrant)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -996,10 +1042,10 @@ func (ss *SQLiteStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*Ke
 	var requireApproval, disposableMode, coverTraffic, torEgress int
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary, single_grant
 		FROM signer_keys WHERE pubkey = ?`, pubkey).
 		Scan(&key.ID, &name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary)
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary, &key.SingleGrant)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -1050,10 +1096,10 @@ func (ss *SQLiteStorage) GetKeyByName(ctx context.Context, name string) (*Key, e
 	var requireApproval, disposableMode, coverTraffic, torEgress int
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary, single_grant
 		FROM signer_keys WHERE name = ?`, name).
 		Scan(&key.ID, &keyName, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary)
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary, &key.SingleGrant)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -1100,7 +1146,7 @@ func (ss *SQLiteStorage) GetKeyByName(ctx context.Context, name string) (*Key, e
 
 func (ss *SQLiteStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key, error) {
 	rows, err := ss.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary, single_grant
 		FROM signer_keys WHERE owner_id = ? ORDER BY created_at DESC`, ownerID)
 	if err != nil {
 		return nil, err
@@ -1112,7 +1158,7 @@ func (ss *SQLiteStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key, 
 
 func (ss *SQLiteStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 	rows, err := ss.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary, single_grant
 		FROM signer_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -1130,7 +1176,7 @@ func (ss *SQLiteStorage) scanKeys(rows *sql.Rows) ([]*Key, error) {
 		var requireApproval, disposableMode, coverTraffic, torEgress int
 
 		if err := rows.Scan(&key.ID, &name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary); err != nil {
+			&requireApproval, &disposableMode, &coverTraffic, &torEgress, &relays, &createdAt, &createdBy, &ownerID, &key.IsPrimary, &key.SingleGrant); err != nil {
 			return nil, err
 		}
 
@@ -1309,6 +1355,18 @@ func (ss *SQLiteStorage) setPermission(ctx context.Context, perm *Permission, di
 		perm.CreatedAt = time.Now()
 	}
 
+	// Read outside the transaction: the flag never changes after creation,
+	// and a write-first transaction is what keeps concurrent writers queued.
+	// A key that is not found keeps the one-grant rule (the insert then fails
+	// on the foreign key anyway).
+	single := true
+	if err := ss.db.QueryRowContext(ctx, `SELECT single_grant FROM signer_keys WHERE pubkey = ?`, perm.KeyID).Scan(&single); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if !single {
+		defaultSlidingExpiry(perm, time.Now())
+	}
+
 	// The displacement and the new grant happen in one transaction so there
 	// is never a window with two live grants or zero.
 	tx, err := ss.db.BeginTx(ctx, nil)
@@ -1317,24 +1375,29 @@ func (ss *SQLiteStorage) setPermission(ctx context.Context, perm *Permission, di
 	}
 	defer tx.Rollback()
 
-	// Displace all other active grants on this key in the SAME slot.
-	_, err = tx.ExecContext(ctx, `
+	// Displace all other active grants on this key in the SAME slot. A user
+	// key displaces nothing: it holds one grant per app.
+	if single {
+		_, err = tx.ExecContext(ctx, `
 		UPDATE signer_permissions
 		SET revoked_at = datetime('now'), revoked_by = ?
 		WHERE key_id = ? AND user_pubkey != ? AND slot = ? AND revoked_at IS NULL
 		  AND (? OR (expires_at IS NOT NULL AND datetime(expires_at) <= datetime('now')))`,
-		perm.UserPubkey, perm.KeyID, perm.UserPubkey, perm.Slot, displaceLive)
-	if err != nil {
-		return err
+			perm.UserPubkey, perm.KeyID, perm.UserPubkey, perm.Slot, displaceLive)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Upsert the new (or returning) client's grant. A revoked row for
 	// this same client is cleared back to active.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO signer_permissions (key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, revoked_at, revoked_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+		INSERT INTO signer_permissions (key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, revoked_at, revoked_by, single_grant, sliding_expiry)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
 		ON CONFLICT (key_id, user_pubkey) DO UPDATE SET
 			slot = excluded.slot,
+			single_grant = excluded.single_grant,
+			sliding_expiry = excluded.sliding_expiry,
 			methods = excluded.methods,
 			allowed_kinds = excluded.allowed_kinds,
 			expires_at = excluded.expires_at,
@@ -1349,7 +1412,7 @@ func (ss *SQLiteStorage) setPermission(ctx context.Context, perm *Permission, di
 		perm.KeyID, perm.UserPubkey, perm.Slot, stringsToJSONArray(perm.Methods), intsToJSONArray(perm.AllowedKinds),
 		nullTimeStr(perm.ExpiresAt), nullStr(perm.PolicyID), boolPtrToInt(perm.RequireApproval),
 		nullStr(perm.AppName), nullStr(perm.AppURL), nullStr(perm.AppImage), nullStr(perm.CustomName),
-		formatTime(perm.CreatedAt), nullTimeStr(perm.LastUsedAt))
+		formatTime(perm.CreatedAt), nullTimeStr(perm.LastUsedAt), boolToInt(single), boolToInt(perm.SlidingExpiry))
 	if err != nil {
 		if !displaceLive && strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrSlotOccupied
@@ -1366,10 +1429,10 @@ func (ss *SQLiteStorage) GetPermission(ctx context.Context, keyID, userPubkey st
 	var requireApproval int
 
 	err := ss.db.QueryRowContext(ctx, `
-		SELECT key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at
+		SELECT key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, sliding_expiry
 		FROM signer_permissions WHERE key_id = ? AND user_pubkey = ? AND revoked_at IS NULL`, keyID, userPubkey).
 		Scan(&perm.KeyID, &perm.UserPubkey, &perm.Slot, &methods, &allowedKinds, &expiresAt, &policyID, &requireApproval,
-			&appName, &appURL, &appImage, &customName, &createdAt, &lastUsedAt)
+			&appName, &appURL, &appImage, &customName, &createdAt, &lastUsedAt, &perm.SlidingExpiry)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotAuthorized
 	}
@@ -1430,7 +1493,7 @@ func (ss *SQLiteStorage) GetPermission(ctx context.Context, keyID, userPubkey st
 
 func (ss *SQLiteStorage) ListPermissions(ctx context.Context, keyID string) ([]*Permission, error) {
 	rows, err := ss.db.QueryContext(ctx, `
-		SELECT key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at
+		SELECT key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, sliding_expiry
 		FROM signer_permissions WHERE key_id = ? AND revoked_at IS NULL`, keyID)
 	if err != nil {
 		return nil, err
@@ -1444,7 +1507,7 @@ func (ss *SQLiteStorage) ListPermissions(ctx context.Context, keyID string) ([]*
 		var requireApproval int
 
 		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, &perm.Slot, &methods, &allowedKinds, &expiresAt, &policyID, &requireApproval,
-			&appName, &appURL, &appImage, &customName, &createdAt, &lastUsedAt); err != nil {
+			&appName, &appURL, &appImage, &customName, &createdAt, &lastUsedAt, &perm.SlidingExpiry); err != nil {
 			return nil, err
 		}
 
@@ -1492,10 +1555,18 @@ func (ss *SQLiteStorage) DeletePermission(ctx context.Context, keyID, userPubkey
 	return err
 }
 
+// UpdatePermissionLastUsed also slides a sliding grant's expiry, in the same
+// write, under the rule in slideDue.
 func (ss *SQLiteStorage) UpdatePermissionLastUsed(ctx context.Context, keyID, userPubkey string) error {
+	now := time.Now()
 	_, err := ss.db.ExecContext(ctx, `
-		UPDATE signer_permissions SET last_used_at = ? WHERE key_id = ? AND user_pubkey = ?`,
-		formatTime(time.Now()), keyID, userPubkey)
+		UPDATE signer_permissions SET last_used_at = ?,
+			expires_at = CASE WHEN sliding_expiry = 1 AND revoked_at IS NULL
+				AND datetime(expires_at) > datetime(?) AND datetime(expires_at) < datetime(?)
+				THEN ? ELSE expires_at END
+		WHERE key_id = ? AND user_pubkey = ?`,
+		formatTime(now), formatTime(now), formatTime(now.Add(SlidingGrantTTL-SlidingGrantRefreshEvery)),
+		formatTime(now.Add(SlidingGrantTTL)), keyID, userPubkey)
 	return err
 }
 

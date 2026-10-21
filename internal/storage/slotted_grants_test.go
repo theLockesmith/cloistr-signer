@@ -232,13 +232,16 @@ func slottedBackends(t *testing.T) []slottedBackend {
 	}
 }
 
+// createTestKey makes a single-grant key: the displacement these tests cover
+// applies only to those (see multi_grant_test.go for user keys).
 func createTestKey(t *testing.T, s Storage, pubkey string) {
 	t.Helper()
 	err := s.CreateKey(context.Background(), &Key{
-		ID:        pubkey[:16],
-		Name:      "test-" + pubkey,
-		Pubkey:    pubkey,
-		CreatedAt: time.Now(),
+		ID:          pubkey[:16],
+		Name:        "test-" + pubkey,
+		Pubkey:      pubkey,
+		CreatedAt:   time.Now(),
+		SingleGrant: true,
 	})
 	if err != nil {
 		t.Fatalf("createTestKey(%s): %v", pubkey, err)

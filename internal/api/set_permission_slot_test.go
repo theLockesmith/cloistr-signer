@@ -27,7 +27,7 @@ func slottedRoleKey(t *testing.T) (*Handler, storage.Storage, time.Time) {
 	t.Helper()
 	h, store := testHandler(t)
 	ctx := context.Background()
-	if err := store.CreateKey(ctx, &storage.Key{ID: slotKeyID, Name: "role", Pubkey: slotKeyPub, OwnerID: testUserID, CreatedAt: time.Now()}); err != nil {
+	if err := store.CreateKey(ctx, &storage.Key{ID: slotKeyID, Name: "role", Pubkey: slotKeyPub, OwnerID: testUserID, CreatedAt: time.Now(), SingleGrant: true}); err != nil {
 		t.Fatal(err)
 	}
 	exp := time.Now().Add(20 * 24 * time.Hour).UTC().Truncate(time.Second)

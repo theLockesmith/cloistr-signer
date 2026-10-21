@@ -89,6 +89,13 @@ type Key struct {
 	// from claiming it. At most one key per owner may have this set --
 	// enforced by a partial unique index, not just by convention.
 	IsPrimary bool `json:"is_primary"`
+
+	// SingleGrant keeps at most one live grant per slot on this key: a new
+	// client's grant displaces the previous holder's. It is for the fleet's
+	// automated role keys (one agent per role). A user key (false) holds one
+	// grant per signed-in app side by side, so signing in to a second app never
+	// signs the first one out. Set when the key is created; UpdateKey leaves it.
+	SingleGrant bool `json:"single_grant"`
 }
 
 // IsProxy returns true if this is a proxy key
@@ -136,6 +143,43 @@ type Permission struct {
 	// arrived, and RevokedBy set to the client pubkey that displaced it.
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
 	RevokedBy string     `json:"revoked_by,omitempty"`
+
+	// SlidingExpiry: each use of the grant moves ExpiresAt to SlidingGrantTTL
+	// from now (written at most once per SlidingGrantRefreshEvery). A grant on
+	// a user key stored with no expiry gets a sliding one; a grant given an
+	// explicit expiry does not slide unless the caller sets this.
+	SlidingExpiry bool `json:"sliding_expiry,omitempty"`
+}
+
+// FleetAccountUsername owns the fleet's automated role keys. The migration that
+// introduced SingleGrant set it on that account's existing keys; new keys get it
+// only when created with single_grant.
+const FleetAccountUsername = "arbiter-fleet"
+
+const (
+	// SlidingGrantTTL is how long a sliding grant lives after its last use.
+	SlidingGrantTTL = 30 * 24 * time.Hour
+	// SlidingGrantRefreshEvery throttles the slide: the expiry is rewritten
+	// only once it has fallen more than this far below a full SlidingGrantTTL.
+	SlidingGrantRefreshEvery = 24 * time.Hour
+)
+
+// defaultSlidingExpiry gives a user-key grant stored with no expiry a sliding
+// one, so an app nobody uses any more stops holding a grant.
+func defaultSlidingExpiry(perm *Permission, now time.Time) {
+	if perm.ExpiresAt == nil {
+		expires := now.Add(SlidingGrantTTL)
+		perm.ExpiresAt = &expires
+		perm.SlidingExpiry = true
+	}
+}
+
+// slideDue reports whether a use at now should move a grant's expiry: it
+// slides, is still live, and has fallen more than SlidingGrantRefreshEvery
+// below a full SlidingGrantTTL. An expired grant is never revived.
+func slideDue(sliding bool, expiresAt *time.Time, now time.Time) bool {
+	return sliding && expiresAt != nil && expiresAt.After(now) &&
+		expiresAt.Before(now.Add(SlidingGrantTTL-SlidingGrantRefreshEvery))
 }
 
 // Session represents an active NIP-46 session
@@ -912,6 +956,7 @@ func (m *MemoryStorage) UpdateKey(ctx context.Context, key *Key) error {
 		}
 	}
 
+	key.SingleGrant = existing.SingleGrant // set at creation only
 	m.keys[key.ID] = key
 	m.keysByPubkey[key.Pubkey] = key
 	return nil
@@ -982,7 +1027,8 @@ func (m *MemoryStorage) setPermission(perm *Permission, displaceLive bool) error
 	defer m.mu.Unlock()
 
 	// KeyID is the full pubkey, so check keysByPubkey
-	if _, exists := m.keysByPubkey[perm.KeyID]; !exists {
+	key, exists := m.keysByPubkey[perm.KeyID]
+	if !exists {
 		return ErrKeyNotFound
 	}
 
@@ -1002,8 +1048,15 @@ func (m *MemoryStorage) setPermission(perm *Permission, displaceLive bool) error
 		m.permissions[perm.KeyID] = make(map[string]*Permission)
 	}
 
-	// Displace all other active grants on this key in the SAME slot.
 	now := time.Now()
+	if !key.SingleGrant {
+		// A user key: one grant per app, side by side. Nothing is displaced.
+		defaultSlidingExpiry(perm, now)
+		m.permissions[perm.KeyID][perm.UserPubkey] = perm
+		return nil
+	}
+
+	// Displace all other active grants on this key in the SAME slot.
 	if !displaceLive {
 		for pubkey, existing := range m.permissions[perm.KeyID] {
 			lapsed := existing.ExpiresAt != nil && !existing.ExpiresAt.After(now)
@@ -1095,6 +1148,10 @@ func (m *MemoryStorage) UpdatePermissionLastUsed(ctx context.Context, keyID, use
 
 	now := time.Now()
 	perm.LastUsedAt = &now
+	if perm.RevokedAt == nil && slideDue(perm.SlidingExpiry, perm.ExpiresAt, now) {
+		expires := now.Add(SlidingGrantTTL)
+		perm.ExpiresAt = &expires
+	}
 	return nil
 }
 
