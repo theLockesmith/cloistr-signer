@@ -189,6 +189,36 @@ func (ps *PostgresStorage) migrate() error {
 
 	CREATE INDEX IF NOT EXISTS idx_signer_permissions_key_id ON signer_permissions(key_id);
 
+	-- Grants per key (see storage.Key.SingleGrant). A user key holds one grant
+	-- per signed-in app; only a single_grant key (the fleet's role keys) keeps
+	-- one live grant per slot. signer_permissions.single_grant copies the key's
+	-- flag (which never changes) so the unique index below can cover it.
+	--
+	-- The backfill runs ONCE, in the startup that adds the column: this schema
+	-- runs on every start, and re-running it would re-flag keys and re-extend
+	-- expiries. The advisory lock makes a second replica starting at the same
+	-- moment wait, then see the column and skip.
+	DO $$
+	BEGIN
+		PERFORM pg_advisory_xact_lock(hashtextextended('signer-migrate-single-grant', 0));
+		IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+		               WHERE table_schema = current_schema() AND table_name = 'signer_keys' AND column_name = 'single_grant') THEN
+			ALTER TABLE signer_keys ADD COLUMN single_grant BOOLEAN NOT NULL DEFAULT FALSE;
+			ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS single_grant BOOLEAN NOT NULL DEFAULT FALSE;
+			ALTER TABLE signer_permissions ADD COLUMN IF NOT EXISTS sliding_expiry BOOLEAN NOT NULL DEFAULT FALSE;
+			-- The fleet account's existing keys keep the one-grant rule.
+			UPDATE signer_keys SET single_grant = TRUE
+			WHERE owner_id IN (SELECT id FROM signer_web_accounts WHERE username = 'arbiter-fleet');
+			-- A grant naming no key keeps the old rule too.
+			UPDATE signer_permissions p SET single_grant = NOT EXISTS (
+				SELECT 1 FROM signer_keys k WHERE k.pubkey = p.key_id AND NOT k.single_grant);
+			-- Live user-key grants with no expiry get a full sliding 30 days, so
+			-- nobody is signed out by the deploy.
+			UPDATE signer_permissions SET expires_at = NOW() + INTERVAL '30 days', sliding_expiry = TRUE
+			WHERE NOT single_grant AND revoked_at IS NULL AND expires_at IS NULL;
+		END IF;
+	END $$;
+
 	-- Slotted grants: one active grant per (key_id, slot). Existing rows
 	-- default to 'default'. Added before the cleanup below so the cleanup
 	-- can partition on it.
@@ -201,7 +231,7 @@ func (ps *PostgresStorage) migrate() error {
 	WITH ranked AS (
 		SELECT key_id, user_pubkey,
 		       ROW_NUMBER() OVER (PARTITION BY key_id, slot ORDER BY COALESCE(last_used_at, created_at) DESC) as rn
-		FROM signer_permissions WHERE revoked_at IS NULL
+		FROM signer_permissions WHERE revoked_at IS NULL AND single_grant
 	)
 	UPDATE signer_permissions SET revoked_at = NOW(), revoked_by = 'schema-migration'
 	FROM ranked
@@ -212,9 +242,11 @@ func (ps *PostgresStorage) migrate() error {
 	-- One active grant per (key_id, slot), enforced at the database level.
 	-- The partial index covers only non-revoked rows, so displaced grants
 	-- (revoked_at IS NOT NULL) do not count. The old per-key index is replaced.
+	-- Single-grant keys only; the per-(key, slot) index before it covered every key.
 	DROP INDEX IF EXISTS idx_one_active_grant_per_key;
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_grant_per_key_slot
-		ON signer_permissions(key_id, slot) WHERE revoked_at IS NULL;
+	DROP INDEX IF EXISTS idx_one_active_grant_per_key_slot;
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_single_grant_per_key_slot
+		ON signer_permissions(key_id, slot) WHERE revoked_at IS NULL AND single_grant;
 
 	CREATE TABLE IF NOT EXISTS signer_sessions (
 		id TEXT PRIMARY KEY,
@@ -531,10 +563,10 @@ func (ps *PostgresStorage) CreateKey(ctx context.Context, key *Key) error {
 	}
 
 	_, err := ps.db.ExecContext(ctx, `
-		INSERT INTO signer_keys (id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, relays, created_at, created_by, owner_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		INSERT INTO signer_keys (id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, relays, created_at, created_by, owner_id, single_grant)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
 		key.ID, key.Name, key.Pubkey, keyType, nullString(key.EncryptedNsec), encryptionMethod, nullString(key.BunkerURI),
-		nullString(key.UpstreamPubkey), pq.Array(key.Relays), key.CreatedAt, key.CreatedBy, nullString(key.OwnerID))
+		nullString(key.UpstreamPubkey), pq.Array(key.Relays), key.CreatedAt, key.CreatedBy, nullString(key.OwnerID), key.SingleGrant)
 	if err != nil {
 		if isDuplicateError(err) {
 			return ErrKeyExists
@@ -548,10 +580,10 @@ func (ps *PostgresStorage) GetKey(ctx context.Context, id string) (*Key, error) 
 	key := &Key{}
 	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary, single_grant
 		FROM signer_keys WHERE id = $1`, id).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &key.IsPrimary)
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &key.IsPrimary, &key.SingleGrant)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -580,10 +612,10 @@ func (ps *PostgresStorage) GetKeyByPubkey(ctx context.Context, pubkey string) (*
 	key := &Key{}
 	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary, single_grant
 		FROM signer_keys WHERE pubkey = $1`, pubkey).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &key.IsPrimary)
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &key.IsPrimary, &key.SingleGrant)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -612,10 +644,10 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 	key := &Key{}
 	var encryptedNsec, encryptionMethod, bunkerURI, upstreamPubkey, ownerIDNull sql.NullString
 	err := ps.db.QueryRowContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary
+		SELECT id, name, pubkey, key_type, encrypted_nsec, encryption_method, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, is_primary, single_grant
 		FROM signer_keys WHERE name = $1`, name).
 		Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &encryptionMethod, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &key.IsPrimary)
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &key.IsPrimary, &key.SingleGrant)
 	if err == sql.ErrNoRows {
 		return nil, ErrKeyNotFound
 	}
@@ -642,7 +674,7 @@ func (ps *PostgresStorage) GetKeyByName(ctx context.Context, name string) (*Key,
 
 func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, encryption_method, is_primary
+		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, encryption_method, is_primary, single_grant
 		FROM signer_keys WHERE owner_id = $1 ORDER BY created_at DESC`, ownerID)
 	if err != nil {
 		return nil, err
@@ -654,7 +686,7 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key
 		key := &Key{}
 		var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull, encryptionMethod sql.NullString
 		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod, &key.IsPrimary); err != nil {
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod, &key.IsPrimary, &key.SingleGrant); err != nil {
 			return nil, err
 		}
 		if encryptedNsec.Valid {
@@ -681,7 +713,7 @@ func (ps *PostgresStorage) ListKeys(ctx context.Context, ownerID string) ([]*Key
 
 func (ps *PostgresStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 	rows, err := ps.db.QueryContext(ctx, `
-		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, encryption_method, is_primary
+		SELECT id, name, pubkey, key_type, encrypted_nsec, bunker_uri, upstream_pubkey, require_approval, disposable_mode, cover_traffic, tor_egress, relays, created_at, created_by, owner_id, encryption_method, is_primary, single_grant
 		FROM signer_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -693,7 +725,7 @@ func (ps *PostgresStorage) ListAllKeys(ctx context.Context) ([]*Key, error) {
 		key := &Key{}
 		var encryptedNsec, bunkerURI, upstreamPubkey, ownerIDNull, encryptionMethod sql.NullString
 		if err := rows.Scan(&key.ID, &key.Name, &key.Pubkey, &key.KeyType, &encryptedNsec, &bunkerURI, &upstreamPubkey,
-			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod, &key.IsPrimary); err != nil {
+			&key.RequireApproval, &key.DisposableMode, &key.CoverTraffic, &key.TorEgress, pq.Array(&key.Relays), &key.CreatedAt, &key.CreatedBy, &ownerIDNull, &encryptionMethod, &key.IsPrimary, &key.SingleGrant); err != nil {
 			return nil, err
 		}
 		if encryptedNsec.Valid {
@@ -835,6 +867,16 @@ func (ps *PostgresStorage) setPermission(ctx context.Context, perm *Permission, 
 		perm.CreatedAt = time.Now()
 	}
 
+	// The flag never changes after creation, so it is read before the
+	// transaction. A key that is not found keeps the one-grant rule.
+	single := true
+	if err := ps.db.QueryRowContext(ctx, `SELECT single_grant FROM signer_keys WHERE pubkey = $1`, perm.KeyID).Scan(&single); err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if !single {
+		defaultSlidingExpiry(perm, time.Now())
+	}
+
 	// The displacement and the new grant happen in one transaction so there
 	// is never a window with two live grants or zero.
 	tx, err := ps.db.BeginTx(ctx, nil)
@@ -851,24 +893,29 @@ func (ps *PostgresStorage) setPermission(ctx context.Context, perm *Permission, 
 		return err
 	}
 
-	// Displace other active grants on this key in the SAME slot.
-	_, err = tx.ExecContext(ctx, `
+	// Displace other active grants on this key in the SAME slot. A user key
+	// displaces nothing: it holds one grant per app.
+	if single {
+		_, err = tx.ExecContext(ctx, `
 		UPDATE signer_permissions
 		SET revoked_at = NOW(), revoked_by = $2
 		WHERE key_id = $1 AND user_pubkey != $2 AND slot = $3 AND revoked_at IS NULL
 		  AND ($4 OR (expires_at IS NOT NULL AND expires_at <= NOW()))`,
-		perm.KeyID, perm.UserPubkey, perm.Slot, displaceLive)
-	if err != nil {
-		return err
+			perm.KeyID, perm.UserPubkey, perm.Slot, displaceLive)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Upsert the new (or returning) client's grant. A revoked row for
 	// this same client is cleared back to active.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO signer_permissions (key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, revoked_at, revoked_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, NULL)
+		INSERT INTO signer_permissions (key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval, app_name, app_url, app_image, custom_name, created_at, last_used_at, revoked_at, revoked_by, single_grant, sliding_expiry)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, NULL, $15, $16)
 		ON CONFLICT (key_id, user_pubkey) DO UPDATE SET
 			slot = EXCLUDED.slot,
+			single_grant = EXCLUDED.single_grant,
+			sliding_expiry = EXCLUDED.sliding_expiry,
 			methods = EXCLUDED.methods,
 			allowed_kinds = EXCLUDED.allowed_kinds,
 			expires_at = EXCLUDED.expires_at,
@@ -881,7 +928,8 @@ func (ps *PostgresStorage) setPermission(ctx context.Context, perm *Permission, 
 			revoked_at = NULL,
 			revoked_by = NULL`,
 		perm.KeyID, perm.UserPubkey, perm.Slot, pq.Array(perm.Methods), intArrayToInt64(perm.AllowedKinds), perm.ExpiresAt, perm.PolicyID, perm.RequireApproval,
-		nullString(perm.AppName), nullString(perm.AppURL), nullString(perm.AppImage), nullString(perm.CustomName), perm.CreatedAt, perm.LastUsedAt)
+		nullString(perm.AppName), nullString(perm.AppURL), nullString(perm.AppImage), nullString(perm.CustomName), perm.CreatedAt, perm.LastUsedAt,
+		single, perm.SlidingExpiry)
 	if err != nil {
 		if !displaceLive && isDuplicateError(err) {
 			return ErrSlotOccupied
@@ -900,10 +948,10 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 	var requireApproval sql.NullBool
 	err := ps.db.QueryRowContext(ctx, `
 		SELECT key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval,
-		       app_name, app_url, app_image, custom_name, created_at, last_used_at
+		       app_name, app_url, app_image, custom_name, created_at, last_used_at, sliding_expiry
 		FROM signer_permissions WHERE key_id = $1 AND user_pubkey = $2 AND revoked_at IS NULL`, keyID, userPubkey).
 		Scan(&perm.KeyID, &perm.UserPubkey, &perm.Slot, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval,
-			&appName, &appURL, &appImage, &customName, &perm.CreatedAt, &lastUsedAt)
+			&appName, &appURL, &appImage, &customName, &perm.CreatedAt, &lastUsedAt, &perm.SlidingExpiry)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotAuthorized
 	}
@@ -945,7 +993,7 @@ func (ps *PostgresStorage) GetPermission(ctx context.Context, keyID, userPubkey 
 func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([]*Permission, error) {
 	rows, err := ps.db.QueryContext(ctx, `
 		SELECT key_id, user_pubkey, slot, methods, allowed_kinds, expires_at, policy_id, require_approval,
-		       app_name, app_url, app_image, custom_name, created_at, last_used_at
+		       app_name, app_url, app_image, custom_name, created_at, last_used_at, sliding_expiry
 		FROM signer_permissions WHERE key_id = $1 AND revoked_at IS NULL`, keyID)
 	if err != nil {
 		return nil, err
@@ -960,7 +1008,7 @@ func (ps *PostgresStorage) ListPermissions(ctx context.Context, keyID string) ([
 		var allowedKinds pq.Int64Array
 		var requireApproval sql.NullBool
 		if err := rows.Scan(&perm.KeyID, &perm.UserPubkey, &perm.Slot, pq.Array(&perm.Methods), &allowedKinds, &expiresAt, &policyID, &requireApproval,
-			&appName, &appURL, &appImage, &customName, &perm.CreatedAt, &lastUsedAt); err != nil {
+			&appName, &appURL, &appImage, &customName, &perm.CreatedAt, &lastUsedAt, &perm.SlidingExpiry); err != nil {
 			return nil, err
 		}
 		perm.AllowedKinds = int64ArrayToInt(allowedKinds)
@@ -999,9 +1047,16 @@ func (ps *PostgresStorage) DeletePermission(ctx context.Context, keyID, userPubk
 	return err
 }
 
+// UpdatePermissionLastUsed also slides a sliding grant's expiry, in the same
+// write, under the rule in slideDue.
 func (ps *PostgresStorage) UpdatePermissionLastUsed(ctx context.Context, keyID, userPubkey string) error {
+	now := time.Now()
 	_, err := ps.db.ExecContext(ctx, `
-		UPDATE signer_permissions SET last_used_at = NOW() WHERE key_id = $1 AND user_pubkey = $2`, keyID, userPubkey)
+		UPDATE signer_permissions SET last_used_at = $3,
+			expires_at = CASE WHEN sliding_expiry AND revoked_at IS NULL AND expires_at > $3 AND expires_at < $4
+				THEN $5 ELSE expires_at END
+		WHERE key_id = $1 AND user_pubkey = $2`,
+		keyID, userPubkey, now, now.Add(SlidingGrantTTL-SlidingGrantRefreshEvery), now.Add(SlidingGrantTTL))
 	return err
 }
 
