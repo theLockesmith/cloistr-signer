@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 )
@@ -11,6 +12,14 @@ import (
 func TestLightningKeyConfirm(t *testing.T) {
 	backends := []slottedBackend{
 		{name: "memory", newFn: func(t *testing.T) Storage { return NewMemoryStorage() }},
+		{name: "sqlite", newFn: func(t *testing.T) Storage {
+			s, err := NewSQLiteStorage(t.TempDir() + "/confirm.db")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { s.Close() })
+			return s
+		}},
 		{name: "postgres", newFn: func(t *testing.T) Storage {
 			ps := getTestPostgresStorage(t)
 			t.Cleanup(func() { ps.Close() })
@@ -60,5 +69,43 @@ func TestLightningKeyConfirm(t *testing.T) {
 				t.Fatalf("challenge = %+v, %v; want linking key 02cf", c, err)
 			}
 		})
+	}
+}
+
+// A SQLite database whose Lightning keys table predates confirmed_at gets the
+// column at startup, and its existing keys read as unconfirmed.
+func TestSQLiteLightningKeys_ConfirmedAtAddedToOlderTable(t *testing.T) {
+	path := t.TempDir() + "/older.db"
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE signer_web_accounts (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))`,
+		`CREATE TABLE signer_lightning_keys (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES signer_web_accounts(id) ON DELETE CASCADE, linking_key TEXT UNIQUE NOT NULL, name TEXT, created_at TEXT NOT NULL, last_used_at TEXT)`,
+		`INSERT INTO signer_web_accounts (id, username, password_hash) VALUES ('old-owner', 'old-owner', 'x')`,
+		`INSERT INTO signer_lightning_keys (id, user_id, linking_key, created_at) VALUES ('lk-old', 'old-owner', '02ee', '2026-10-16T00:00:00Z')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%v\n%s", err, q)
+		}
+	}
+	db.Close()
+
+	s, err := NewSQLiteStorage(path)
+	if err != nil {
+		t.Fatalf("open older database: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	k, err := s.GetLightningKeyByLinkingKey(ctx, "02ee")
+	if err != nil || k.ConfirmedAt != nil {
+		t.Fatalf("existing key = %+v, %v; want readable and unconfirmed", k, err)
+	}
+	if err := s.ConfirmLightningKey(ctx, "lk-old"); err != nil {
+		t.Fatal(err)
+	}
+	if k, _ := s.GetLightningKeyByLinkingKey(ctx, "02ee"); k == nil || k.ConfirmedAt == nil {
+		t.Fatalf("after confirm = %+v", k)
 	}
 }
