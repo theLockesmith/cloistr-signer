@@ -2413,10 +2413,12 @@ type UserResponse struct {
 	// only when the user has zero signing keys. The HKDF-derived platform pubkey is
 	// no longer surfaced to clients — once a signing key exists it is the sole
 	// identity and the derived pubkey is de-registered (see reconcilePlatformIdentity).
-	Pubkey     string     `json:"pubkey,omitempty"`
-	MFAEnabled bool       `json:"mfa_enabled"`
-	CreatedAt  time.Time  `json:"created_at"`
-	LastLogin  *time.Time `json:"last_login,omitempty"`
+	Pubkey     string `json:"pubkey,omitempty"`
+	MFAEnabled bool   `json:"mfa_enabled"`
+	// IsAdmin: the account may use the admin pages (see isAdminClaims).
+	IsAdmin   bool       `json:"is_admin"`
+	CreatedAt time.Time  `json:"created_at"`
+	LastLogin *time.Time `json:"last_login,omitempty"`
 }
 
 type MFASetupResponse struct {
@@ -2791,6 +2793,7 @@ func (h *Handler) handleUserLogin(w http.ResponseWriter, r *http.Request) {
 			Username:   user.Username,
 			Email:      user.Email,
 			MFAEnabled: user.MFAEnabled,
+			IsAdmin:    h.isAdminUser(user),
 			CreatedAt:  user.CreatedAt,
 			LastLogin:  user.LastLoginAt,
 		},
@@ -3018,6 +3021,7 @@ func (h *Handler) handleUserMe(w http.ResponseWriter, r *http.Request) {
 		Email:      user.Email,
 		Pubkey:     signingPubkey,
 		MFAEnabled: user.MFAEnabled,
+		IsAdmin:    h.isAdminUser(user),
 		CreatedAt:  user.CreatedAt,
 		LastLogin:  user.LastLoginAt,
 	})
@@ -5654,12 +5658,9 @@ func (h *Handler) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check admin role (get user from storage if not config-based admin)
-	if !h.config.Auth.IsAdminPubkey(claims.UserID) {
-		user, err := h.storage.GetUser(r.Context(), claims.UserID)
-		if err != nil || !user.IsAdmin() {
-			h.errorResponse(w, http.StatusForbidden, "admin access required")
-			return
-		}
+	if !h.isAdminClaims(r.Context(), claims) {
+		h.errorResponse(w, http.StatusForbidden, "admin access required")
+		return
 	}
 
 	// Parse pagination
@@ -5700,12 +5701,9 @@ func (h *Handler) handleAdminUserByPubkey(w http.ResponseWriter, r *http.Request
 	}
 
 	// Check admin role
-	if !h.config.Auth.IsAdminPubkey(claims.UserID) {
-		user, err := h.storage.GetUser(r.Context(), claims.UserID)
-		if err != nil || !user.IsAdmin() {
-			h.errorResponse(w, http.StatusForbidden, "admin access required")
-			return
-		}
+	if !h.isAdminClaims(r.Context(), claims) {
+		h.errorResponse(w, http.StatusForbidden, "admin access required")
+		return
 	}
 
 	// Parse path: /api/v1/admin/users/{pubkey}/services/{service}
@@ -5788,12 +5786,9 @@ func (h *Handler) handleAdminServices(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check admin role
-	if !h.config.Auth.IsAdminPubkey(claims.UserID) {
-		user, err := h.storage.GetUser(r.Context(), claims.UserID)
-		if err != nil || !user.IsAdmin() {
-			h.errorResponse(w, http.StatusForbidden, "admin access required")
-			return
-		}
+	if !h.isAdminClaims(r.Context(), claims) {
+		h.errorResponse(w, http.StatusForbidden, "admin access required")
+		return
 	}
 
 	services, err := h.storage.ListServices(r.Context())
