@@ -47,7 +47,7 @@ func TestGrantTakeover_AllBackends(t *testing.T) {
 			store := be.newFn(t)
 			ctx := context.Background()
 
-			if err := store.CreateKey(ctx, &Key{ID: keyPub[:16], Pubkey: keyPub}); err != nil {
+			if err := store.CreateKey(ctx, &Key{ID: keyPub[:16], Pubkey: keyPub, SingleGrant: true}); err != nil {
 				t.Fatalf("CreateKey: %v", err)
 			}
 
@@ -160,7 +160,7 @@ func TestDisplacementVsExpiry_Memory(t *testing.T) {
 	clientA := "eeee4444eeee4444eeee4444eeee4444eeee4444eeee4444eeee4444eeee4444"
 	clientB := "ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555"
 
-	if err := store.CreateKey(ctx, &Key{ID: keyPub[:16], Pubkey: keyPub}); err != nil {
+	if err := store.CreateKey(ctx, &Key{ID: keyPub[:16], Pubkey: keyPub, SingleGrant: true}); err != nil {
 		t.Fatalf("CreateKey: %v", err)
 	}
 

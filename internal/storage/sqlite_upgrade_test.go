@@ -18,8 +18,9 @@ import (
 // oldSchemaDB writes a database the way the first SQLite version (73f9ecb,
 // 2026-04-28) left it: its schema, an account, a key, and grants as they
 // could exist then (key_id holding the key's id, as its foreign key required,
-// or its pubkey, written with foreign keys off), plus one naming no key.
-func oldSchemaDB(t *testing.T) (path, keyPub string) {
+// or its pubkey, written with foreign keys off), plus one naming no key. The
+// account is named username: the fleet account's keys become single-grant.
+func oldSchemaDB(t *testing.T, username string) (path, keyPub string) {
 	t.Helper()
 	schema, err := os.ReadFile("testdata/sqlite_schema_73f9ecb.sql")
 	if err != nil {
@@ -34,7 +35,7 @@ func oldSchemaDB(t *testing.T) (path, keyPub string) {
 	keyPub = "1111111111111111111111111111111111111111111111111111111111111111"
 	for _, q := range []string{
 		string(schema),
-		`INSERT INTO signer_web_accounts (id, username, password_hash) VALUES ('owner', 'owner', 'x')`,
+		`INSERT INTO signer_web_accounts (id, username, password_hash) VALUES ('owner', '` + username + `', 'x')`,
 		`INSERT INTO signer_keys (id, name, pubkey, owner_id) VALUES ('key-a', 'a', '` + keyPub + `', 'owner')`,
 		`INSERT INTO signer_permissions (key_id, user_pubkey, methods, created_at, last_used_at) VALUES ('key-a', 'older-client', '["sign_event"]', '2026-05-01T00:00:00Z', '2026-05-02T00:00:00Z')`,
 		`INSERT INTO signer_permissions (key_id, user_pubkey, methods, created_at, last_used_at) VALUES ('` + keyPub + `', 'newer-client', '["sign_event"]', '2026-05-01T00:00:00Z', '2026-06-01T00:00:00Z')`,
@@ -53,7 +54,7 @@ func oldSchemaDB(t *testing.T) (path, keyPub string) {
 // paths work on it. Before the upgrade path, opening it failed outright
 // (the current schema's indexes name columns the old tables lack).
 func TestSQLiteUpgrade_FromFirstSchema(t *testing.T) {
-	path, keyPub := oldSchemaDB(t)
+	path, keyPub := oldSchemaDB(t, FleetAccountUsername)
 	ctx := context.Background()
 
 	s, err := NewSQLiteStorage(path)
@@ -62,8 +63,8 @@ func TestSQLiteUpgrade_FromFirstSchema(t *testing.T) {
 	}
 
 	key, err := s.GetKey(ctx, "key-a")
-	if err != nil || key.Pubkey != keyPub || key.IsPrimary || key.DisposableMode {
-		t.Fatalf("GetKey after upgrade = %+v, %v; want the key with new flags at their defaults", key, err)
+	if err != nil || key.Pubkey != keyPub || key.IsPrimary || key.DisposableMode || !key.SingleGrant {
+		t.Fatalf("GetKey after upgrade = %+v, %v; want the key with new flags at their defaults, single-grant (fleet account)", key, err)
 	}
 	if err := s.SetPrimaryKey(ctx, "owner", "key-a"); err != nil {
 		t.Fatalf("SetPrimaryKey (new column): %v", err)
@@ -140,7 +141,7 @@ func logLines(t *testing.T, buf *bytes.Buffer, msgPrefix string) []map[string]an
 // upgrade drops or retires is logged by key and client. A second start, with
 // nothing left to upgrade, takes no new backup.
 func TestSQLiteUpgrade_BacksUpAndLogsWhatItRemoves(t *testing.T) {
-	path, keyPub := oldSchemaDB(t)
+	path, keyPub := oldSchemaDB(t, FleetAccountUsername)
 	logs := captureLogs(t)
 
 	s, err := NewSQLiteStorage(path)
@@ -219,7 +220,7 @@ func TestSQLiteUpgrade_CurrentDatabaseNotBackedUp(t *testing.T) {
 // NewSQLiteStorage has its own connection, as separate processes do.
 func TestSQLiteUpgrade_SimultaneousStarts(t *testing.T) {
 	for trial := 0; trial < 10; trial++ {
-		path, _ := oldSchemaDB(t)
+		path, _ := oldSchemaDB(t, FleetAccountUsername)
 		var wg sync.WaitGroup
 		errs := make([]error, 2)
 		start := make(chan struct{})
@@ -248,7 +249,7 @@ func TestSQLiteUpgrade_SimultaneousStarts(t *testing.T) {
 // A backup that fails part way (a full disk) leaves no file behind that could
 // be mistaken for a backup, and the upgrade does not run.
 func TestSQLiteUpgrade_FailedBackupLeavesNoFile(t *testing.T) {
-	path, _ := oldSchemaDB(t)
+	path, _ := oldSchemaDB(t, FleetAccountUsername)
 	prev := vacuumInto
 	vacuumInto = func(_ *sql.DB, backup string) error {
 		if err := os.WriteFile(backup, nil, 0o600); err != nil { // what a full disk leaves
@@ -274,5 +275,43 @@ func TestSQLiteUpgrade_FailedBackupLeavesNoFile(t *testing.T) {
 	var hasPrimary int
 	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('signer_keys') WHERE name = 'is_primary'`).Scan(&hasPrimary); err != nil || hasPrimary != 0 {
 		t.Fatalf("database changed although the backup failed (is_primary present=%d, %v)", hasPrimary, err)
+	}
+}
+
+// A user key's grants all stay live through the upgrade: nothing is retired,
+// and a grant with no expiry gets a full sliding SlidingGrantTTL, so nobody is
+// signed out by it. A second start does not extend the expiry again.
+func TestSQLiteUpgrade_UserKeyKeepsEveryGrant(t *testing.T) {
+	path, keyPub := oldSchemaDB(t, "someone")
+	ctx := context.Background()
+	s, err := NewSQLiteStorage(path)
+	if err != nil {
+		t.Fatalf("open old database: %v", err)
+	}
+	if k, err := s.GetKey(ctx, "key-a"); err != nil || k.SingleGrant {
+		t.Fatalf("GetKey = %+v, %v; want a user key", k, err)
+	}
+	expiry := map[string]time.Time{}
+	for _, c := range []string{"older-client", "newer-client"} {
+		p, err := s.GetPermission(ctx, keyPub, c)
+		if err != nil {
+			t.Fatalf("%s grant after upgrade: %v, want live", c, err)
+		}
+		if !p.SlidingExpiry || p.ExpiresAt == nil || !near(*p.ExpiresAt, time.Now().Add(SlidingGrantTTL)) {
+			t.Fatalf("%s grant = sliding %v expires %v, want sliding ~%v", c, p.SlidingExpiry, p.ExpiresAt, SlidingGrantTTL)
+		}
+		expiry[c] = *p.ExpiresAt
+	}
+	s.Close()
+
+	s, err = NewSQLiteStorage(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s.Close()
+	for c, want := range expiry {
+		if p, err := s.GetPermission(ctx, keyPub, c); err != nil || !p.ExpiresAt.Equal(want) {
+			t.Fatalf("%s after restart = %+v, %v; want expiry unchanged at %v", c, p, err, want)
+		}
 	}
 }
