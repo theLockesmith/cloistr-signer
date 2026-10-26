@@ -236,11 +236,17 @@ func (h *Handler) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request, 
 }
 
 // isAdminClaims reports whether the caller is an admin: a configured admin
-// pubkey, or the stored admin role. Never the username (see IsAdminPubkey).
+// pubkey or account ID, or the stored admin role. Never the username (see
+// IsAdminPubkey).
 func (h *Handler) isAdminClaims(ctx context.Context, claims *auth.JWTClaims) bool {
-	if h.config.Auth.IsAdminPubkey(claims.UserID) {
+	if h.config.Auth.IsAdminPubkey(claims.UserID) || h.config.Auth.IsAdminUserID(claims.UserID) {
 		return true
 	}
 	user, err := h.storage.GetUser(ctx, claims.UserID)
-	return err == nil && user.IsAdmin()
+	return err == nil && h.isAdminUser(user)
+}
+
+// isAdminUser: the stored admin role, or a configured admin account ID.
+func (h *Handler) isAdminUser(user *storage.User) bool {
+	return user.IsAdmin() || h.config.Auth.IsAdminUserID(user.ID)
 }

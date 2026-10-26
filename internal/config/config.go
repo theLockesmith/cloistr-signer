@@ -207,9 +207,26 @@ func (a *AuthConfig) IsAdminPubkey(id string) bool {
 	return false
 }
 
+// IsAdminUserID reports whether id is one of the configured admin account IDs.
+// AdminUserIDs grants admin authorization only (the Users API and page,
+// account deletion, audit logs). Unlike AdminPubkeys it never makes the
+// signer send or accept admin DMs, and it is not a sign-in method.
+func (a *AuthConfig) IsAdminUserID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, uid := range a.AdminUserIDs {
+		if strings.TrimSpace(uid) == id {
+			return true
+		}
+	}
+	return false
+}
+
 // AuthConfig holds authentication configuration
 type AuthConfig struct {
 	AdminPubkeys             []string `yaml:"admin_pubkeys"`
+	AdminUserIDs             []string `yaml:"admin_user_ids"`             // account IDs; authorization only, see IsAdminUserID
 	RequireApproval          bool     `yaml:"require_approval"`           // Require manual approval for unknown clients (default: false, opt-in for security)
 	AuthorizationTimeout     int      `yaml:"authorization_timeout"`      // Timeout in seconds for authorization requests (default: 60)
 	NotifyAdmins             bool     `yaml:"notify_admins"`              // Send DM to admins for pending requests (default: true)
@@ -442,6 +459,15 @@ func Load() (*Config, error) {
 
 	if adminPubkeys := os.Getenv("ADMIN_PUBKEYS"); adminPubkeys != "" {
 		cfg.Auth.AdminPubkeys = strings.Split(adminPubkeys, ",")
+	}
+
+	if adminUserIDs := os.Getenv("ADMIN_USER_IDS"); adminUserIDs != "" {
+		cfg.Auth.AdminUserIDs = nil
+		for _, id := range strings.Split(adminUserIDs, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				cfg.Auth.AdminUserIDs = append(cfg.Auth.AdminUserIDs, id)
+			}
+		}
 	}
 
 	if requireApproval := os.Getenv("REQUIRE_APPROVAL"); requireApproval != "" {

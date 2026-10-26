@@ -837,7 +837,7 @@ func (h *Handler) handleRequests(w http.ResponseWriter, r *http.Request) {
 // handleUsers serves the users management page (admin only)
 func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request) {
 	user := h.getCurrentUser(r)
-	if user == nil || !user.IsAdmin() {
+	if user == nil || !(user.IsAdmin() || h.config.Auth.IsAdminUserID(user.ID)) {
 		http.Redirect(w, r, "/dashboard", http.StatusFound)
 		return
 	}
