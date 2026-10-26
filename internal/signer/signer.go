@@ -922,10 +922,16 @@ func (s *Signer) isMethodAllowed(perm *storage.Permission, method string) bool {
 
 // shouldRequireApproval determines if manual approval is needed for a request.
 // Priority: permission setting -> key setting -> global config
+//
+// The key and global settings gate NEW clients only. A client that holds a
+// grant was approved when the grant was made; reading the key setting for it
+// too sent every request from every already-connected app back to the
+// approval queue. Per-request approval for a granted client is the grant's
+// own explicit RequireApproval.
 func (s *Signer) shouldRequireApproval(ctx context.Context, targetPubkey string, perm *storage.Permission) bool {
-	// 1. Check permission-level override (if permission exists and has explicit setting)
-	if perm != nil && perm.RequireApproval != nil {
-		return *perm.RequireApproval
+	// 1. A grant decides for its own client.
+	if perm != nil {
+		return perm.RequireApproval != nil && *perm.RequireApproval
 	}
 
 	// 2. Check key-level setting
@@ -1152,11 +1158,10 @@ func (s *Signer) handleConnect(ctx context.Context, targetPubkey, clientPubkey s
 		return "", fmt.Errorf("failed to create session: %w", err)
 	}
 
-	// Return pubkey in connect response to save a round-trip on rate-limited relays
-	// Cloistr extension: clients that understand this skip the get_public_key call
-	// Standard NIP-46 clients will receive this as the "ack" and still work
-	// (they typically just check for non-error response)
-	return fmt.Sprintf(`{"pubkey":"%s"}`, targetPubkey), nil
+	// NIP-46: a successful connect is answered with "ack". This used to return
+	// {"pubkey":...} as a Cloistr shortcut, but no Cloistr client read it, and
+	// clients that check for "ack" (NDK, Cloistr Photos) failed the connect.
+	return "ack", nil
 }
 
 // FrostUserSigner exposes the FROST user-cosigner coordinator to the
