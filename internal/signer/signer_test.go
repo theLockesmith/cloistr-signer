@@ -361,8 +361,8 @@ func TestSigner_handleConnect(t *testing.T) {
 		t.Fatalf("handleConnect() error = %v", err)
 	}
 
-	// Connect now returns JSON with pubkey to save a round-trip
-	expected := `{"pubkey":"target123"}`
+	// NIP-46: a successful connect is acknowledged with "ack"
+	expected := "ack"
 	if result != expected {
 		t.Errorf("handleConnect() = %q, want %q", result, expected)
 	}
