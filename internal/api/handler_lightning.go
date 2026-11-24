@@ -348,7 +348,19 @@ func (h *Handler) handleLightningStatus(w http.ResponseWriter, r *http.Request) 
 	// account it opens and waits for POST /lightning/confirm. Nothing is
 	// consumed and no cookie is set here.
 	if !session.IsLink && h.config.Lightning.ConfirmFirstLogin {
-		if _, ok := h.lightningKeyNeedsConfirm(r, session); ok {
+		switch _, state, lookupErr := h.lightningConfirmGate(r, session); {
+		case lookupErr != nil:
+			slog.Error("lightning status: key lookup failed", "error", lookupErr)
+			h.errorResponse(w, http.StatusInternalServerError, "internal error")
+			return
+		case state == lightningConfirmRefuse:
+			// The key behind this authenticated challenge is gone, or it now
+			// belongs to someone else. Fail closed: consume the challenge so
+			// it can never be completed, and never return the 409 the UI
+			// treats as "keep polling" — this is not a pending state.
+			h.refuseLightningChallenge(w, r, sessionID, session.UserID)
+			return
+		case state == lightningConfirmNeeded:
 			user, err := h.storage.GetUser(r.Context(), session.UserID)
 			if err != nil {
 				h.errorResponse(w, http.StatusInternalServerError, "user not found")
@@ -366,19 +378,67 @@ func (h *Handler) handleLightningStatus(w http.ResponseWriter, r *http.Request) 
 	h.completeLightningLogin(w, r, sessionID)
 }
 
-// lightningKeyNeedsConfirm returns the key that signed an authenticated login
-// challenge when this browser has not confirmed the account it opens. The
-// key's confirmed_at never suppresses the prompt: it may have been set from
-// an attacker's browser (see lightning_confirm_cookie.go).
-func (h *Handler) lightningKeyNeedsConfirm(r *http.Request, c *storage.LightningChallenge) (*storage.LightningKey, bool) {
+// refuseLightningChallenge consumes an authenticated challenge and answers
+// with a refusal, never a sign-in and never a 409 that invites more polling.
+// Used when the linking key behind the challenge is missing or no longer
+// belongs to the account the challenge authenticated to — a fail-closed
+// response for both /status and /confirm (review of !241, note 20285).
+func (h *Handler) refuseLightningChallenge(w http.ResponseWriter, r *http.Request, sessionID, userID string) {
+	if _, err := h.storage.ConsumeLightningChallenge(r.Context(), sessionID); err != nil && !errors.Is(err, storage.ErrLightningChallengeNotFound) {
+		slog.Error("lightning: consume challenge on refusal failed", "error", err)
+	}
+	slog.Warn("lightning: refusing login — linking key missing or reassigned since authentication", "user_id", userID)
+	h.jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
+		"success": false,
+		"status":  "unlinked",
+	})
+}
+
+// lightningConfirmState is the outcome of checking an authenticated login
+// challenge's linking key against current storage state.
+type lightningConfirmState int
+
+const (
+	// lightningConfirmSatisfied: the key still belongs to the account the
+	// challenge authenticated to, and this browser already confirmed it (or
+	// confirmation isn't required for some other reason). Proceed.
+	lightningConfirmSatisfied lightningConfirmState = iota
+	// lightningConfirmNeeded: the key still belongs to that account, but
+	// this browser has not confirmed it yet. Show the prompt / require an
+	// explicit answer.
+	lightningConfirmNeeded
+	// lightningConfirmRefuse: the key is gone, or it now belongs to a
+	// DIFFERENT account than the one the challenge authenticated to. This is
+	// never "not required" and never a sign-in: the caller must consume the
+	// challenge and refuse.
+	lightningConfirmRefuse
+)
+
+// lightningConfirmGate classifies an authenticated login challenge's linking
+// key and returns it when live. A storage error other than "not found" is
+// returned as err and must become a 500, never a sign-in. See note 20285 on
+// MR !241: the previous version of this check folded "key missing",
+// "account mismatch" and "already confirmed" into a single bool, so callers
+// could not refuse the first two without also refusing (i.e. silently
+// allowing, via a 409 the UI treats as "keep polling") the third.
+func (h *Handler) lightningConfirmGate(r *http.Request, c *storage.LightningChallenge) (*storage.LightningKey, lightningConfirmState, error) {
 	if c.LinkingKey == "" {
-		return nil, false
+		return nil, lightningConfirmSatisfied, nil
 	}
 	lk, err := h.storage.GetLightningKeyByLinkingKey(r.Context(), c.LinkingKey)
-	if err != nil || lk.UserID != c.UserID || h.lightningBrowserConfirmed(r, lk) {
-		return nil, false
+	if err != nil {
+		if errors.Is(err, storage.ErrLightningKeyNotFound) {
+			return nil, lightningConfirmRefuse, nil
+		}
+		return nil, lightningConfirmSatisfied, err
 	}
-	return lk, true
+	if lk.UserID != c.UserID {
+		return nil, lightningConfirmRefuse, nil
+	}
+	if h.lightningBrowserConfirmed(r, lk) {
+		return lk, lightningConfirmSatisfied, nil
+	}
+	return lk, lightningConfirmNeeded, nil
 }
 
 // completeLightningLogin consumes an authenticated challenge (exactly once
@@ -494,8 +554,27 @@ func (h *Handler) handleLightningConfirm(w http.ResponseWriter, r *http.Request)
 		reply(http.StatusConflict, "pending")
 		return
 	}
-	lk, ok := h.lightningKeyNeedsConfirm(r, c)
-	if !ok {
+	lk, state, lookupErr := h.lightningConfirmGate(r, c)
+	if lookupErr != nil {
+		slog.Error("lightning confirm: key lookup failed", "error", lookupErr)
+		h.errorResponse(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if state == lightningConfirmRefuse {
+		// The key behind this authenticated challenge is gone, or it now
+		// belongs to someone else. Fail closed: consume the challenge and
+		// refuse outright. Never 409 here — this challenge IS authenticated
+		// and DOES have a linking key, so 409 "not_required"/"pending" would
+		// be read by the UI as "keep polling", and the next poll must not be
+		// able to turn into a sign-in either.
+		h.refuseLightningChallenge(w, r, req.SessionID, c.UserID)
+		return
+	}
+	if state == lightningConfirmSatisfied {
+		// Confirmation genuinely isn't needed (already confirmed by this
+		// browser, or no linking key on this challenge). The wallet has
+		// signed and the key is valid — nothing to refuse, just nothing for
+		// /confirm to do; the client should be polling /status instead.
 		reply(http.StatusConflict, "not_required")
 		return
 	}
