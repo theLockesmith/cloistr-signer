@@ -383,9 +383,15 @@ func (h *Handler) handleLightningStatus(w http.ResponseWriter, r *http.Request) 
 // Used when the linking key behind the challenge is missing or no longer
 // belongs to the account the challenge authenticated to — a fail-closed
 // response for both /status and /confirm (review of !241, note 20285).
+// If consuming the challenge fails in storage it answers 500 instead: that
+// is a server fault, not a refusal (review of !254).
 func (h *Handler) refuseLightningChallenge(w http.ResponseWriter, r *http.Request, sessionID, userID string) {
 	if _, err := h.storage.ConsumeLightningChallenge(r.Context(), sessionID); err != nil && !errors.Is(err, storage.ErrLightningChallengeNotFound) {
+		// A storage fault, not a user refusal: the challenge may still be
+		// live, so never report it as one.
 		slog.Error("lightning: consume challenge on refusal failed", "error", err)
+		h.errorResponse(w, http.StatusInternalServerError, "internal error")
+		return
 	}
 	slog.Warn("lightning: refusing login — linking key missing or reassigned since authentication", "user_id", userID)
 	h.jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
